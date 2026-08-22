@@ -6,18 +6,6 @@
 
 #include "rdp_ffi.h"
 
-#if defined(HELLOLG_WITH_SDL) && HELLOLG_WITH_SDL
-#if defined(__has_include)
-#if __has_include(<SDL_webOS.h>)
-#include <SDL_webOS.h>
-#define HELLOLG_CURSOR_HAVE_WEBOS_VISIBILITY 1
-#endif
-#endif
-#endif
-#ifndef HELLOLG_CURSOR_HAVE_WEBOS_VISIBILITY
-#define HELLOLG_CURSOR_HAVE_WEBOS_VISIBILITY 0
-#endif
-
 #include "clog.h"
 
 clog_define(g_native_log_cursor, cLogLevelInfo, cLogFlags_Default, "cursor", NULL);
@@ -35,7 +23,7 @@ void native_cursor_init(NativeCursor *cursor) {
     pthread_mutex_init(&cursor->lock, NULL);
     cursor->desired = NATIVE_CURSOR_DEFAULT;
     atomic_init(&cursor->generation, 0u);
-#if defined(HELLOLG_WITH_SDL) && HELLOLG_WITH_SDL
+#ifdef HELLOLG_TARGET_WEBOS
     /* The platform pointer starts visible; without this the first server-driven hide would
      * be skipped by the "already hidden" short-circuit and the pointer would stay on screen
      * while the server considers it hidden. */
@@ -47,7 +35,7 @@ void native_cursor_destroy(NativeCursor *cursor) {
     if (!cursor) {
         return;
     }
-#if defined(HELLOLG_WITH_SDL) && HELLOLG_WITH_SDL
+#ifdef HELLOLG_TARGET_WEBOS
     if (cursor->cursor) {
         SDL_FreeCursor(cursor->cursor);
         cursor->cursor = NULL;
@@ -252,7 +240,7 @@ void native_cursor_scaled_geometry(uint16_t shape_w, uint16_t shape_h, uint16_t 
     }
 }
 
-#if defined(HELLOLG_WITH_SDL) && HELLOLG_WITH_SDL
+#ifdef HELLOLG_TARGET_WEBOS
 
 static void native_cursor_log_state(uint32_t state) {
     /* State transitions are sparse (unlike motion), and a late unexpected HIDDEN is the
@@ -263,7 +251,7 @@ static void native_cursor_log_state(uint32_t state) {
 }
 
 static bool native_cursor_platform_show(bool visible) {
-#if HELLOLG_CURSOR_HAVE_WEBOS_VISIBILITY
+#if HELLOLG_HAVE_SDL_WEBOS_CURSOR
     /* This webOS API can report SDL_FALSE with no SDL error on firmware where the
      * visibility request is still best-effort. Cursor shapes may be applied repeatedly
      * during motion, so logging every failure here stalls the hot path and can disturb
@@ -550,4 +538,4 @@ void native_cursor_reassert(NativeCursor *cursor) {
     (void)native_cursor_set_visible(cursor, true);
 }
 
-#endif /* HELLOLG_WITH_SDL */
+#endif /* HELLOLG_TARGET_WEBOS */

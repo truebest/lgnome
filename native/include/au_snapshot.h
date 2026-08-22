@@ -17,10 +17,10 @@
  * exactly the state a replay of this snapshot rebuilds in the decoder.
  *
  * Nothing is decoded or transcoded locally; the snapshot is a byte-for-byte replay
- * source. A keyframe restarts the snapshot (only the newest IDR group can seed a
- * decoder), deltas before the first keyframe are ignored, and overflow — e.g. a server
- * that keeps streaming despite suppress — voids the whole snapshot, because a partial
- * delta chain is undecodable.
+ * source. A decoder-seed AU (SPS + PPS before IDR) restarts the snapshot, deltas before
+ * the first seed are ignored, and malformed input or overflow — e.g. a server that
+ * keeps streaming despite suppress — voids the whole snapshot, because a partial delta
+ * chain is undecodable.
  *
  * Thread model: the caller serializes all access (in the native app: app->video_lock).
  */
@@ -33,7 +33,6 @@
 typedef struct NativeAuSnapshotEntry {
     size_t offset; /* into NativeAuSnapshot.buf */
     size_t len;
-    bool is_keyframe;
     uint64_t pts90k;
 } NativeAuSnapshotEntry;
 
@@ -42,8 +41,8 @@ typedef struct NativeAuSnapshot {
     size_t used;
     NativeAuSnapshotEntry entries[NATIVE_AU_SNAPSHOT_MAX_AUS];
     unsigned count;
-    bool armed;   /* appends are accepted */
-    bool has_idr; /* an AU carrying an actual IDR NAL seeded the snapshot */
+    bool armed;            /* appends are accepted */
+    bool has_decoder_seed; /* an AU carrying SPS + PPS before IDR seeded the snapshot */
 } NativeAuSnapshot;
 
 /* Empties the snapshot and (re)allocates the byte buffer; appends are accepted until the
@@ -54,15 +53,15 @@ bool native_au_snapshot_arm(NativeAuSnapshot *snap);
 /* Drops everything and frees the buffer. Safe on a zeroed or already-reset snapshot. */
 void native_au_snapshot_reset(NativeAuSnapshot *snap);
 
-/* Caches one compressed AU. A keyframe restarts the snapshot — but only when the AU
- * really carries an IDR NAL: the transport's is_keyframe flag also fires on parameter-
- * set-only AUs (standalone SPS), which cannot seed a decoder. Deltas (and config-only
- * AUs) arriving before the first IDR are skipped without invalidating the snapshot.
- * Returns false only when this call voided the snapshot (byte or entry overflow). */
-bool native_au_snapshot_append(NativeAuSnapshot *snap, const uint8_t *data, size_t len, bool is_keyframe,
-                               uint64_t pts90k);
+/* Caches one compressed AU. valid_au and decoder_seed are the canonical results from
+ * the native dual-framing scan performed before routing. A decoder seed restarts the
+ * snapshot; valid deltas/config AUs before the first seed are skipped. A malformed AU
+ * after a seed voids the cached chain, while one before the seed is skipped. Returns
+ * false only when this call voided the snapshot (malformed AU or capacity overflow). */
+bool native_au_snapshot_append(NativeAuSnapshot *snap, const uint8_t *data, size_t len, bool valid_au,
+                               bool decoder_seed, uint64_t pts90k);
 
-/* True when a replay would rebuild decodable state: armed and seeded with an IDR. */
+/* True when a replay would rebuild decodable state: armed and seeded with a restart AU. */
 bool native_au_snapshot_ready(const NativeAuSnapshot *snap);
 
 #endif

@@ -7,8 +7,17 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#if defined(HELLOLG_WITH_SDL) && HELLOLG_WITH_SDL
+#ifdef HELLOLG_TARGET_WEBOS
 #include <SDL.h>
+#if defined(__has_include)
+#if __has_include(<SDL_webOS.h>)
+#include <SDL_webOS.h>
+#define HELLOLG_HAVE_SDL_WEBOS_CURSOR 1
+#endif
+#endif
+#endif
+#ifndef HELLOLG_HAVE_SDL_WEBOS_CURSOR
+#define HELLOLG_HAVE_SDL_WEBOS_CURSOR 0
 #endif
 
 /* Server-driven mouse cursor. Shapes and visibility arrive as RDP pointer updates on the
@@ -50,7 +59,7 @@ typedef struct NativeCursor {
     /* Bumped on every submit; lets the SDL thread skip the mutex when idle. */
     atomic_uint generation;
     unsigned applied_generation;
-#if defined(HELLOLG_WITH_SDL) && HELLOLG_WITH_SDL
+#ifdef HELLOLG_TARGET_WEBOS
     SDL_Cursor *cursor; /* SDL thread only */
     /* SDL thread only: what the current SDL cursor was built from/for, so apply can
      * rebuild when the desktop-to-window mapping changes under an unchanged shape. */
@@ -74,7 +83,9 @@ void native_cursor_submit_state(NativeCursor *cursor, uint32_t state);
 
 /* Pure helpers (no SDL, unit-tested). */
 
-/* Nearest-neighbour scale of a tight-stride RGBA image. dst must hold dst_w*dst_h*4. */
+/* Area-average, alpha-premultiplied resample of a tight-stride RGBA image
+ * (nearest-neighbour left fringes around anti-aliased edges). dst must hold
+ * dst_w*dst_h*4. */
 bool native_cursor_scale_rgba(const uint8_t *src, uint16_t src_w, uint16_t src_h, uint8_t *dst,
                               uint16_t dst_w, uint16_t dst_h);
 
@@ -86,7 +97,7 @@ void native_cursor_scaled_geometry(uint16_t shape_w, uint16_t shape_h, uint16_t 
                                    uint16_t window_w, uint16_t window_h, uint16_t *out_w,
                                    uint16_t *out_h, uint16_t *out_hot_x, uint16_t *out_hot_y);
 
-#if defined(HELLOLG_WITH_SDL) && HELLOLG_WITH_SDL
+#ifdef HELLOLG_TARGET_WEBOS
 /* SDL thread: apply pending shape/state; cheap no-op while generation is unchanged. */
 void native_cursor_apply(NativeCursor *cursor, uint16_t desktop_w, uint16_t desktop_h,
                          uint16_t window_w, uint16_t window_h);

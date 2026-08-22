@@ -8,7 +8,7 @@
 #
 # Extra flags pass through, and CC can be overridden — e.g. a fast SDL-code
 # check with the cross compiler:
-#   CC=arm-webos-linux-gnueabi-gcc ./tools/syntax-check-native.sh -DHELLOLG_WITH_SDL=1 ...
+#   CC=arm-webos-linux-gnueabi-gcc ./tools/syntax-check-native.sh -DHELLOLG_TARGET_WEBOS=1 ...
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,13 +17,16 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Files that cannot be syntax-checked on a bare host:
 #   input_evdev.c   — includes libevdev headers (static lib in the webOS sysroot)
-#   ui_preconnect.c — includes LVGL headers (configured only in the cross build)
-excluded=(input_evdev.c ui_preconnect.c)
+#   ui_preconnect*.c — includes LVGL headers (configured only in the cross build)
+excluded=(input_evdev.c 'ui_preconnect*.c')
 
 files=()
 for f in "$repo_root"/native/src/*.c "$repo_root"/native/src/ndl_adapter/*.c \
          "$repo_root"/third_party/backend_ndl/src/*.c; do
   base="$(basename "$f")"
+  if [[ "$base" == ui_preconnect*.c ]]; then
+    continue
+  fi
   for skip in "${excluded[@]}"; do
     if [[ "$base" == "$skip" ]]; then
       continue 2

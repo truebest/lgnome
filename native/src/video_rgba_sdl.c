@@ -16,7 +16,7 @@ struct NativeRgbaSurface {
     uint8_t *pixels;
     size_t pixels_len;
     bool has_frame;
-#if defined(HELLOLG_WITH_SDL) && HELLOLG_WITH_SDL
+#ifdef HELLOLG_TARGET_WEBOS
     SDL_Texture *texture;
     SDL_Renderer *texture_renderer;
     uint16_t texture_width;
@@ -56,7 +56,7 @@ void native_rgba_surface_close(NativeRgbaSurface *surface) {
     if (!surface) {
         return;
     }
-#if defined(HELLOLG_WITH_SDL) && HELLOLG_WITH_SDL
+#ifdef HELLOLG_TARGET_WEBOS
     if (surface->texture) {
         SDL_DestroyTexture(surface->texture);
     }
@@ -92,7 +92,7 @@ NativeRgbaResult native_rgba_surface_resize(NativeRgbaSurface *surface, uint16_t
     surface->width = width;
     surface->height = height;
     surface->has_frame = false;
-#if defined(HELLOLG_WITH_SDL) && HELLOLG_WITH_SDL
+#ifdef HELLOLG_TARGET_WEBOS
     surface->render_copy_failures = 0;
     if (surface->texture) {
         SDL_DestroyTexture(surface->texture);
@@ -167,7 +167,7 @@ int native_rgba_surface_has_frame(const NativeRgbaSurface *surface) {
     return surface && surface->has_frame ? 1 : 0;
 }
 
-#if defined(HELLOLG_WITH_SDL) && HELLOLG_WITH_SDL
+#ifdef HELLOLG_TARGET_WEBOS
 static void native_rgba_drop_texture(NativeRgbaSurface *surface) {
     if (!surface) {
         return;

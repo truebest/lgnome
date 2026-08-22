@@ -35,7 +35,9 @@ report_matches() {
 native_sources=()
 while IFS= read -r -d '' file; do
   case "$file" in
-    */category_log.c|*/fonts/*)
+    */category_log.c|*/native_json.c|*/fonts/*)
+      # category_log.c is the logger engine; native_json.c is the deliberately
+      # log-free JSON scanner (tri-state results, callers report errors).
       continue
       ;;
   esac
@@ -49,7 +51,7 @@ fi
 
 for file in "${native_sources[@]}"; do
   define_count="$(count_matches '^[[:space:]]*clog_define[[:space:]]*\(' "$file")"
-  call_count="$(count_matches '^[[:space:]]*clog(_limited)?[[:space:]]*\(' "$file")"
+  call_count="$(count_matches '^[[:space:]]*clog(_limited|_once)?[[:space:]]*\(' "$file")"
   relative="${file#"$repo_root/"}"
 
   if [[ "$define_count" -ne 1 ]]; then
@@ -57,7 +59,7 @@ for file in "${native_sources[@]}"; do
     failures=$((failures + 1))
   fi
   if [[ "$call_count" -eq 0 ]]; then
-    echo "check-logging-policy: $relative has no clog/clog_limited calls" >&2
+    echo "check-logging-policy: $relative has no clog/clog_limited/clog_once calls" >&2
     failures=$((failures + 1))
   fi
 done

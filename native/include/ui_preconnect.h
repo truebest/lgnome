@@ -7,7 +7,7 @@
 
 #include <SDL.h>
 
-#include "settings_json.h"
+#include "native_settings.h"
 #include "ui_mixer.h"
 
 typedef struct NativePreconnectUi NativePreconnectUi;
@@ -22,10 +22,10 @@ typedef enum NativePreconnectSessionState {
 } NativePreconnectSessionState;
 
 /* The 1920x1080 hub presents four fixed red/green/yellow/blue profiles and opens one
- * profile at a time in its setup drawer. The audio-codec preference is app-global.
- * `sessions` must hold NATIVE_SETTINGS_MAX_SESSIONS entries; they are copied. */
+ * profile at a time in its setup drawer. Audio/capture preferences are app-global,
+ * while camera/microphone exposure is opt-in per profile. Settings are copied. */
 NativePreconnectUi *native_preconnect_ui_create(SDL_Window *window, SDL_Renderer *renderer,
-                                                const NativeSessionConfig *sessions, uint16_t audio_codec);
+                                                const NativeSettings *settings);
 void native_preconnect_ui_destroy(NativePreconnectUi *ui);
 void native_preconnect_ui_resize(NativePreconnectUi *ui, int width, int height);
 void native_preconnect_ui_tick(NativePreconnectUi *ui);
@@ -79,6 +79,9 @@ bool native_preconnect_ui_read_current(NativePreconnectUi *ui, char *host, size_
 /* Copies slot `slot`'s stored name, host/port, credentials, fps, and duck mask into
  * *out. Returns false (leaving *out untouched) for an out-of-range slot or invalid port. */
 bool native_preconnect_ui_get_slot_values(NativePreconnectUi *ui, int slot, NativeSessionConfig *out);
+/* Copies the global camera/microphone form values into the matching fields of *settings.
+ * Session-level redirect flags are returned by get_slot_values. */
+bool native_preconnect_ui_get_capture_values(NativePreconnectUi *ui, NativeSettings *settings);
 /* One-shot: returns true once per Connect press; *slot tells which session the values
  * belong to. */
 bool native_preconnect_ui_take_connect(NativePreconnectUi *ui, int *slot, char *host, size_t host_cap, uint16_t *port,
@@ -95,8 +98,12 @@ bool native_preconnect_ui_take_hub_close(NativePreconnectUi *ui);
 void native_preconnect_ui_cancel_hub_close(NativePreconnectUi *ui);
 bool native_preconnect_ui_take_save(NativePreconnectUi *ui, int *slot, uint16_t *audio_codec);
 bool native_preconnect_ui_take_delete(NativePreconnectUi *ui, int *slot);
+/* One-shot app-global camera/microphone settings save from the HUB camera drawer. */
+bool native_preconnect_ui_take_capture_save(NativePreconnectUi *ui);
 /* Persistence acknowledgements keep the drawer honest when storage is unavailable. */
 void native_preconnect_ui_finish_save(NativePreconnectUi *ui, int slot, bool success, const char *status);
+void native_preconnect_ui_finish_capture_save(NativePreconnectUi *ui, bool success,
+                                              const char *status);
 void native_preconnect_ui_finish_connect_save(NativePreconnectUi *ui, int slot, bool success, bool persisted,
                                                const char *status);
 void native_preconnect_ui_finish_delete(NativePreconnectUi *ui, int slot, bool success, const char *status);

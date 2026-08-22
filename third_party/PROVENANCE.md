@@ -6,10 +6,13 @@ and browser WASM bundle were removed and are not runtime dependencies of the nat
 
 ## backend_ndl (first-party submodule)
 
-- Path: `third_party/backend_ndl` (git submodule —
-  `git@bitbucket.org:kodavr/backend_ndl.git`)
-- Version: 0.4.0
-- Pinned commit: `9d28f59903932eec1c272bc4b98d4bcc64be4248`
+- Path: `third_party/backend_ndl` (git submodule)
+- Development remote: `git@bitbucket.org:kodavr/backend_ndl.git` (private)
+- Public mirror: https://github.com/truebest/backend_ndl — an append-only chain of release
+  snapshots. Released `.gitmodules` points here, so a published tag resolves without
+  access to the development remote; the two carry the same tree at every release.
+- Version: 0.5.0
+- Pinned commit: `3d8658833eccba3407537311147d187b5606d321`
 - License: MIT; see `third_party/backend_ndl/LICENSE`
 - Native usage: runtime-loaded NDL DirectMedia facade wrapper for hardware video and mixed
   PCM audio. Firmware NDL binaries and SDK headers are not redistributed.
@@ -18,9 +21,9 @@ and browser WASM bundle were removed and are not runtime dependencies of the nat
 
 - Path: `third_party/IronRDP` (git submodule — gnomecast fork
   https://github.com/truebest/IronRDP, branch `gnome-rdp-support`)
+- Pinned commit: `eb07a79d89940bfeca28514ebaddf4303b226406`
 - Upstream: https://github.com/Devolutions/IronRDP
-- Base commit and fork delta provenance: see `third_party/IronRDP/PROVENANCE.md`; a mirror
-  patch record is kept at `patches/ironrdp/0001-gnome-rdp-support.patch`
+- Base commit and fork delta provenance: see `third_party/IronRDP/PROVENANCE.md`.
 - License: MIT OR Apache-2.0; see `third_party/IronRDP/LICENSE-MIT` and
   `third_party/IronRDP/LICENSE-APACHE`
 - Native usage: RDP connector/session/EGFX protocol, AVC420 passthrough hooks, and

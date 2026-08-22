@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 #include "audio_pipeline.h"
-#include "settings_json.h"
+#include "native_settings.h"
 
 /* Volume-mixer overlay: one channel per session slot — a dBFS fader (bottom stop = full
  * mute, an unmarked +6 dB headroom above the 0 line) over an L/R pair of live post-fader
@@ -51,10 +51,28 @@
  * The bottom stop maps to 0: the fader floor is a full mute, not an audible -60 dB. */
 int32_t native_ui_mixer_gain_db_to_q15(int gain_db);
 
-#if defined(HELLOLG_WITH_SDL) && HELLOLG_WITH_SDL
-#include <SDL.h>
+/* Pointer support (LVGL floating-console layout; pure arithmetic, window coordinates).
+ * hit_test: true when (x,y) lands inside the rounded console, with *slot the channel (or -1 over
+ * padding/gaps) and *zone the control under (x,y): the fader track (a click there jumps
+ * the knob; elsewhere it only selects), or — in the bottom controls band — the M plate,
+ * the duck switch, or the S plate. fader_db_at: the fader value for y — clamped to the
+ * track and snapped onto the 3 dB steps — for click-jump and drag. */
+typedef enum NativeUiMixerHit {
+    NATIVE_UI_MIXER_HIT_BODY = 0, /* inside the channel, on no control: select only */
+    NATIVE_UI_MIXER_HIT_FADER,
+    NATIVE_UI_MIXER_HIT_DUCK,
+    NATIVE_UI_MIXER_HIT_MUTE,
+    NATIVE_UI_MIXER_HIT_SOLO,
+} NativeUiMixerHit;
+bool native_ui_mixer_hit_test(int win_w, int win_h, int x, int y, int *slot, NativeUiMixerHit *zone);
+int native_ui_mixer_fader_db_at(int win_h, int y);
 
-#if defined(HELLOLG_WITH_PRECONNECT_UI) && HELLOLG_WITH_PRECONNECT_UI
+/* The MASTER fader value for y: system volume 0..100, clamped to the track (integer
+ * steps — the system volume's own granularity). */
+int native_ui_mixer_fader_pct_at(int win_h, int y);
+
+#ifdef HELLOLG_TARGET_WEBOS
+#include <SDL.h>
 
 typedef struct NativeUiMixer NativeUiMixer;
 
@@ -92,27 +110,6 @@ void native_ui_mixer_render(NativeUiMixer *mixer, const int32_t (*peaks)[2], con
                             unsigned connected_mask, int active_slot, unsigned duck_mask,
                             unsigned mute_mask, unsigned solo_mask, uint32_t now_ticks);
 
-/* Pointer support (LVGL floating-console layout; pure arithmetic, window coordinates).
- * hit_test: true when (x,y) lands inside the rounded console, with *slot the channel (or -1 over
- * padding/gaps) and *zone the control under (x,y): the fader track (a click there jumps
- * the knob; elsewhere it only selects), or — in the bottom controls band — the M plate,
- * the duck switch, or the S plate. fader_db_at: the fader value for y — clamped to the
- * track and snapped onto the 3 dB steps — for click-jump and drag. */
-typedef enum NativeUiMixerHit {
-    NATIVE_UI_MIXER_HIT_BODY = 0, /* inside the channel, on no control: select only */
-    NATIVE_UI_MIXER_HIT_FADER,
-    NATIVE_UI_MIXER_HIT_DUCK,
-    NATIVE_UI_MIXER_HIT_MUTE,
-    NATIVE_UI_MIXER_HIT_SOLO,
-} NativeUiMixerHit;
-bool native_ui_mixer_hit_test(int win_w, int win_h, int x, int y, int *slot, NativeUiMixerHit *zone);
-int native_ui_mixer_fader_db_at(int win_h, int y);
-
-/* The MASTER fader value for y: system volume 0..100, clamped to the track (integer
- * steps — the system volume's own granularity). */
-int native_ui_mixer_fader_pct_at(int win_h, int y);
-
-#endif /* HELLOLG_WITH_PRECONNECT_UI */
-#endif /* HELLOLG_WITH_SDL */
+#endif /* HELLOLG_TARGET_WEBOS */
 
 #endif

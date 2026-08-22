@@ -1,87 +1,24 @@
 #ifndef GNOMECAST_SETTINGS_JSON_H
 #define GNOMECAST_SETTINGS_JSON_H
 
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
 #include <stdio.h>
 
-/* Application settings model + hand-rolled JSON (de)serialization, split out of main.c so
- * the multi-session config logic is host-testable. Two persisted formats are understood:
+#include "native_settings.h"
+
+/* Hand-rolled settings JSON (de)serialization, split out of main.c so the
+ * multi-session config logic is host-testable. Two persisted formats are understood:
  *
  *   current (written): { "sessions": [ { "slot": "green", "name": ..., "host": ..., "port": n,
  *                    "username": ..., "password": ..., "domain": ..., "fps": n },
  *                    { "slot": "yellow", ... } ],
- *                    "wheelStep": n, "wheelScrollDivisor": n, "audioCodec": "auto" }
+ *                    "wheelStep": n, "wheelScrollDivisor": n, "audioCodec": "auto",
+ *                    "cameraEnabled": bool, "cameraDeviceId": ...,
+ *                    "audioInputEnabled": bool, "audioInputDeviceId": ... }
  *   legacy (read): the old flat single-session object (host/port/username/password/domain/
  *                  fps/wheelStep/...) — applied to the green slot.
  *
  * Launch parameters, CLI flags and config.local.json keep the legacy flat shape and target
  * the green slot through the same native_settings_apply_json entry point. */
-
-#define NATIVE_SETTINGS_STRING_MAX 512u
-/* Remote color-button slots, in the remote's own button order: red, green, yellow, blue.
- * All four color keys are sessions; app exit is system-driven (webOS EXIT/home). */
-#define NATIVE_SETTINGS_MAX_SESSIONS 4
-
-#define NATIVE_SESSION_SLOT_RED 0
-#define NATIVE_SESSION_SLOT_GREEN 1
-#define NATIVE_SESSION_SLOT_YELLOW 2
-#define NATIVE_SESSION_SLOT_BLUE 3
-
-/* Highest valid duck_mask value: every other slot ducks this one (own bit ignored). */
-#define NATIVE_SETTINGS_DUCK_MASK_ALL ((1u << NATIVE_SETTINGS_MAX_SESSIONS) - 1u)
-
-typedef struct NativeSessionConfig {
-    /* Optional human-facing profile label. Empty keeps the color/host fallback used by
-     * callers and by settings written before the field was introduced. */
-    char name[NATIVE_SETTINGS_STRING_MAX];
-    char host[NATIVE_SETTINGS_STRING_MAX];
-    char username[NATIVE_SETTINGS_STRING_MAX];
-    char password[NATIVE_SETTINGS_STRING_MAX];
-    char domain[NATIVE_SETTINGS_STRING_MAX];
-    uint16_t port;
-    uint16_t fps;
-    /* Which slots' audio ducks THIS session -12 dB while it is on screen ("duckTriggers"
-     * JSON key, bit = slot index, own bit ignored; default: nobody — ducking is opt-in).
-     * Toggled from the mixer overlay's channel color-bar buttons, shown relative to the
-     * active session. (Renamed from a short-lived "duckMask" key whose builds wrote an
-     * all-on default; the old key is deliberately ignored so those masks reset.) */
-    uint16_t duck_mask;
-} NativeSessionConfig;
-
-/* Global audio codec preference ("audioCodec" JSON key). AUTO advertises Opus+PCM and
- * the server picks Opus (~96kbps, in-process decode); PCM advertises PCM only for a
- * lossless stream (~1.4Mbps per session). Global, not per-slot; per-source converters
- * normalize simultaneous 44.1/48 kHz streams into the fixed 48 kHz graph. */
-#define NATIVE_AUDIO_CODEC_AUTO 0
-#define NATIVE_AUDIO_CODEC_PCM 1
-
-typedef struct NativeSettings {
-    NativeSessionConfig sessions[NATIVE_SETTINGS_MAX_SESSIONS];
-    /* Initial desktop hint; runtime-only (never persisted, forced to 1920x1080 on connect). */
-    uint16_t width;
-    uint16_t height;
-    uint16_t wheel_step;
-    uint16_t wheel_scroll_divisor;
-    uint16_t audio_codec; /* NATIVE_AUDIO_CODEC_* */
-} NativeSettings;
-
-/* Human-facing slot name ("green"/"yellow"); "?" for out-of-range indices. */
-const char *native_session_slot_name(int slot);
-
-void native_settings_defaults(NativeSettings *settings);
-
-/* One-release compatibility notice shared by JSON and CLI parsing. */
-void native_settings_warn_deprecated_audio_prebuffer(void);
-
-/* Low-level JSON helpers (shared with main.c's launch-parameter handling).
- * native_json_read_* return 1 = read, 0 = key absent, -1 = present but invalid. */
-const char *native_json_skip_ws(const char *p);
-const char *native_json_find_value(const char *json, const char *key);
-int native_json_read_string(const char *json, const char *key, char *out, size_t cap);
-int native_json_read_u16(const char *json, const char *key, uint16_t min_value, uint16_t max_value, uint16_t *out);
-int native_json_read_bool(const char *json, const char *key, bool *out);
 
 /* True when the JSON contains any recognized settings key (legacy flat or "sessions"). */
 bool native_settings_json_has_rdp_key(const char *json);
@@ -94,8 +31,5 @@ bool native_settings_apply_json(NativeSettings *settings, const char *json, cons
 
 /* Serializes the current session-array JSON to an open stream. Returns false on write error. */
 bool native_settings_write_json(const NativeSettings *settings, FILE *file);
-
-/* Atomic save (0600 temp file + rename), mirroring the old persisted-config writer. */
-bool native_settings_save_file(const NativeSettings *settings, const char *path);
 
 #endif

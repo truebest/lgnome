@@ -10,15 +10,32 @@ static uint32_t read_be32(const uint8_t *p) {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
 }
 
-static void scan_nal_type(uint8_t nal_header, NativeH264Info *info) {
-    uint8_t nal_type = nal_header & 0x1f;
+static bool scan_nal(const uint8_t *nal, size_t nal_len, NativeH264Info *info) {
+    if (!nal || nal_len == 0u || (nal[0] & 0x80u) != 0u) {
+        return false;
+    }
+    uint8_t nal_type = nal[0] & 0x1f;
+    if (nal_type == 0u) {
+        return false;
+    }
+    if (nal_type >= 1u && nal_type <= 5u) {
+        info->has_vcl = true;
+    }
     if (nal_type == 7) {
         info->has_sps = true;
+        info->sps.data = nal;
+        info->sps.len = nal_len;
     } else if (nal_type == 8) {
         info->has_pps = true;
+        info->pps.data = nal;
+        info->pps.len = nal_len;
     } else if (nal_type == 5) {
         info->has_idr = true;
+        if (info->has_sps && info->has_pps) {
+            info->can_seed_decoder = true;
+        }
     }
+    return true;
 }
 
 NativeH264Result native_h264_avc_annexb_size(const uint8_t *data, size_t len, NativeH264Info *info, size_t *out_len) {
@@ -52,7 +69,10 @@ NativeH264Result native_h264_avc_annexb_size(const uint8_t *data, size_t len, Na
             clog_limited(cLogLevelWarning, 2, 5000, "AVC-to-Annex-B size overflow for %zu-byte AU", len);
             return NATIVE_H264_INVALID;
         }
-        scan_nal_type(data[pos], dst_info);
+        if (!scan_nal(data + pos, nal_len, dst_info)) {
+            clog_limited(cLogLevelDebug, 2, 5000, "AVC probe rejected invalid NAL at offset %zu", pos);
+            return NATIVE_H264_INVALID;
+        }
         dst_info->nal_count++;
         *out_len += 4 + (size_t)nal_len;
         pos += nal_len;
@@ -111,6 +131,9 @@ NativeH264Result native_h264_scan_annexb(const uint8_t *data, size_t len, Native
     size_t prefix_pos = 0;
     size_t prefix_len = 0;
     while (find_annexb_prefix(data, len, pos, &prefix_pos, &prefix_len)) {
+        if (info->nal_count == 0u) {
+            info->starts_with_annexb_start_code = prefix_pos == 0u;
+        }
         size_t nal_start = prefix_pos + prefix_len;
         size_t next_prefix_pos = len;
         size_t next_prefix_len = 0;
@@ -118,10 +141,11 @@ NativeH264Result native_h264_scan_annexb(const uint8_t *data, size_t len, Native
             (void)next_prefix_len;
         }
 
-        if (nal_start < next_prefix_pos) {
-            scan_nal_type(data[nal_start], info);
-            info->nal_count++;
+        if (nal_start >= next_prefix_pos || !scan_nal(data + nal_start, next_prefix_pos - nal_start, info)) {
+            clog_limited(cLogLevelDebug, 2, 5000, "Annex-B probe rejected invalid NAL at offset %zu", nal_start);
+            return NATIVE_H264_INVALID;
         }
+        info->nal_count++;
 
         pos = next_prefix_pos;
     }
@@ -131,6 +155,17 @@ NativeH264Result native_h264_scan_annexb(const uint8_t *data, size_t len, Native
         return NATIVE_H264_INVALID;
     }
     return NATIVE_H264_OK;
+}
+
+NativeH264Result native_h264_scan_au(const uint8_t *data, size_t len, NativeH264Info *info) {
+    if (!info) {
+        clog_limited(cLogLevelWarning, 2, 5000, "invalid raw AU scan arguments (info=NULL)");
+        return NATIVE_H264_INVALID;
+    }
+    if (native_h264_scan_avc(data, len, info) == NATIVE_H264_OK) {
+        return NATIVE_H264_OK;
+    }
+    return native_h264_scan_annexb(data, len, info);
 }
 
 NativeH264Result native_h264_avc_to_annexb(const uint8_t *data, size_t len, uint8_t *out, size_t out_cap, size_t *out_len) {
@@ -177,5 +212,5 @@ bool native_h264_annexb_is_keyframe(const uint8_t *data, size_t len) {
     if (native_h264_scan_annexb(data, len, &info) != NATIVE_H264_OK) {
         return false;
     }
-    return info.has_idr && (info.has_sps || info.has_pps);
+    return info.can_seed_decoder;
 }

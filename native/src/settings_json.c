@@ -4,202 +4,17 @@
 
 #include "settings_json.h"
 
-#include <ctype.h>
-#include <errno.h>
-#include <fcntl.h>
+#include "native_json.h"
+
+#include "camera_v4l2.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
-#include "config_paths.h"
 
 #include "clog.h"
 
 clog_define(g_native_log_config, cLogLevelInfo, cLogFlags_Default, "config.settings", NULL);
-
-const char *native_session_slot_name(int slot) {
-    switch (slot) {
-    case NATIVE_SESSION_SLOT_RED:
-        return "red";
-    case NATIVE_SESSION_SLOT_GREEN:
-        return "green";
-    case NATIVE_SESSION_SLOT_YELLOW:
-        return "yellow";
-    case NATIVE_SESSION_SLOT_BLUE:
-        return "blue";
-    default:
-        return "?";
-    }
-}
-
-void native_settings_defaults(NativeSettings *settings) {
-    memset(settings, 0, sizeof(*settings));
-    for (int i = 0; i < NATIVE_SETTINGS_MAX_SESSIONS; i++) {
-        settings->sessions[i].port = 3389;
-        settings->sessions[i].fps = 60;
-        settings->sessions[i].duck_mask = 0; /* ducking is opt-in, per channel */
-    }
-    (void)snprintf(settings->sessions[NATIVE_SESSION_SLOT_GREEN].host,
-                   sizeof(settings->sessions[NATIVE_SESSION_SLOT_GREEN].host), "127.0.0.1");
-    settings->width = 1920;
-    settings->height = 1080;
-    settings->wheel_step = 60;
-    settings->wheel_scroll_divisor = 1;
-    settings->audio_codec = NATIVE_AUDIO_CODEC_AUTO;
-}
-
-void native_settings_warn_deprecated_audio_prebuffer(void) {
-    static bool warned;
-    if (!warned) {
-        clog(cLogLevelWarning,
-             "audioPrebufferMs/--audio-prebuffer-ms is deprecated and ignored; adaptive buffering is always enabled");
-        warned = true;
-    }
-}
-
-const char *native_json_skip_ws(const char *p) {
-    while (p && *p && isspace((unsigned char)*p)) {
-        p++;
-    }
-    return p;
-}
-
-const char *native_json_find_value(const char *json, const char *key) {
-    char pattern[64];
-    int n = snprintf(pattern, sizeof(pattern), "\"%s\"", key);
-    if (n <= 0 || (size_t)n >= sizeof(pattern)) {
-        return NULL;
-    }
-
-    const char *p = json;
-    while ((p = strstr(p, pattern)) != NULL) {
-        const char *after_key = native_json_skip_ws(p + (size_t)n);
-        if (*after_key == ':') {
-            return native_json_skip_ws(after_key + 1);
-        }
-        p += (size_t)n;
-    }
-    return NULL;
-}
-
-static int hex_value(char c) {
-    if (c >= '0' && c <= '9') {
-        return c - '0';
-    }
-    if (c >= 'a' && c <= 'f') {
-        return c - 'a' + 10;
-    }
-    if (c >= 'A' && c <= 'F') {
-        return c - 'A' + 10;
-    }
-    return -1;
-}
-
-int native_json_read_string(const char *json, const char *key, char *out, size_t cap) {
-    const char *p = native_json_find_value(json, key);
-    if (!p) {
-        return 0;
-    }
-    if (*p != '"') {
-        return -1;
-    }
-    p++;
-
-    size_t written = 0;
-    while (*p && *p != '"') {
-        unsigned char ch = (unsigned char)*p++;
-        if (ch < 0x20) {
-            return -1;
-        }
-        if (ch == '\\') {
-            ch = (unsigned char)*p++;
-            switch (ch) {
-            case '"':
-            case '\\':
-            case '/':
-                break;
-            case 'b':
-                ch = '\b';
-                break;
-            case 'f':
-                ch = '\f';
-                break;
-            case 'n':
-                ch = '\n';
-                break;
-            case 'r':
-                ch = '\r';
-                break;
-            case 't':
-                ch = '\t';
-                break;
-            case 'u': {
-                /* Read the four hex digits left to right, stopping at the first non-hex
-                 * character. hex_value('\0') is negative, so a string ending inside the
-                 * escape (e.g. "\u" or "\u0") short-circuits before p[1..3] are touched —
-                 * argv-backed launch-parameter strings have no trailing slack bytes, so an
-                 * unconditional p[1..3] read there is out of bounds. */
-                int h0 = hex_value(p[0]);
-                int h1 = h0 < 0 ? -1 : hex_value(p[1]);
-                int h2 = h1 < 0 ? -1 : hex_value(p[2]);
-                int h3 = h2 < 0 ? -1 : hex_value(p[3]);
-                if (h0 != 0 || h1 != 0 || h2 < 0 || h3 < 0) {
-                    return -1;
-                }
-                ch = (unsigned char)((h2 << 4) | h3);
-                p += 4;
-                break;
-            }
-            default:
-                return -1;
-            }
-        }
-        if (written + 1 >= cap) {
-            return -1;
-        }
-        out[written++] = (char)ch;
-    }
-
-    if (*p != '"') {
-        return -1;
-    }
-    out[written] = '\0';
-    return 1;
-}
-
-int native_json_read_u16(const char *json, const char *key, uint16_t min_value, uint16_t max_value, uint16_t *out) {
-    const char *p = native_json_find_value(json, key);
-    if (!p) {
-        return 0;
-    }
-
-    errno = 0;
-    char *end = NULL;
-    unsigned long value = strtoul(p, &end, 10);
-    if (errno != 0 || end == p || value < (unsigned long)min_value || value > (unsigned long)max_value) {
-        return -1;
-    }
-    *out = (uint16_t)value;
-    return 1;
-}
-
-int native_json_read_bool(const char *json, const char *key, bool *out) {
-    const char *p = native_json_find_value(json, key);
-    if (!p) {
-        return 0;
-    }
-    if (strncmp(p, "true", 4) == 0) {
-        *out = true;
-        return 1;
-    }
-    if (strncmp(p, "false", 5) == 0) {
-        *out = false;
-        return 1;
-    }
-    return -1;
-}
 
 static bool apply_json_string(const char *json, const char *key, char *dest, size_t cap, const char *source) {
     int result = native_json_read_string(json, key, dest, cap);
@@ -240,6 +55,38 @@ static bool apply_json_u16(const char *json, const char *key, uint16_t min_value
     return true;
 }
 
+static bool apply_json_i16(const char *json, const char *key, int16_t min_value,
+                           int16_t max_value, int16_t *dest,
+                           const char *source) {
+    int16_t value = 0;
+    int result = native_json_read_i16(json, key, min_value, max_value, &value);
+    if (result < 0) {
+        clog(cLogLevelError,
+             "invalid signed numeric value for config field %s in %s", key,
+             source);
+        return false;
+    }
+    if (result > 0) {
+        *dest = value;
+    }
+    return true;
+}
+
+static bool apply_json_bool(const char *json, const char *key, bool *dest,
+                            const char *source) {
+    bool value = false;
+    int result = native_json_read_bool(json, key, &value);
+    if (result < 0) {
+        clog(cLogLevelError, "invalid boolean value for config field %s in %s",
+             key, source);
+        return false;
+    }
+    if (result > 0) {
+        *dest = value;
+    }
+    return true;
+}
+
 /* Session-object fields shared by the legacy flat format and session-array entries. */
 static bool apply_session_json(NativeSessionConfig *session, const char *json, const char *source) {
     return apply_session_name_json(session, json, source) &&
@@ -249,7 +96,13 @@ static bool apply_session_json(NativeSessionConfig *session, const char *json, c
            apply_json_string(json, "domain", session->domain, sizeof(session->domain), source) &&
            apply_json_u16(json, "port", 1, UINT16_MAX, &session->port, source) &&
            apply_json_u16(json, "fps", 1, 240, &session->fps, source) &&
-           apply_json_u16(json, "duckTriggers", 0, NATIVE_SETTINGS_DUCK_MASK_ALL, &session->duck_mask, source);
+           apply_json_u16(json, "duckTriggers", 0,
+                          NATIVE_SETTINGS_DUCK_MASK_ALL, &session->duck_mask,
+                          source) &&
+           apply_json_bool(json, "cameraRedirect", &session->camera_redirect,
+                           source) &&
+           apply_json_bool(json, "audioInputRedirect",
+                           &session->audio_input_redirect, source);
 }
 
 static bool apply_audio_codec_json(NativeSettings *settings, const char *json, const char *source) {
@@ -282,9 +135,41 @@ static bool apply_global_json(NativeSettings *settings, const char *json, const 
     if (deprecated > 0) {
         native_settings_warn_deprecated_audio_prebuffer();
     }
-    return apply_json_u16(json, "wheelStep", 1, 120, &settings->wheel_step, source) &&
-           apply_json_u16(json, "wheelScrollDivisor", 1, 120, &settings->wheel_scroll_divisor, source) &&
-           apply_audio_codec_json(settings, json, source);
+    bool ok =
+        apply_json_u16(json, "wheelStep", 1, 120, &settings->wheel_step, source) &&
+        apply_json_u16(json, "wheelScrollDivisor", 1, 120,
+                       &settings->wheel_scroll_divisor, source) &&
+        apply_audio_codec_json(settings, json, source) &&
+        apply_json_bool(json, "cameraEnabled", &settings->camera_enabled,
+                        source) &&
+        apply_json_string(json, "cameraDeviceId", settings->camera_device_id,
+                          sizeof(settings->camera_device_id), source) &&
+        apply_json_u16(json, "cameraWidth", NATIVE_CAMERA_MIN_WIDTH,
+                       NATIVE_CAMERA_MAX_WIDTH, &settings->camera_width,
+                       source) &&
+        apply_json_u16(json, "cameraHeight", NATIVE_CAMERA_MIN_HEIGHT,
+                       NATIVE_CAMERA_MAX_HEIGHT, &settings->camera_height,
+                       source) &&
+        apply_json_u16(json, "cameraFps", 1, NATIVE_CAMERA_MAX_FPS,
+                       &settings->camera_fps,
+                       source) &&
+        apply_json_bool(json, "audioInputEnabled",
+                        &settings->audio_input_enabled, source) &&
+        apply_json_string(json, "audioInputDeviceId",
+                          settings->audio_input_device_id,
+                          sizeof(settings->audio_input_device_id), source) &&
+        apply_json_i16(json, "audioInputGainDb", -12, 18,
+                       &settings->audio_input_gain_db, source);
+    if (!ok) {
+        return false;
+    }
+    if ((settings->camera_width & 1u) != 0u ||
+        (settings->camera_height & 1u) != 0u) {
+        clog(cLogLevelError,
+             "camera dimensions must be even in %s", source);
+        return false;
+    }
+    return true;
 }
 
 /* Locates the JSON object for array entry `index` inside the "sessions" array. String-aware
@@ -411,7 +296,11 @@ bool native_settings_json_has_rdp_key(const char *json) {
     static const char *keys[] = {"sessions",          "host",       "username",   "password",
                                  "domain",            "port",       "width",      "height",
                                  "fps",               "wheelStep",  "wheelScrollDivisor",
-                                 "audioPrebufferMs", "audioCodec", "duckTriggers"};
+                                 "audioPrebufferMs", "audioCodec", "duckTriggers",
+                                 "cameraEnabled", "cameraDeviceId", "cameraWidth",
+                                 "cameraHeight", "cameraFps", "cameraRedirect",
+                                 "audioInputEnabled", "audioInputDeviceId",
+                                 "audioInputGainDb", "audioInputRedirect"};
     for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
         if (native_json_find_value(json, keys[i])) {
             return true;
@@ -523,8 +412,12 @@ static bool write_session_json(const NativeSessionConfig *session, int slot, FIL
            write_json_string(file, session->username) && fprintf(file, ", \"password\": ") >= 0 &&
            write_json_string(file, session->password) && fprintf(file, ", \"domain\": ") >= 0 &&
            write_json_string(file, session->domain) &&
-           fprintf(file, ", \"fps\": %u, \"duckTriggers\": %u }", (unsigned)session->fps,
-                   (unsigned)session->duck_mask) >= 0;
+           fprintf(file,
+                   ", \"fps\": %u, \"duckTriggers\": %u, "
+                   "\"cameraRedirect\": %s, \"audioInputRedirect\": %s }",
+                   (unsigned)session->fps, (unsigned)session->duck_mask,
+                   session->camera_redirect ? "true" : "false",
+                   session->audio_input_redirect ? "true" : "false") >= 0;
 }
 
 bool native_settings_write_json(const NativeSettings *settings, FILE *file) {
@@ -539,57 +432,26 @@ bool native_settings_write_json(const NativeSettings *settings, FILE *file) {
             return false;
         }
     }
-    return fprintf(file,
-                   "  ],\n  \"wheelStep\": %u,\n  \"wheelScrollDivisor\": %u,\n"
-                   "  \"audioCodec\": \"%s\"\n}\n",
-                   (unsigned)settings->wheel_step, (unsigned)settings->wheel_scroll_divisor,
-                   settings->audio_codec == NATIVE_AUDIO_CODEC_PCM ? "pcm" : "auto") >= 0;
-}
-
-bool native_settings_save_file(const NativeSettings *settings, const char *path) {
-    char temp_path[NATIVE_PERSISTED_CONFIG_PATH_MAX + 16u];
-    int n = snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
-    if (n <= 0 || (size_t)n >= sizeof(temp_path)) {
-        clog(cLogLevelError, "persisted config path is too long");
+    if (fprintf(file,
+                "  ],\n  \"wheelStep\": %u,\n  \"wheelScrollDivisor\": %u,\n"
+                "  \"audioCodec\": \"%s\",\n  \"cameraEnabled\": %s,\n"
+                "  \"cameraDeviceId\": ",
+                (unsigned)settings->wheel_step,
+                (unsigned)settings->wheel_scroll_divisor,
+                settings->audio_codec == NATIVE_AUDIO_CODEC_PCM ? "pcm" : "auto",
+                settings->camera_enabled ? "true" : "false") < 0 ||
+        !write_json_string(file, settings->camera_device_id) ||
+        fprintf(file,
+                ",\n  \"cameraWidth\": %u,\n  \"cameraHeight\": %u,\n"
+                "  \"cameraFps\": %u,\n  \"audioInputEnabled\": %s,\n"
+                "  \"audioInputDeviceId\": ",
+                (unsigned)settings->camera_width,
+                (unsigned)settings->camera_height,
+                (unsigned)settings->camera_fps,
+                settings->audio_input_enabled ? "true" : "false") < 0 ||
+        !write_json_string(file, settings->audio_input_device_id)) {
         return false;
     }
-
-    /* Create the temp file atomically at 0600 (before any secret is written) and refuse to
-     * follow a symlink or reuse an existing file at the predictable .tmp name, so a local
-     * attacker can neither read the plaintext password through an open window nor redirect
-     * the write to clobber another file. Clear our own stale temp from a prior crash first;
-     * O_EXCL|O_NOFOLLOW then fails safely if anyone raced a file/symlink into place. */
-    (void)unlink(temp_path);
-    int temp_fd = open(temp_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR);
-    if (temp_fd < 0) {
-        clog(cLogLevelError, "failed to create persisted config temp file %s for write: %s", temp_path,
-             strerror(errno));
-        return false;
-    }
-    FILE *file = fdopen(temp_fd, "wb");
-    if (!file) {
-        clog(cLogLevelError, "failed to open persisted config temp file %s for write: %s", temp_path,
-             strerror(errno));
-        close(temp_fd);
-        (void)unlink(temp_path);
-        return false;
-    }
-
-    bool ok = native_settings_write_json(settings, file);
-    if (fclose(file) != 0) {
-        ok = false;
-    }
-    if (!ok) {
-        remove(temp_path);
-        clog(cLogLevelError, "failed to write persisted config");
-        return false;
-    }
-    if (rename(temp_path, path) != 0) {
-        remove(temp_path);
-        clog(cLogLevelError, "failed to replace persisted config: %s", strerror(errno));
-        return false;
-    }
-
-    clog(cLogLevelInfo, "saved persisted config: %s", path);
-    return true;
+    return fprintf(file, ",\n  \"audioInputGainDb\": %d\n}\n",
+                   (int)settings->audio_input_gain_db) >= 0;
 }

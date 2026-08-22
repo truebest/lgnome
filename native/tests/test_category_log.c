@@ -110,6 +110,10 @@ static void emit_facade_limited(unsigned value) {
     clog_limited(cLogLevelNotice, 2, 100, "facade limited %u", value);
 }
 
+static void emit_facade_once(unsigned value) {
+    clog_once(cLogLevelNotice, "facade once %u", value);
+}
+
 static void copy_string(char *dest, size_t capacity, const char *source) {
     if (!source) {
         source = "";
@@ -280,6 +284,15 @@ static void test_facade_vlog_and_rate_limit(void) {
     CHECK(capture_count() == 5);
     CHECK(strcmp(capture_event(3).message, "suppressed 1 similar messages") == 0);
     CHECK(strcmp(capture_event(4).message, "facade limited 4") == 0);
+}
+
+static void test_facade_once(void) {
+    reset_logger();
+    emit_facade_once(1);
+    emit_facade_once(2);
+    emit_facade_once(3);
+    CHECK(capture_count() == 1);
+    CHECK(strcmp(capture_event(0).message, "facade once 1") == 0);
 }
 
 static void test_rules_and_transactionality(void) {
@@ -601,6 +614,7 @@ int main(void) {
     test_lowercase_facade();
     test_file_local_definitions();
     test_facade_vlog_and_rate_limit();
+    test_facade_once();
     test_rules_and_transactionality();
     test_rules_apply_to_late_categories();
     test_environment_configuration();

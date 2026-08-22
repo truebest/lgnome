@@ -1,15 +1,15 @@
 #include "ui_mixer.h"
 
-#if defined(HELLOLG_WITH_SDL) && HELLOLG_WITH_SDL
-#if defined(HELLOLG_WITH_PRECONNECT_UI) && HELLOLG_WITH_PRECONNECT_UI
+#ifdef HELLOLG_TARGET_WEBOS
 #include <math.h>
 #include <stdlib.h>
 
 #include "ui_fonts.h"
+#include "ui_mixer_geometry.h"
 #include "ui_profile_name.h"
 #include "ui_slot_palette.h"
+#include "ui_vu_meter.h"
 #include "lvgl.h"
-#endif
 #endif
 
 #include "clog.h"
@@ -28,69 +28,9 @@ int32_t native_ui_mixer_gain_db_to_q15(int gain_db) {
     return table[(gain_db - NATIVE_MIXER_FADER_MIN_DB) / 3];
 }
 
-#if defined(HELLOLG_WITH_SDL) && HELLOLG_WITH_SDL
+#ifdef HELLOLG_TARGET_WEBOS
 
 static const char *ui_mixer_channel_labels[NATIVE_UI_MIXER_CHANNELS] = {"RED", "GREEN", "YELLOW", "BLUE", "MASTER"};
-
-/* Both faders travel the same track; only the value domain differs (dB vs percent). */
-static int ui_mixer_master_pct_clamped(int pct) {
-    if (pct < 0) {
-        return 0; /* unknown volume parks the (dimmed) knob at the bottom stop */
-    }
-    return pct > 100 ? 100 : pct;
-}
-
-#if defined(HELLOLG_WITH_PRECONNECT_UI) && HELLOLG_WITH_PRECONNECT_UI
-
-#define UI_MIXER_BANK_W 1260
-#define UI_MIXER_BANK_H 668
-#define UI_MIXER_PANEL_PAD_X 32
-#define UI_MIXER_PANEL_PAD_TOP 22
-#define UI_MIXER_PANEL_PAD_BOTTOM 22
-#define UI_MIXER_PANEL_W (UI_MIXER_BANK_W + 2 * UI_MIXER_PANEL_PAD_X)
-#define UI_MIXER_PANEL_H (UI_MIXER_BANK_H + UI_MIXER_PANEL_PAD_TOP + UI_MIXER_PANEL_PAD_BOTTOM)
-#define UI_MIXER_PANEL_BOTTOM 48
-#define UI_MIXER_PANEL_RADIUS 30
-#define UI_MIXER_CHANNEL_Y 52
-#define UI_MIXER_CHANNEL_H 570
-#define UI_MIXER_SOURCE_W 218
-#define UI_MIXER_MASTER_W 250
-#define UI_MIXER_CHANNEL_GAP 18
-#define UI_MIXER_MASTER_GAP 16
-#define UI_MIXER_GROUP_W                                                                                              \
-    (NATIVE_SETTINGS_MAX_SESSIONS * UI_MIXER_SOURCE_W + NATIVE_SETTINGS_MAX_SESSIONS * UI_MIXER_CHANNEL_GAP +        \
-     UI_MIXER_MASTER_GAP + UI_MIXER_MASTER_W)
-#define UI_MIXER_GROUP_X ((UI_MIXER_BANK_W - UI_MIXER_GROUP_W) / 2)
-#define UI_MIXER_FADER_Y 100
-#define UI_MIXER_FADER_H 380
-#define UI_MIXER_METER_W 16
-#define UI_MIXER_METER_GAP 22
-#define UI_MIXER_KNOB_W 66
-#define UI_MIXER_KNOB_H 26
-#define UI_MIXER_PANEL_COLOR 0x10141b
-#define UI_MIXER_STRIP_COLOR 0x101319
-#define UI_MIXER_MASTER_COLOR 0x171a20
-/* Peak-hold marks: a detached segment riding above each meter bar at the loudest
- * recent level — held, then released (console bridge style). */
-#define UI_MIXER_PEAK_MARK_H 5
-#define UI_MIXER_PEAK_HOLD_MS 1500u
-#define UI_MIXER_PEAK_DECAY_DB_S 20.0f
-/* Clip threshold: the honest 0 dBFS. The meters see the PRE-saturation sum, so unlike
- * hardware meters (which cannot read past their rail and warn early at ~-0.3 dB) red
- * here means the clamp really cut samples; a legal full-scale hit stays yellow. */
-#define UI_MIXER_CLIP_DB (0.0f)
-/* The channel's identity color lives in its fader KNOB (the MASTER's is white); the
- * channel bottom carries the M / D / S button row (mute, duck-trigger, solo — session
- * channels only). The split constants divide the bottom pointer band between the three
- * plates at the midpoints between them. */
-#define UI_MIXER_MS_W 54
-#define UI_MIXER_MS_H 54
-#define UI_MIXER_MS_BOTTOM 18
-#define UI_MIXER_MS_MUTE_X 18
-#define UI_MIXER_MS_DUCK_X 82
-#define UI_MIXER_MS_SOLO_X 146
-#define UI_MIXER_MS_SPLIT_L 77
-#define UI_MIXER_MS_SPLIT_R 141
 
 struct NativeUiMixer {
     SDL_Renderer *renderer;
@@ -102,8 +42,7 @@ struct NativeUiMixer {
     lv_obj_t *name_labels[NATIVE_UI_MIXER_CHANNELS];
     lv_obj_t *knobs[NATIVE_UI_MIXER_CHANNELS];
     lv_obj_t *value_labels[NATIVE_UI_MIXER_CHANNELS];
-    lv_obj_t *meter_clips[NATIVE_UI_MIXER_CHANNELS][2];
-    lv_obj_t *meter_grads[NATIVE_UI_MIXER_CHANNELS][2];
+    NativeUiVuMeter meters[NATIVE_UI_MIXER_CHANNELS][2];
     lv_obj_t *peak_marks[NATIVE_UI_MIXER_CHANNELS][2];
     lv_obj_t *knob_stripes[NATIVE_UI_MIXER_CHANNELS]; /* color (or neutral MASTER) inlay in the knob */
     lv_obj_t *mute_buttons[NATIVE_UI_MIXER_CHANNELS]; /* M/D/S plates+letters: NULL for the MASTER */
@@ -116,7 +55,6 @@ struct NativeUiMixer {
     /* Rendered per-frame while up: cache the last-pushed values so only changed widgets
      * are touched (LVGL then redraws only those areas). knob_value carries dB for the
      * slots and percent for the MASTER — it is only ever compared for change. */
-    int meter_px[NATIVE_UI_MIXER_CHANNELS][2];
     int knob_value[NATIVE_UI_MIXER_CHANNELS];
     /* Channel-header latency readouts: refreshed at a calm cadence so the number is
      * readable rather than a per-chunk blur. */
@@ -128,7 +66,6 @@ struct NativeUiMixer {
     /* M/D/S plate look last painted (connected|mute|solo|duck|active bits; -1 repaints). */
     int ms_state[NATIVE_UI_MIXER_CHANNELS];
     /* Displayed level per channel/side in dBFS (instant attack, steady release). */
-    float meter_db[NATIVE_UI_MIXER_CHANNELS][2];
     /* Peak-hold ballistics: instant capture of the loudest chunk peak, held for
      * UI_MIXER_PEAK_HOLD_MS, then a steady release. */
     float peak_db[NATIVE_UI_MIXER_CHANNELS][2];
@@ -139,152 +76,6 @@ struct NativeUiMixer {
     bool active;
     bool full_refresh;
 };
-
-static int ui_mixer_channel_width(int slot) {
-    return slot == NATIVE_UI_MIXER_MASTER ? UI_MIXER_MASTER_W : UI_MIXER_SOURCE_W;
-}
-
-static int ui_mixer_channel_x(int slot) {
-    if (slot == NATIVE_UI_MIXER_MASTER) {
-        return UI_MIXER_GROUP_X + NATIVE_SETTINGS_MAX_SESSIONS * (UI_MIXER_SOURCE_W + UI_MIXER_CHANNEL_GAP) +
-               UI_MIXER_MASTER_GAP;
-    }
-    return UI_MIXER_GROUP_X + slot * (UI_MIXER_SOURCE_W + UI_MIXER_CHANNEL_GAP);
-}
-
-static int ui_mixer_pair_cx(int slot) {
-    return ui_mixer_channel_width(slot) / 2 + 24;
-}
-
-static int ui_mixer_db_to_y(int db) {
-    return UI_MIXER_FADER_Y +
-           (NATIVE_MIXER_FADER_MAX_DB - db) * UI_MIXER_FADER_H / (NATIVE_MIXER_FADER_MAX_DB - NATIVE_MIXER_FADER_MIN_DB);
-}
-
-static int ui_mixer_pct_to_y(int pct) {
-    return UI_MIXER_FADER_Y + (100 - ui_mixer_master_pct_clamped(pct)) * UI_MIXER_FADER_H / 100;
-}
-
-/* The floating console and centered bank are deterministic, so pointer hit-testing
- * remains pure arithmetic — no LVGL traversal in the SDL event path. */
-
-static int ui_mixer_panel_x(int win_w) {
-    return (win_w - UI_MIXER_PANEL_W) / 2;
-}
-
-static int ui_mixer_panel_y(int win_h) {
-    return win_h - UI_MIXER_PANEL_BOTTOM - UI_MIXER_PANEL_H;
-}
-
-static bool ui_mixer_point_in_panel(int win_w, int win_h, int x, int y) {
-    int panel_x = ui_mixer_panel_x(win_w);
-    int panel_y = ui_mixer_panel_y(win_h);
-    if (x < panel_x || x >= panel_x + UI_MIXER_PANEL_W || y < panel_y || y >= panel_y + UI_MIXER_PANEL_H) {
-        return false;
-    }
-
-    /* The shadow is deliberately not interactive, and the transparent pixels outside
-     * the 30 px corner arcs count as outside the form too. */
-    int rel_x = x - panel_x;
-    int rel_y = y - panel_y;
-    int dx = 0;
-    int dy = 0;
-    if (rel_x < UI_MIXER_PANEL_RADIUS) {
-        dx = UI_MIXER_PANEL_RADIUS - rel_x;
-    } else if (rel_x >= UI_MIXER_PANEL_W - UI_MIXER_PANEL_RADIUS) {
-        dx = rel_x - (UI_MIXER_PANEL_W - UI_MIXER_PANEL_RADIUS - 1);
-    }
-    if (rel_y < UI_MIXER_PANEL_RADIUS) {
-        dy = UI_MIXER_PANEL_RADIUS - rel_y;
-    } else if (rel_y >= UI_MIXER_PANEL_H - UI_MIXER_PANEL_RADIUS) {
-        dy = rel_y - (UI_MIXER_PANEL_H - UI_MIXER_PANEL_RADIUS - 1);
-    }
-    return dx == 0 || dy == 0 || dx * dx + dy * dy <= UI_MIXER_PANEL_RADIUS * UI_MIXER_PANEL_RADIUS;
-}
-
-bool native_ui_mixer_hit_test(int win_w, int win_h, int x, int y, int *slot, NativeUiMixerHit *zone) {
-    if (slot) {
-        *slot = -1;
-    }
-    if (zone) {
-        *zone = NATIVE_UI_MIXER_HIT_BODY;
-    }
-    int panel_y = ui_mixer_panel_y(win_h);
-    if (!ui_mixer_point_in_panel(win_w, win_h, x, y)) {
-        return false;
-    }
-    int bank_x = (win_w - UI_MIXER_BANK_W) / 2;
-    int rel_x = x - bank_x;
-    int channel_y = panel_y + UI_MIXER_PANEL_PAD_TOP + UI_MIXER_CHANNEL_Y;
-    int cy = y - channel_y;
-    int cx = -1; /* channel-relative x once a slot resolves */
-    int hit_slot = -1;
-    if (cy >= 0 && cy < UI_MIXER_CHANNEL_H) {
-        for (int i = 0; i < NATIVE_UI_MIXER_CHANNELS; i++) {
-            int channel_x = ui_mixer_channel_x(i);
-            int channel_w = ui_mixer_channel_width(i);
-            if (rel_x >= channel_x && rel_x < channel_x + channel_w) {
-                hit_slot = i;
-                if (slot) {
-                    *slot = i;
-                }
-                cx = rel_x - channel_x;
-                break;
-            }
-        }
-    }
-    if (zone) {
-        /* Fader band: within the track vertically (a knob's worth of slop at both
-         * ends) — a click there jumps/drags the fader; elsewhere in the channel it only
-         * selects, so clicking a label must not slam the level to the bottom stop. */
-        int fy = cy - UI_MIXER_FADER_Y;
-        if (cx >= 0 && fy >= -UI_MIXER_KNOB_H / 2 && fy <= UI_MIXER_FADER_H + UI_MIXER_KNOB_H / 2) {
-            *zone = NATIVE_UI_MIXER_HIT_FADER;
-        } else if (hit_slot >= 0 && hit_slot < NATIVE_UI_MIXER_MASTER &&
-                   cy >= UI_MIXER_CHANNEL_H - UI_MIXER_MS_BOTTOM - UI_MIXER_MS_H - 6 &&
-                   cy <= UI_MIXER_CHANNEL_H - 2) {
-            /* Bottom controls band, split at the midpoints between the M / D / S plates. */
-            *zone = cx <= UI_MIXER_MS_SPLIT_L   ? NATIVE_UI_MIXER_HIT_MUTE
-                    : cx >= UI_MIXER_MS_SPLIT_R ? NATIVE_UI_MIXER_HIT_SOLO
-                                                : NATIVE_UI_MIXER_HIT_DUCK;
-        }
-    }
-    return true;
-}
-
-int native_ui_mixer_fader_db_at(int win_h, int y) {
-    const int span = NATIVE_MIXER_FADER_MAX_DB - NATIVE_MIXER_FADER_MIN_DB;
-    int track_y = ui_mixer_panel_y(win_h) + UI_MIXER_PANEL_PAD_TOP + UI_MIXER_CHANNEL_Y + UI_MIXER_FADER_Y;
-    int fy = y - track_y;
-    if (fy < 0) {
-        fy = 0;
-    }
-    if (fy > UI_MIXER_FADER_H) {
-        fy = UI_MIXER_FADER_H;
-    }
-    int db = NATIVE_MIXER_FADER_MAX_DB - (fy * span + UI_MIXER_FADER_H / 2) / UI_MIXER_FADER_H;
-    /* Snap onto the 3 dB fader steps (the gain LUT is indexed by them). */
-    db = ((db - NATIVE_MIXER_FADER_MIN_DB + NATIVE_MIXER_OVERLAY_GAIN_STEP_DB / 2) /
-          NATIVE_MIXER_OVERLAY_GAIN_STEP_DB) *
-             NATIVE_MIXER_OVERLAY_GAIN_STEP_DB +
-         NATIVE_MIXER_FADER_MIN_DB;
-    if (db > NATIVE_MIXER_FADER_MAX_DB) {
-        db = NATIVE_MIXER_FADER_MAX_DB;
-    }
-    return db;
-}
-
-int native_ui_mixer_fader_pct_at(int win_h, int y) {
-    int track_y = ui_mixer_panel_y(win_h) + UI_MIXER_PANEL_PAD_TOP + UI_MIXER_CHANNEL_Y + UI_MIXER_FADER_Y;
-    int fy = y - track_y;
-    if (fy < 0) {
-        fy = 0;
-    }
-    if (fy > UI_MIXER_FADER_H) {
-        fy = UI_MIXER_FADER_H;
-    }
-    return 100 - (fy * 100 + UI_MIXER_FADER_H / 2) / UI_MIXER_FADER_H;
-}
 
 /* One console-style latching plate. render() drives the on/off palette; built dim-off. */
 static lv_obj_t *ui_mixer_build_ms_plate(lv_obj_t *channel, const char *text, int x, lv_obj_t **label_out) {
@@ -386,40 +177,16 @@ static void ui_mixer_build_channel(NativeUiMixer *mixer, lv_obj_t *bank, int slo
     for (int side = 0; side < 2; side++) {
         int x = side == 0 ? pair_cx - UI_MIXER_METER_GAP / 2 - UI_MIXER_METER_W
                           : pair_cx + UI_MIXER_METER_GAP / 2;
-        lv_obj_t *rail = lv_obj_create(channel);
-        lv_obj_set_pos(rail, x, UI_MIXER_FADER_Y);
-        lv_obj_set_size(rail, UI_MIXER_METER_W, UI_MIXER_FADER_H);
-        lv_obj_clear_flag(rail, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_bg_color(rail, lv_color_white(), 0);
-        lv_obj_set_style_bg_opa(rail, (lv_opa_t)15, 0);
-        lv_obj_set_style_radius(rail, 8, 0);
-        lv_obj_set_style_border_width(rail, 0, 0);
-
-        lv_obj_t *clip = lv_obj_create(channel);
-        mixer->meter_clips[slot][side] = clip;
-        lv_obj_set_pos(clip, x, UI_MIXER_FADER_Y + UI_MIXER_FADER_H);
-        lv_obj_set_size(clip, UI_MIXER_METER_W, 10);
-        lv_obj_clear_flag(clip, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_bg_opa(clip, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(clip, 0, 0);
-        lv_obj_set_style_radius(clip, 8, 0);
-        lv_obj_set_style_clip_corner(clip, true, 0);
-        lv_obj_set_style_pad_all(clip, 0, 0);
-        lv_obj_add_flag(clip, LV_OBJ_FLAG_HIDDEN);
-
-        lv_obj_t *grad = lv_obj_create(clip);
-        mixer->meter_grads[slot][side] = grad;
-        lv_obj_set_pos(grad, 0, -UI_MIXER_FADER_H);
-        lv_obj_set_size(grad, UI_MIXER_METER_W, UI_MIXER_FADER_H);
-        lv_obj_clear_flag(grad, LV_OBJ_FLAG_SCROLLABLE);
-        lv_obj_set_style_radius(grad, 4, 0);
-        lv_obj_set_style_clip_corner(grad, true, 0);
-        lv_obj_set_style_border_width(grad, 0, 0);
-        lv_obj_set_style_bg_color(grad, lv_color_hex(0xf7d038), 0);
-        lv_obj_set_style_bg_grad_color(grad, lv_color_hex(0x27cf5a), 0);
-        lv_obj_set_style_bg_grad_dir(grad, LV_GRAD_DIR_VER, 0);
-        lv_obj_set_style_bg_opa(grad, LV_OPA_COVER, 0);
-        lv_obj_set_style_pad_all(grad, 0, 0);
+        NativeUiVuMeterSpec meter_spec = {
+            .x = x,
+            .y = UI_MIXER_FADER_Y,
+            .width = UI_MIXER_METER_W,
+            .height = UI_MIXER_FADER_H,
+            .radius = 8,
+            .grad_radius = 4,
+            .min_px = 4,
+        };
+        native_ui_vu_meter_build(&mixer->meters[slot][side], channel, &meter_spec);
 
         /* The peak-hold mark: detached segment floating at the held level, in the
          * meter's loud-end yellow so it reads as "this is where the bar peaked". */
@@ -609,13 +376,12 @@ void native_ui_mixer_show(NativeUiMixer *mixer) {
     /* Poison the caches so the first render pushes every widget; meters start from
      * silence and attack to the live level on the first frames. */
     for (int i = 0; i < NATIVE_UI_MIXER_CHANNELS; i++) {
-        mixer->meter_px[i][0] = -1;
-        mixer->meter_px[i][1] = -1;
+        native_ui_vu_meter_invalidate(&mixer->meters[i][0]);
+        native_ui_vu_meter_invalidate(&mixer->meters[i][1]);
         mixer->knob_value[i] = INT32_MAX;
         mixer->queue_shown[i] = UINT32_MAX;
         mixer->target_shown[i] = UINT32_MAX;
         for (int side = 0; side < 2; side++) {
-            mixer->meter_db[i][side] = NATIVE_MIXER_METER_FLOOR_DB;
             mixer->peak_db[i][side] = NATIVE_MIXER_METER_FLOOR_DB;
             mixer->peak_since[i][side] = 0;
             mixer->peak_px[i][side] = -1;
@@ -695,14 +461,7 @@ void native_ui_mixer_render(NativeUiMixer *mixer, const int32_t (*peaks)[2], con
      * With nothing changed lv_refr_now finds no dirty areas and presents nothing. */
     for (int i = 0; i < NATIVE_UI_MIXER_CHANNELS; i++) {
         for (int side = 0; side < 2; side++) {
-            float target_db = peaks[i][side] > 0 ? 20.0f * log10f((float)peaks[i][side] / 32768.0f)
-                                                 : NATIVE_MIXER_METER_FLOOR_DB;
-            float fallen_db = mixer->meter_db[i][side] - fall_db;
-            float level_db = target_db > fallen_db ? target_db : fallen_db;
-            if (level_db < NATIVE_MIXER_METER_FLOOR_DB) {
-                level_db = NATIVE_MIXER_METER_FLOOR_DB;
-            }
-            mixer->meter_db[i][side] = level_db;
+            float target_db = native_ui_vu_meter_update(&mixer->meters[i][side], peaks[i][side], fall_db);
 
             /* Peak-hold mark: capture the loudest INSTANT chunk peak (not the decayed
              * bar), hold it for UI_MIXER_PEAK_HOLD_MS, then let it fall. */
@@ -758,33 +517,6 @@ void native_ui_mixer_render(NativeUiMixer *mixer, const int32_t (*peaks)[2], con
                 }
             }
 
-            int px = 0;
-            if (level_db > (float)NATIVE_MIXER_FADER_MIN_DB) {
-                float f = (level_db - (float)NATIVE_MIXER_FADER_MIN_DB) * (float)UI_MIXER_FADER_H /
-                          (float)(NATIVE_MIXER_FADER_MAX_DB - NATIVE_MIXER_FADER_MIN_DB);
-                px = (int)f;
-                if (px > UI_MIXER_FADER_H) {
-                    px = UI_MIXER_FADER_H;
-                }
-                if (px < 4) {
-                    px = 0; /* skip sub-radius slivers */
-                }
-            }
-            if (px == mixer->meter_px[i][side]) {
-                continue;
-            }
-            mixer->meter_px[i][side] = px;
-            lv_obj_t *clip = mixer->meter_clips[i][side];
-            if (px == 0) {
-                lv_obj_add_flag(clip, LV_OBJ_FLAG_HIDDEN);
-                continue;
-            }
-            lv_obj_clear_flag(clip, LV_OBJ_FLAG_HIDDEN);
-            /* The clip window's bottom stays pinned to the scale bottom; the gradient
-             * child slides so its full-scale artwork stays anchored to the dB scale. */
-            lv_obj_set_y(clip, UI_MIXER_FADER_Y + UI_MIXER_FADER_H - px);
-            lv_obj_set_height(clip, px);
-            lv_obj_set_y(mixer->meter_grads[i][side], px - UI_MIXER_FADER_H);
         }
         int value = i == NATIVE_UI_MIXER_MASTER ? master_pct : gain_db[i];
         if (value != mixer->knob_value[i]) {
@@ -923,5 +655,4 @@ void native_ui_mixer_render(NativeUiMixer *mixer, const int32_t (*peaks)[2], con
     lv_refr_now(mixer->disp);
 }
 
-#endif /* HELLOLG_WITH_PRECONNECT_UI */
-#endif /* HELLOLG_WITH_SDL */
+#endif /* HELLOLG_TARGET_WEBOS */

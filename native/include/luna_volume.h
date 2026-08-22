@@ -41,12 +41,16 @@ typedef struct NativeLunaVolume {
     atomic_uint reply_seq;  /* bumps on every parsed reply — freshness fence for baselines */
 } NativeLunaVolume;
 
-/* Spawns the bus thread and the volume-change subscription. On platforms without the
- * Luna bus this is a no-op that leaves the state unavailable. */
+/* Spawns the bus thread. Volume changes are POLLED: every LS2 volume-change
+ * subscription endpoint is a dead end for a dev-mode app on this device —
+ * refused outright, or accepted but delivering zero change events before the
+ * dynamic service idles out (see the probe notes in luna_volume.c). On
+ * platforms without the Luna bus this is a no-op that leaves the state
+ * unavailable. */
 bool native_luna_volume_start(NativeLunaVolume *lv);
 void native_luna_volume_stop(NativeLunaVolume *lv);
 
-/* Queue an asynchronous getVolume (belt for the subscription, e.g. on overlay open). */
+/* Queue an asynchronous getVolume ahead of the next poll (e.g. on overlay open). */
 void native_luna_volume_refresh(NativeLunaVolume *lv);
 
 /* Queue an asynchronous setVolume of the newest value (0..100, clamped); updates the

@@ -9,6 +9,7 @@ appinfo="${NATIVE_WEBOS_APPINFO:-$repo_root/native/deploy/webos/appinfo.json}"
 app_id="${NATIVE_WEBOS_APP_ID:-}"
 config_path="${HELLOLG_NATIVE_CONFIG:-$repo_root/native/config.local.json}"
 launch_with_defaults="${HELLOLG_LAUNCH_WITH_DEFAULTS:-0}"
+camera_preview=0
 ipk="${NATIVE_WEBOS_IPK:-}"
 install_app=1
 launch_app=1
@@ -20,7 +21,7 @@ fail() {
 
 usage() {
   printf '%s\n' \
-    "Usage: ARES_DEVICE=<tv-device> $0 [--ipk PATH] [--config PATH] [--with-defaults] [--no-install] [--no-launch]" \
+    "Usage: ARES_DEVICE=<tv-device> $0 [--ipk PATH] [--config PATH] [--with-defaults] [--camera-preview] [--no-install] [--no-launch]" \
     "" \
     "Installs the native webOS IPK and launches it with redacted RDP config params." \
     "If no IPK exists, this script runs tools/build-native-webos.sh first."
@@ -48,6 +49,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --with-defaults)
       launch_with_defaults=1
+      shift
+      ;;
+    --camera-preview)
+      camera_preview=1
       shift
       ;;
     --no-install)
@@ -109,6 +114,12 @@ fi
 command -v ares-launch >/dev/null 2>&1 ||
   fail "ares-launch not found. Load the webOS CLI, for example: source ~/.nvm/nvm.sh && nvm use 22"
 
+if [[ "$camera_preview" == "1" ]]; then
+  echo "deploy-native-webos: launching $app_id in local camera preview mode" >&2
+  ares-launch "${args[@]}" "$app_id" --params '{"cameraPreview":true,"ignoreSavedConfig":true}'
+  exit 0
+fi
+
 if [[ "$launch_with_defaults" == "1" ]]; then
   echo "deploy-native-webos: launching $app_id with native defaults" >&2
   ares-launch "${args[@]}" "$app_id" --params '{"ignoreSavedConfig":true}'
@@ -137,7 +148,14 @@ params = {}
 if isinstance(config.get("name"), str):
     params["name"] = config["name"]
 
-for key in ("host", "username", "password", "domain"):
+for key in (
+    "host",
+    "username",
+    "password",
+    "domain",
+    "cameraDeviceId",
+    "audioInputDeviceId",
+):
     if key not in config:
         continue
     value = config[key]
@@ -150,6 +168,12 @@ for key, minimum, maximum in (
     ("fps", 1, 240),
     ("wheelStep", 1, 120),
     ("wheelScrollDivisor", 1, 120),
+    # Keep in step with NATIVE_CAMERA_MIN/MAX_* in native/include/camera_v4l2.h;
+    # a stricter bound here silently blocks a mode the app itself accepts.
+    ("cameraWidth", 640, 1920),
+    ("cameraHeight", 480, 1080),
+    ("cameraFps", 1, 30),
+    ("audioInputGainDb", -12, 18),
 ):
     if key not in config:
         continue
@@ -158,11 +182,31 @@ for key, minimum, maximum in (
         raise SystemExit(f"config field {key} must be an integer in [{minimum}, {maximum}]")
     params[key] = value
 
-if "relativeMouse" in config:
-    value = config["relativeMouse"]
+for key in (
+    "relativeMouse",
+    "cameraRedirect",
+    "audioInputRedirect",
+    "cameraEnabled",
+    "audioInputEnabled",
+):
+    if key not in config:
+        continue
+    value = config[key]
     if not isinstance(value, bool):
-        raise SystemExit("config field relativeMouse must be a boolean")
-    params["relativeMouse"] = value
+        raise SystemExit(f"config field {key} must be a boolean")
+    params[key] = value
+
+if "audioCodec" in config:
+    value = config["audioCodec"]
+    if value not in ("auto", "opus", "pcm"):
+        raise SystemExit("config field audioCodec must be auto, opus, or pcm")
+    params["audioCodec"] = value
+
+if "sessions" in config:
+    value = config["sessions"]
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise SystemExit("config field sessions must be an array of objects")
+    params["sessions"] = value
 
 print(json.dumps(params, ensure_ascii=False, separators=(",", ":")))
 PY

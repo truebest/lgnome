@@ -4,6 +4,8 @@
 
 #include "input_evdev.h"
 
+#include "native_time.h"
+
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -594,8 +596,7 @@ static void *evdev_thread(void *arg) {
                 atomic_store(&input->running, false);
                 break;
             }
-            struct timespec backoff = {0, 10 * 1000 * 1000}; /* 10ms */
-            (void)nanosleep(&backoff, NULL);
+            native_sleep_ms(10u);
             continue;
         }
         poll_failures = 0;

@@ -158,14 +158,23 @@ static int test_open_gating_and_stream_open(void) {
 
     uint8_t delta[16];
     size_t delta_len = build_avc(delta, k_delta_nals, 1);
-    failures += expect_true(native_video_feed(video, delta, delta_len, false, 0) == NATIVE_VIDEO_NEED_KEYFRAME,
+    failures += expect_true(native_video_feed(video, delta, delta_len, 0) == NATIVE_VIDEO_NEED_KEYFRAME,
                             "delta before open needs keyframe");
     failures += expect_true(g_fake.load_calls == 0 && g_fake.video_play_calls == 0,
                             "gated delta touches nothing");
 
+    const uint8_t reverse_nals[] = {0x65, 0x67, 0x68};
+    uint8_t reverse[32];
+    size_t reverse_len = build_avc(reverse, reverse_nals, 3);
+    failures += expect_true(native_video_feed(video, reverse, reverse_len, 0) ==
+                                NATIVE_VIDEO_NEED_KEYFRAME,
+                            "IDR before SPS/PPS cannot seed a fresh decoder");
+    failures += expect_true(g_fake.load_calls == 0 && g_fake.video_play_calls == 0,
+                            "reverse-order config touches nothing");
+
     uint8_t idr[32];
     size_t idr_len = build_avc(idr, k_config_idr_nals, 3);
-    failures += expect_true(native_video_feed(video, idr, idr_len, true, 0) == NATIVE_VIDEO_OK,
+    failures += expect_true(native_video_feed(video, idr, idr_len, 0) == NATIVE_VIDEO_OK,
                             "config IDR opens stream and feeds");
     failures += expect_true(g_fake.load_calls == 1, "stream open loads the pipeline");
     failures += expect_true(
@@ -175,12 +184,12 @@ static int test_open_gating_and_stream_open(void) {
                             "load info matches open size");
     failures += expect_true(g_fake.video_play_calls == 1, "config IDR reaches VideoPlay");
 
-    failures += expect_true(native_video_feed(video, delta, delta_len, false, 0) == NATIVE_VIDEO_OK,
+    failures += expect_true(native_video_feed(video, delta, delta_len, 0) == NATIVE_VIDEO_OK,
                             "delta after keyframe feeds");
 
     /* Annex-B framing must pass through unchanged. */
     const uint8_t annexb_delta[] = {0, 0, 0, 1, 0x41};
-    failures += expect_true(native_video_feed(video, annexb_delta, sizeof(annexb_delta), false, 0) == NATIVE_VIDEO_OK,
+    failures += expect_true(native_video_feed(video, annexb_delta, sizeof(annexb_delta), 0) == NATIVE_VIDEO_OK,
                             "Annex-B input accepted");
 
     native_video_close(video);
@@ -199,7 +208,7 @@ static int test_reload_keyframe_recovery(void) {
     size_t idr_len = build_avc(idr, k_config_idr_nals, 3);
     uint8_t delta[16];
     size_t delta_len = build_avc(delta, k_delta_nals, 1);
-    native_video_feed(video, idr, idr_len, true, 0);
+    native_video_feed(video, idr, idr_len, 0);
 
     /* An audio (re)open reloads the pipeline underneath the live video track. */
     BackendNdlAudioInfo audio = {
@@ -209,23 +218,22 @@ static int test_reload_keyframe_recovery(void) {
     };
     failures += expect_true(native_media_ndl_configure_audio(&media, &audio) == BACKEND_NDL_OK,
                             "audio configure reloads");
-    failures += expect_true(native_video_feed(video, delta, delta_len, false, 0) == NATIVE_VIDEO_NEED_KEYFRAME,
+    failures += expect_true(native_video_feed(video, delta, delta_len, 0) == NATIVE_VIDEO_NEED_KEYFRAME,
                             "delta after reload needs keyframe");
 
-    /* A parameter-set-only AU must NOT clear the gate, even when the transport
-     * flags it as a keyframe (grd marks SPS that way): the fresh decoder still
+    /* A parameter-set-only AU must not clear the gate: the fresh decoder still
      * has no IDR, and letting the next P-frame report OK would kill recovery. */
     const uint8_t sps_only_nals[] = {0x67};
     uint8_t sps_only[16];
     size_t sps_only_len = build_avc(sps_only, sps_only_nals, 1);
-    failures += expect_true(native_video_feed(video, sps_only, sps_only_len, true, 0) == NATIVE_VIDEO_NEED_KEYFRAME,
+    failures += expect_true(native_video_feed(video, sps_only, sps_only_len, 0) == NATIVE_VIDEO_NEED_KEYFRAME,
                             "SPS-only AU does not clear the gate");
-    failures += expect_true(native_video_feed(video, delta, delta_len, false, 0) == NATIVE_VIDEO_NEED_KEYFRAME,
+    failures += expect_true(native_video_feed(video, delta, delta_len, 0) == NATIVE_VIDEO_NEED_KEYFRAME,
                             "delta after SPS-only still gated");
 
-    failures += expect_true(native_video_feed(video, idr, idr_len, true, 0) == NATIVE_VIDEO_OK,
+    failures += expect_true(native_video_feed(video, idr, idr_len, 0) == NATIVE_VIDEO_OK,
                             "keyframe recovers after reload");
-    failures += expect_true(native_video_feed(video, delta, delta_len, false, 0) == NATIVE_VIDEO_OK,
+    failures += expect_true(native_video_feed(video, delta, delta_len, 0) == NATIVE_VIDEO_OK,
                             "delta flows again after recovery");
 
     /* Removing audio reloads the surviving video track and re-arms keyframe recovery. */
@@ -235,9 +243,9 @@ static int test_reload_keyframe_recovery(void) {
         g_fake.last_load.videoDataInfo.source == NDL_DIRECTVIDEO_SRC_TYPE_H264 &&
             g_fake.last_load.audioDataInfo.audioCodec == NDL_DIRECTAUDIO_SRC_TYPE_NONE,
                             "audio clear keeps only video");
-    failures += expect_true(native_video_feed(video, delta, delta_len, false, 0) == NATIVE_VIDEO_NEED_KEYFRAME,
+    failures += expect_true(native_video_feed(video, delta, delta_len, 0) == NATIVE_VIDEO_NEED_KEYFRAME,
                             "delta after audio clear needs keyframe");
-    failures += expect_true(native_video_feed(video, idr, idr_len, true, 0) == NATIVE_VIDEO_OK,
+    failures += expect_true(native_video_feed(video, idr, idr_len, 0) == NATIVE_VIDEO_OK,
                             "keyframe recovers after audio clear");
 
     native_video_close(video);
@@ -253,14 +261,14 @@ static int test_terminal_errors(void) {
 
     uint8_t idr[32];
     size_t idr_len = build_avc(idr, k_config_idr_nals, 3);
-    native_video_feed(video, idr, idr_len, true, 0);
+    native_video_feed(video, idr, idr_len, 0);
 
     g_fake.fail_video_play = true;
-    failures += expect_true(native_video_feed(video, idr, idr_len, true, 0) == NATIVE_VIDEO_ERROR,
+    failures += expect_true(native_video_feed(video, idr, idr_len, 0) == NATIVE_VIDEO_ERROR,
                             "VideoPlay failure is ERROR");
     g_fake.fail_video_play = false;
     int plays = g_fake.video_play_calls;
-    failures += expect_true(native_video_feed(video, idr, idr_len, true, 0) == NATIVE_VIDEO_ERROR,
+    failures += expect_true(native_video_feed(video, idr, idr_len, 0) == NATIVE_VIDEO_ERROR,
                             "terminal error is sticky");
     failures += expect_true(g_fake.video_play_calls == plays, "sticky error never feeds again");
     native_video_close(video);
@@ -270,9 +278,9 @@ static int test_terminal_errors(void) {
     media.backend = open_fake_backend();
     video = native_video_open(&media, 1920, 1080, 60);
     const uint8_t garbage[] = {'a', 'b', 'c', 'd'};
-    failures += expect_true(native_video_feed(video, garbage, sizeof(garbage), false, 0) == NATIVE_VIDEO_ERROR,
+    failures += expect_true(native_video_feed(video, garbage, sizeof(garbage), 0) == NATIVE_VIDEO_ERROR,
                             "unparseable framing is ERROR");
-    failures += expect_true(native_video_feed(video, idr, idr_len, true, 0) == NATIVE_VIDEO_ERROR,
+    failures += expect_true(native_video_feed(video, idr, idr_len, 0) == NATIVE_VIDEO_ERROR,
                             "framing error is sticky");
     native_video_close(video);
     failures += expect_true(g_fake.unload_calls == 0, "never-opened stream does not unload on close");
@@ -282,7 +290,7 @@ static int test_terminal_errors(void) {
     media.backend = open_fake_backend();
     video = native_video_open(&media, 1920, 1080, 60);
     static const uint8_t tiny[1] = {0};
-    failures += expect_true(native_video_feed(video, tiny, NATIVE_VIDEO_MAX_AU_BYTES + 1, false, 0) ==
+    failures += expect_true(native_video_feed(video, tiny, NATIVE_VIDEO_MAX_AU_BYTES + 1, 0) ==
                             NATIVE_VIDEO_ERROR,
                             "oversized AU is ERROR");
     native_video_close(video);

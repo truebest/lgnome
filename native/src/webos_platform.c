@@ -9,32 +9,16 @@
 #include <stddef.h>
 #include <string.h>
 
-#if defined(HELLOLG_WITH_LS2) && HELLOLG_WITH_LS2
+#ifdef HELLOLG_TARGET_WEBOS
 #include <glib.h>
 #include <luna-service2/lunaservice.h>
 #endif
 
+#include "native_json.h"
+
 #include "clog.h"
 
 clog_define(g_native_log_platform, cLogLevelInfo, cLogFlags_Default, "platform.webos", NULL);
-
-static const char *native_json_value(const char *json, const char *quoted_key) {
-    const char *field = strstr(json, quoted_key);
-    if (!field) {
-        return NULL;
-    }
-    field += strlen(quoted_key);
-    while (isspace((unsigned char)*field)) {
-        field++;
-    }
-    if (*field++ != ':') {
-        return NULL;
-    }
-    while (isspace((unsigned char)*field)) {
-        field++;
-    }
-    return field;
-}
 
 static unsigned int native_sdk_major(const char *version) {
     if (!version || *version < '0' || *version > '9') {
@@ -65,13 +49,13 @@ bool native_webos_platform_parse_system_info(const char *json,
         return false;
     }
 
-    const char *success = native_json_value(json, "\"returnValue\"");
+    const char *success = native_json_find_value(json, "returnValue");
     if (!success || strncmp(success, "true", 4) != 0 ||
         (success[4] != '\0' && success[4] != ',' && success[4] != '}' &&
          !isspace((unsigned char)success[4]))) {
         return false;
     }
-    const char *version = native_json_value(json, "\"sdkVersion\"");
+    const char *version = native_json_find_value(json, "sdkVersion");
     if (!version || *version++ != '"') {
         return false;
     }
@@ -109,7 +93,7 @@ const char *native_webos_tv_release(unsigned int sdk_major) {
     }
 }
 
-#if defined(HELLOLG_WITH_LS2) && HELLOLG_WITH_LS2
+#ifdef HELLOLG_TARGET_WEBOS
 
 #define NATIVE_WEBOS_PLATFORM_TIMEOUT_MS 2000u
 

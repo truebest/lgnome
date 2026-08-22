@@ -33,6 +33,34 @@ git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null && fail "tag $tag alr
 
 tree="$(git rev-parse "main^{tree}")"
 
+# backend_ndl development pins live in the private Bitbucket repo; the public release
+# mirror is an append-only snapshot chain, so a dev gitlink can never resolve there.
+# Rewrite the released tree to reference the mirror, and require the mirror's latest
+# snapshot to carry the exact tree of the dev pin so a release never ships submodule
+# content that differs from what was built and tested.
+ndl_mirror_url="${BACKEND_NDL_MIRROR_URL:-https://github.com/truebest/backend_ndl.git}"
+ndl_dev_url="git@bitbucket.org:kodavr/backend_ndl.git"
+ndl_pin="$(git rev-parse "main:third_party/backend_ndl")"
+git -C third_party/backend_ndl fetch --quiet "$ndl_mirror_url" main ||
+  fail "cannot fetch the backend_ndl mirror $ndl_mirror_url"
+ndl_mirror_head="$(git -C third_party/backend_ndl rev-parse FETCH_HEAD)"
+ndl_pin_tree="$(git -C third_party/backend_ndl rev-parse "$ndl_pin^{tree}" 2>/dev/null)" ||
+  fail "backend_ndl dev pin $ndl_pin is not present in the submodule checkout; git submodule update first"
+[ "$(git -C third_party/backend_ndl rev-parse "FETCH_HEAD^{tree}")" = "$ndl_pin_tree" ] ||
+  fail "backend_ndl mirror main ($ndl_mirror_head) does not match the dev pin ($ndl_pin); publish the backend_ndl release first"
+gitmodules_blob="$(git show "main:.gitmodules" | sed "s|$ndl_dev_url|$ndl_mirror_url|" | git hash-object -w --stdin)"
+git cat-file blob "$gitmodules_blob" | grep -Fq "$ndl_mirror_url" ||
+  fail ".gitmodules rewrite produced no mirror URL; check the $ndl_dev_url pattern"
+# A not-yet-existing index path: handing git a pre-created zero-length index file is
+# accepted by current git but has been rejected as corrupt by other versions.
+release_scratch="$(mktemp -d)"
+trap 'rm -rf "$release_scratch"' EXIT
+release_index="$release_scratch/index"
+GIT_INDEX_FILE="$release_index" git read-tree "$tree"
+GIT_INDEX_FILE="$release_index" git update-index --cacheinfo "100644,$gitmodules_blob,.gitmodules"
+GIT_INDEX_FILE="$release_index" git update-index --cacheinfo "160000,$ndl_mirror_head,third_party/backend_ndl"
+tree="$(GIT_INDEX_FILE="$release_index" git write-tree)"
+
 parent_args=()
 if git fetch --quiet "$remote" "$branch" 2>/dev/null; then
   parent="$(git rev-parse FETCH_HEAD)"

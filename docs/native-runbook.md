@@ -85,6 +85,75 @@ the TV remote's color buttons in the remote's own order: red, green, yellow, blu
   the server PCM only, trading ~1.4Mbps per session for a lossless stream. It applies to
   connections made after the change. grd's PCM is 44.1kHz while Opus decodes at 48kHz;
   the per-source converters handle both concurrently without re-pinning the sink.
+- **Camera and microphone redirection** use two independent privacy toggles per profile
+  in the setup drawer. Saving a changed camera or microphone choice
+  restarts that profile because the RDPECAM/RDPEAI channels and `INFO_AUDIOCAPTURE`
+  client flag are negotiated at connection time. The HUB's camera-icon drawer owns the
+  app-global camera device, resolution, frame rate, microphone device, and input gain.
+  Device dropdowns offer `Auto` and stable locally enumerated endpoints. Camera and
+  microphone payloads go only to the on-screen profile. The capture gate synchronously
+  drains the old owner before a handoff and purges already-copied PCM. A background
+  profile keeps RDPECAM capability negotiation but receives `DeviceRemoved`, so its
+  device DVC and PipeWire camera are closed instead of retaining sample credits. The
+  foreground profile receives `DeviceAdded`; the server opens a fresh device DVC and the
+  client reopens physical capture and suppresses dependent frames until the first
+  self-contained SPS+PPS+IDR access unit. An already-open camera consumer might need to
+  reopen or reselect the new PipeWire node. RDPEAI remains negotiated for background
+  profiles but sends no PCM. A whole-session reconnect requested by the separate video
+  recovery policy still renegotiates every DVC. Incoming playback audio remains mixed
+  from every connected profile.
+- RDPECAM lifecycle requests are serialized on the device DVC. `StopStreamsRequest`
+  is idempotent while the device remains activated: the first stop invalidates the
+  capture generation and completes every accepted sample credit with `SampleError`,
+  then it acknowledges the stop; a repeated stop is acknowledged without another
+  physical-capture transition. A later `StartStreamsRequest` starts a fresh generation.
+- The camera must emit H.264 itself; there is no transcode anywhere in this client.
+  Redirection opens only a non-emulated, single-plane `V4L2_PIX_FMT_H264` mode at the
+  exact selected geometry and frame rate (640x480 at 15 fps by default). It consumes the
+  driver's `bytesused`, sequence, error flags, and timestamp and accepts only Annex-B
+  access units beginning with a start code. YUYV, MJPEG, and `V4L2_PIX_FMT_H264_NO_SC`
+  are not fallback formats. The jail exposes exactly two camera nodes, `/dev/video0` and
+  `/dev/video1`, as fixed entries whose minors do not track host numbering, so a camera
+  that exposes H.264 on a later node is unusable on the TV. Bitrate, GOP/I-period, joined
+  headers, and repeated sequence headers are requested best-effort, as is force-key-frame
+  while the stream waits for a decoder seed. None of these are required: the webOS SDK
+  header exports no `V4L2_CID_MPEG_*` control at all, so on the TV every one of them
+  compiles out and the camera keeps its own bitrate and GOP cadence.
+- The camera stream uses the shared H.264 scanner, caches SPS/PPS, and prepends the cache
+  to an IDR that lacks its own parameter sets. It sends no P/B picture until it has a
+  self-contained SPS+PPS+IDR decoder seed. Copied access units live in a FIFO limited to
+  eight AUs and 8 MiB; one normalized AU may not exceed 4 MiB. A corrupt flag, malformed
+  or oversized AU, FIFO overflow, ownership handoff, or refused Rust mailbox submission
+  clears the FIFO, answers an accepted RDPECAM credit with `SampleError`, and reopens
+  V4L2 until a new decoder seed arrives. Camera recovery does not stop the microphone
+  worker or RDP session. Eight consecutive valid but unsendable AUs (for example,
+  dependent pictures or IDRs without cached SPS/PPS) instead answer the current credit
+  with `SampleError` while preserving V4L2, sequence, and SPS/PPS state. Capture
+  continues through a long GOP until a later decoder seed is available; the accepted
+  credit cannot wait forever.
+- A jump in `buffer.sequence` is treated as dropped buffers, not as a broken device: it
+  re-gates the decoder seed and fails one credit, but keeps V4L2, the FIFO, and the
+  cached SPS/PPS. Reopening on a gap would be strictly worse, because it also discards
+  the seed and restarts mid-GOP. Cameras whose sequence counter jumps periodically would
+  otherwise loop through open, gap, `SampleError`, reopen, which surfaces on the server
+  as unexpected errors, timeouts, and stray responses. Missing or unplugged cameras are removed
+  from RDPECAM and retried in the background.
+- **Camera purchase recommendation:** buy a camera with hardware/native H.264 support
+  for camera redirection. Current gnome-remote-desktop officially accepts only
+  `CAM_MEDIA_FORMAT_H264` through RDPECAM; YUYV and MJPEG are not directly supported.
+  At upstream `main` commit `00195e889ad9390d4fa462d291a70fa92fe64678`,
+  [`has_supported_media_type()`][grd-camera-media-format] returns support only for that
+  format. Before buying, verify that Linux/V4L2 actually reports
+  `V4L2_PIX_FMT_H264` at the exact required resolution and frame rate; a marketing H.264
+  claim without driver exposure is insufficient. The previously used Logitech Brio 300
+  may be incompatible if its V4L2 node does not provide native H.264.
+- Microphone redirection opens ALSA through `dlopen` (there is no hard `libasound`
+  dependency), preferring 48 kHz mono and then stereo. The input is gain-adjusted,
+  linearly resampled and packetized independently for every 44.1 kHz stereo S16LE stream
+  negotiated by gnome-remote-desktop over RDPEAI (1.4112 Mbit/s of PCM payload for the
+  foreground stream, before protocol overhead). Capture failure degrades to correctly
+  paced silence for the foreground consumer and retries in the background; background
+  streams send no PCM. It never terminates video or an RDP session.
 - **Adaptive delay is always enabled and has no user control.** Every source starts at
   60ms, ranges from 40–150ms, and derives its target from a rolling 10s histogram of
   relative arrival/capture-time variation (`p95 + 20ms`, 5ms buckets). RDPEA timestamp
@@ -143,15 +212,19 @@ the TV remote's color buttons in the remote's own order: red, green, yellow, blu
   overlay. SDL key presses during streaming are logged (`remote sdl key scancode=`) —
   with the keyboard evdev-grabbed, only the remote and the system reach SDL, so the log
   maps what a given remote firmware actually sends.
-- **Re-pressing the ACTIVE slot's color button** (while its stream is on screen) opens the
-  volume mixer: a compact floating console above the desktop, with a rounded border and
+- **Re-pressing the ACTIVE slot's color button** (while its stream is on screen) — or
+  pressing the mouse's **extra/forward button** — opens the volume mixer; the **side/back
+  button** opens HUB instead, mirroring the central remote button. (Extra mouse buttons
+  are never forwarded to the server, which maps only left/right/middle.) The mixer is
+  a compact floating console above the desktop, with a rounded border and
   one fader channel per slot. Each channel is
   an L/R pair of LIVE volume-meter columns (post-fader peak, instant attack / 30 dB/s
   release, gradient anchored to the scale) with one white knob across both and a dBFS
   scale: -60 at the bottom stop (= full mute) up to an unmarked +6 dB headroom above the
   0 line. Up/down move the selected fader 3 dB per press (applied to the live mix
   immediately); left/right — or another slot's color button — change the selection; the
-  active slot's button, OK, or Back closes it, and it auto-hides after ~6s without input.
+  active slot's button, an extra mouse button, OK, or Back closes it, and it auto-hides
+  after ~6s without input.
   Mute, Duck, and Solo are shown as the single-letter console controls `M`, `D`, and `S`.
   While it is open the pointer belongs to the SYSTEM (the evdev grab is released and the
   plain arrow shown): click a fader to jump/drag it, click a channel elsewhere to select
@@ -221,19 +294,39 @@ All slots can be configured with the session-array shape (this is also what the 
 ```json
 {
   "sessions": [
-    { "slot": "green", "name": "Studio PC", "host": "192.0.2.10", "port": 3389, "username": "u", "password": "...", "domain": "", "fps": 60 },
-    { "slot": "yellow", "name": "Media Server", "host": "192.0.2.11", "port": 3389, "username": "u", "password": "...", "domain": "", "fps": 60 }
+    { "slot": "green", "name": "Studio PC", "host": "192.0.2.10", "port": 3389, "username": "u", "password": "...", "domain": "", "fps": 60, "cameraRedirect": true, "audioInputRedirect": true },
+    { "slot": "yellow", "name": "Media Server", "host": "192.0.2.11", "port": 3389, "username": "u", "password": "...", "domain": "", "fps": 60, "cameraRedirect": false, "audioInputRedirect": false }
   ],
   "wheelStep": 60,
   "wheelScrollDivisor": 1,
-  "audioCodec": "auto"
+  "audioCodec": "auto",
+  "cameraEnabled": true,
+  "cameraDeviceId": "",
+  "cameraWidth": 640,
+  "cameraHeight": 480,
+  "cameraFps": 15,
+  "audioInputEnabled": true,
+  "audioInputDeviceId": "",
+  "audioInputGainDb": 0
 }
 ```
+
+An empty device ID means `Auto`; non-empty IDs are stable `v4l-by-id:`/`v4l2:` camera
+IDs or `alsa:` microphone IDs written by the on-TV form. Camera dimensions must be even
+and are limited to 640..1920 by 480..1080 at 1..30 fps — sub-VGA modes were retired, and
+saved settings below VGA are rejected and fall back to the defaults. Those bounds are
+sanity checks on untrusted config, not a menu: the HUB camera drawer is filled from
+`VIDIOC_ENUM_FRAMESIZES` and `VIDIOC_ENUM_FRAMEINTERVALS` on the selected camera, so it
+offers exactly the discrete native-H.264 sizes and rates that camera reports, and a size
+with no usable rate is dropped. Microphone gain is limited to -12..+18 dB. If no such mode is visible, that camera is not
+currently usable for RDPECAM. JSON preserves schema-compatible custom values, but the
+capture worker still refuses them unless V4L2 confirms the exact native-H.264 mode.
 
 The hub's setup drawer saves a profile immediately on **Save** or **Save and connect**, so
 a failed first connection does not discard the optional profile name, address, username,
 domain, password, or FPS. **Delete profile** removes that colour's saved credentials after
-confirmation. Unsaved drafts in other drawers are never included. The save path is
+confirmation. The camera-icon drawer saves app-global camera and microphone settings
+independently. Unsaved drafts in other drawers are never included. The save path is
 resolved from a candidate list (each rejection is logged with its reason); on the TV the
 winner is the in-app
 `<approot>/settings/<euid>/settings.json` — the IPK ships `settings/` mode 01777 because
@@ -260,7 +353,7 @@ Targeted local loop:
 
 ```sh
 ./tools/syntax-check-native.sh
-cargo test --manifest-path webrdp-min/Cargo.toml --features native native::tests::
+cargo test --manifest-path webrdp-min/Cargo.toml --features native native::
 cmake -S native -B /tmp/gnomecast-native-build-tests
 cmake --build /tmp/gnomecast-native-build-tests
 ctest --test-dir /tmp/gnomecast-native-build-tests --output-on-failure
@@ -310,6 +403,28 @@ default, configures the product CMake build with NDL/SDL/LVGL/RDP FFI enabled,
 stages the app, verifies the staged tree and IPK, and writes the package under
 `dist/native-webos/`. Use `NATIVE_WEBOS_RUST_PROFILE=debug` only for diagnostics.
 
+### Release steps
+
+Bitbucket `main` is the development history. The GitHub repo is an append-only chain of
+release snapshots — one commit per version, tags never moved — produced by
+`tools/release-github.sh <version>`. For any version:
+
+1. Merge everything intended for the release and obtain a green `main`.
+2. If the `backend_ndl` pin has moved past the snapshot published on its mirror, release
+   `backend_ndl` first, then update the pin and `third_party/PROVENANCE.md` here. The
+   released `.gitmodules` points at the public mirror rather than the private dev remote,
+   so `release-github.sh` refuses to publish while the mirror's `main` tree differs from
+   the pin — otherwise the snapshot would ship a gitlink nobody can resolve.
+3. Bump the version in `native/deploy/webos/appinfo.json` and drop any "not yet released"
+   wording from `README.md`: the script snapshots `main`'s tree verbatim.
+4. Build a fresh IPK from that exact `main`, record its SHA-256, deploy that same file,
+   and repeat the smoke test.
+5. Publish the snapshot and tag with `tools/release-github.sh`, wait for GitHub CI, then
+   create the Release with that same verified IPK.
+
+The GitHub remote must be reachable for a push; `RELEASE_REMOTE=<name>` selects a
+different one (for example an HTTPS remote when no SSH key is registered with GitHub).
+
 Install and launch:
 
 ```sh
@@ -317,17 +432,53 @@ ARES_DEVICE=<tv-device> HELLOLG_NATIVE_CONFIG=native/config.local.json \
   ./tools/deploy-native-webos.sh
 ```
 
+### Local USB camera preview probe
+
+The launch-only camera probe bypasses RDP and opens the first V4L2 capture node that
+accepts uncompressed 640x480 YUYV. It renders that stream in the normal native SDL
+window and exits on the remote's BACK button:
+
+```sh
+ARES_DEVICE=<tv-device> ./tools/deploy-native-webos.sh --camera-preview
+```
+
+This is a YUYV-only diagnostic. It proves only local camera capture and presentation;
+it does **not** prove that the camera provides native H.264 or is compatible with
+RDPECAM. It is independent of the persisted per-profile RDPECAM setting and does not
+connect an RDP session.
+
+### Opening a profile without the remote
+
+The hub waits for a colour-button press, which an automated on-device check cannot send.
+`connectSlot` names a saved profile to open at launch instead:
+
+```sh
+ares-launch -d <tv-device> com.truebest.gnomecast.native --params '{"connectSlot":"red"}'
+```
+
+`--connect-slot red` does the same for host runs. This is a debugging aid, not a
+preference: it is never persisted, carries no connection data, and the named profile must
+already be configured — the connection then follows the ordinary user-initiated path, so
+it cannot skip validation or reach a state the remote could not. An unconfigured or
+unknown name is logged and leaves the hub as it was.
+
 `tools/deploy-native-webos.sh` installs the latest IPK, reads the host-side config file,
 and sends supported fields
 with `ares-launch --params` without printing the generated JSON. The native app opens a
 four-profile session hub; each colour-key card has a right-side setup drawer for its name,
-address, username, domain, password, `30/60 FPS`, and global audio-quality preference.
+address, username, domain, password, `30/60 FPS`, global audio-quality preference, and
+separate camera and microphone opt-in toggles. The HUB camera icon opens the shared device,
+camera-mode, and microphone-gain settings.
 The local SDL graphics/UI surface is
 fixed at 1920x1080 (webOS always scales this virtual canvas to the panel; the video decoder
 plane runs at the server's real resolution independently, so a larger local surface has no
-benefit — see the EGFX surface-size note below). The RDP initial desktop request is a fixed
-hint, and the runtime desktop size reported by the server remains the source of truth for
-stream/input sizing. Use `--with-defaults` only for an explicit defaults-only startup smoke.
+benefit — see the EGFX surface-size note below). The RDP initial desktop request is a
+separate, fixed hint of 3840x2160: H.264 bypasses SDL entirely, so the UI canvas does not
+constrain it, and a mirroring server overrides the request with its own monitor size in any
+case. Asking for the panel's 4K therefore only decides whether that correction is a resize
+or a no-op, and on a 4K server the session now activates at its final size instead of
+renegotiating from 1080p. The runtime desktop size reported by the server remains the source
+of truth for stream/input sizing. Use `--with-defaults` only for an explicit defaults-only startup smoke.
 
 The native app id is `com.truebest.gnomecast.native`. The native package must contain the
 native executable and native `appinfo.json`; package verification rejects browser/runtime files such as
@@ -392,7 +543,9 @@ restores compiled defaults. Levels are `trace`, `debug`, `info`, `notice`, `warn
 `fatal`, and `off`. Invalid rule strings are rejected as a unit. Application prefixes are
 `native`, `config.paths`, `config.settings`, `video.snapshot`, `video.ndl`, `audio.opus`,
 `audio.pipeline`, `audio.ndl`, `input.evdev`, `input.sdl`, `media.ndl`, `ui.preconnect`,
-`ui.mixer`, `cursor`, `luna.volume`, `video.h264`, `video.rgba`, `rdp.rust`, and `rdp.stub`.
+`ui.mixer`, `cursor`, `luna.volume`, `video.h264`, `video.rgba`, `camera.v4l2`,
+`camera.h264`, `capture.redirect`, `audio.input.alsa`, `audio.input.pcm`, `rdp.rust`,
+and `rdp.stub`.
 The `media.ndl` category also carries the standalone backend_ndl library log, forwarded
 through the media adapter's callback. Rust/IronRDP events use `rdp.rust`; their original
 tracing target (including `webrdp.transport`, `webrdp.session`, `webrdp.graphics`, and
@@ -419,11 +572,14 @@ actually attached.
 ## NDL Backend Smoke (on-TV, run after backend changes)
 
 Watch `/tmp/gnomecast-native.log` over ssh while exercising. For sink-level
-telemetry (audio buffer available/total every ~5s, video render queue depth,
-per-drop lines), launch the native process with
+telemetry, launch the native process with
 `GNOMECAST_LOG='media.ndl=debug'`. The adapter mirrors the effective `media.ndl` level
 into the backend's minimum log level when media opens, so debug telemetry is not even
-produced while the level is filtered out. Audio drop episodes always end with an INFO
+produced while the level is filtered out. Every 300 accepted video AUs, `video sink`
+reports the DirectMedia render-buffer getter and the EWMA/maximum duration and error
+count of the synchronous `NDL_DirectVideoPlay` call. These are pre-display diagnostics:
+neither the queue nor the call duration measures compositor, scanout, or panel latency,
+and they are not used as pacing feedback. Audio drop episodes always end with an INFO
 `audio sink recovered: dropped N block(s)` summary, so the default log distinguishes a
 transient drop from a dead sink.
 
@@ -442,7 +598,20 @@ transient drop from a dead sink.
 5. **Audio-under-live-video open**: first audio negotiation after video is up re-arms
    the keyframe gate (`NEED_KEYFRAME` → refresh request → picture recovers).
 6. **Background/relaunch**: Home out and relaunch; media tears down only on real exit.
-7. **30 min soak**: RSS stable (`/proc/<pid>/status` over ssh), no log spam from
+7. **Camera/microphone redirection**: first confirm the camera itself emits H.264 — its
+   first capture node inside the jail must list a non-emulated `V4L2_PIX_FMT_H264` for at
+   least one HUB mode, since nothing here transcodes. Choose both devices in the HUB,
+   enable both toggles on two profiles, and open them from normal GNOME applications.
+   Verify that each start/restart begins with a clean SPS+PPS+IDR picture, then run long
+   enough to expose reference artifacts. Exercise Stop/Start, RDP reconnect,
+   unplug/replug, a webOS overlay, foreground handoff to the second session, and switching
+   back. The background profile must send no camera or microphone payload while its
+   incoming playback audio keeps feeding the mix. The foreground microphone and RDP
+   session must survive camera recovery. Repeatedly close and reopen a GNOME Camera/Zoom
+   consumer; each stop must be acknowledged successfully, the PipeWire `GnomeCast Camera`
+   device must remain available (its node serial may be recreated), and the next open
+   must restart video without reconnecting RDP.
+8. **30 min soak**: RSS stable (`/proc/<pid>/status` over ssh), no log spam from
    `not ready`/`overflow` (each is log-once per episode), no A/V drift.
 
 `resource released by firmware:` in the log means the TV reclaimed the decoder (another
@@ -456,6 +625,19 @@ open item.
   `ProtocolError`, or a specific TLS/CredSSP diagnostic.
 - H.264-capable sessions should use the NDL hardware path; if the server cannot provide H.264,
   verify native RemoteFX bitmap updates reach the SDL RGBA presenter.
+- Camera redirection requires an exact native-H.264 V4L2 mode. `camera.v4l2` reports
+  capture open/reopen failures, `camera.h264` reports decoder-seed/FIFO recovery, and
+  `capture.redirect` reports the number of camera and microphone consumers.
+  `webrdp.camera` should advertise the device only to the foreground opted-in session
+  after RDPECAM version negotiation.
+  Use `GNOMECAST_LOG='*=info,webrdp.camera=debug'` to record serialized RX/TX start/stop
+  transitions, device state, active-stream count, pending sample credits, aggregate
+  sample response/error counters, and protocol error codes. Per-sample success is not
+  logged because it is a frame-rate hot path; the counters are included with each
+  lifecycle transition instead.
+  `audio.input.alsa` reports one shared capture endpoint, while `webrdp.audio_input`
+  reports malformed negotiation. If the microphone cannot be opened, per-session silence
+  is intentional best-effort behavior.
 - The server's real graphics output size (from RDPGFX_RESET_GRAPHICS_PDU) can differ from the
   negotiated MCS/GCC desktop size. This is expected on webOS: the app's graphics/UI plane
   always renders on a virtual ~1920x1080 (or 1280x720 on HD-only models) logical canvas that
@@ -511,10 +693,13 @@ Implemented:
   framings — the nominal RDPEGFX shape is AVC length-prefixed (converted to Annex-B),
   but gnome-remote-desktop delivers Annex-B outright (passed through). Any code
   classifying AUs must handle both — use the `h264_annexb.h` scanners, never a
-  hand-rolled parser (a length-prefix-only IDR check once silently killed snapshot
-  switching in the field).
+  hand-rolled parser. The Rust callback forwards raw AUs without a keyframe hint;
+  `native_video_ingest_au` derives the decoder restart point (SPS + PPS before IDR)
+  before snapshot and decoder-ownership gates, including on snapshot replay.
 - Native RGBA surface helper for RemoteFX/bitmap dirty rectangles.
-- CTests for ABI layout, H.264 scanning/conversion/keyframe detection, and input helpers.
+- CTests for ABI layout, H.264 scanning/conversion/keyframe detection, input helpers,
+  session-failure/exit-code policy, and camera mode enumeration against a fake V4L2 node
+  table (no camera needed).
 - SDL/webOS fullscreen event loop and input dispatch in product builds.
 - Two native webOS helper scripts: build/package/verify and deploy/launch.
 - Native package/install/launch verification on the TV.
@@ -529,6 +714,9 @@ Implemented:
   reconnect watchdog, session-array persisted settings with legacy fallback.
 - Headless miniaudio float engine with per-session `ma_sound` voices, independent source
   rates, adaptive jitter/drift control, gain/meters, and an S16 NDL pump.
+- Per-profile RDPECAM camera and RDPEAI microphone redirection, foreground-scoped camera
+  hotplug, foreground-only microphone payload, shared V4L2/ALSA devices, stable-device
+  selection, native Annex-B H.264 stream normalization, and on-TV input settings.
 
 Not yet implemented or not yet TV-verified:
 
@@ -538,6 +726,13 @@ Not yet implemented or not yet TV-verified:
   latency, simultaneous audio mix, RSS with two sessions, background session surviving a
   switch (Phase 0 device checks from the multi-RDP plan).
 - Miniaudio/NDL device acceptance described above.
+- Native-H.264 camera acceptance on TV beyond the verified basic path: long-stream
+  reference integrity, Stop/Start, reconnect, unplug/replug, two capture-enabled sessions,
+  foreground handoff, and return. Live capture itself is device-verified with an Adesso
+  CyberTrack H5 at 640x480 at 15 fps. The earlier Brio 300 validation used the removed
+  YUYV conversion/encoding path and does not validate this implementation. RDPEAI was
+  independently observed streaming (ALSA 48 kHz mono resampled to the negotiated 44.1 kHz
+  stereo) and must remain live throughout.
 
 ## Third-Party Provenance
 
@@ -548,3 +743,5 @@ git submodule update --init third_party/backend_ndl third_party/IronRDP third_pa
 ```
 
 See `third_party/PROVENANCE.md` for pinned commits, licenses, and the Moonlight reference boundary.
+
+[grd-camera-media-format]: https://gitlab.gnome.org/GNOME/gnome-remote-desktop/-/blob/00195e889ad9390d4fa462d291a70fa92fe64678/src/grd-rdp-dvc-camera-device.c#L1388

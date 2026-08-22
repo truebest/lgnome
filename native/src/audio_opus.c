@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#if defined(HELLOLG_WITH_OPUS) && HELLOLG_WITH_OPUS
+#ifdef HELLOLG_WITH_OPUS
 #include <opus.h>
 #endif
 
@@ -11,7 +11,7 @@
 
 clog_define(g_native_log_audio, cLogLevelInfo, cLogFlags_Default, "audio.opus", NULL);
 
-#if defined(HELLOLG_WITH_OPUS) && HELLOLG_WITH_OPUS
+#ifdef HELLOLG_WITH_OPUS
 
 /* 120ms at 48kHz — the largest frame an Opus packet may carry (MS-RDPEA/grd use 20ms,
  * but decode defensively). */

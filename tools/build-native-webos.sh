@@ -81,7 +81,7 @@ PY
     fail "native binary was linked with the C RDP FFI stub; product packages require the Rust staticlib"
   fi
   if grep -Fq "SDL event loop is not compiled in" < <(strings "$root/bin/gnomecast-native"); then
-    fail "native binary was built without SDL; product packages require HELLOLG_WITH_SDL=ON"
+    fail "native binary was built without the webOS SDL runtime"
   fi
   if grep -Fq "NDL backend is not linked" < <(strings "$root/bin/gnomecast-native"); then
     fail "native binary was built without the NDL backend; product packages require HELLOLG_WITH_NDL=ON"
@@ -109,12 +109,40 @@ PY
   if find "$root" -type f -name 'libNDL_directmedia*' -print -quit | grep -q .; then
     fail "webOS firmware NDL libraries must not be staged in the application package"
   fi
-  # The packaged libopus lives in lib/ next to the binary.
+  if grep -Eq 'NEEDED.*libasound' <<<"$dynamic_tags"; then
+    fail "native binary must not link libasound directly; microphone capture dlopens ALSA"
+  fi
+  if grep -Eiq 'NEEDED.*openh264' <<<"$dynamic_tags"; then
+    fail "native binary must not link OpenH264"
+  fi
+  # Packaged codec libraries live in lib/ next to the binary.
   if [[ -n "$(find "$root/lib" -maxdepth 1 -type f -name 'libopus.so*' -print -quit 2>/dev/null)" ]]; then
     if ! grep -Eq '\((RPATH|RUNPATH)\).*\$ORIGIN/\.\./lib' <<<"$dynamic_tags"; then
-      fail "native binary RUNPATH/RPATH must include \$ORIGIN/../lib to find the packaged libopus"
+      fail "native binary RUNPATH/RPATH must include \$ORIGIN/../lib to find packaged codecs"
     fi
   fi
+
+  local forbidden_openh264_file
+  forbidden_openh264_file="$(find "$root" -type f -iname '*openh264*' -print -quit)"
+  [[ -z "$forbidden_openh264_file" ]] ||
+    fail "OpenH264 file included in package: ${forbidden_openh264_file#$root/}"
+  local staged_file
+  # Do not use grep -q in these pipelines: with pipefail, its early exit can
+  # SIGPIPE readelf/strings and turn a real match into a false negative.
+  while IFS= read -r -d '' staged_file; do
+    if readelf -h "$staged_file" >/dev/null 2>&1; then
+      if readelf -d "$staged_file" 2>/dev/null | grep -Ei 'NEEDED.*openh264' >/dev/null; then
+        fail "packaged ELF links forbidden OpenH264: ${staged_file#$root/}"
+      fi
+      if readelf -Ws "$staged_file" 2>/dev/null |
+          grep -E '(^|[^[:alnum:]_])Wels[A-Za-z0-9_]*' >/dev/null; then
+        fail "packaged ELF contains forbidden OpenH264 Wels symbols: ${staged_file#$root/}"
+      fi
+    fi
+    if strings "$staged_file" | grep -Ei 'OpenH264|Wels[A-Za-z0-9_]*' >/dev/null; then
+      fail "packaged file contains a forbidden OpenH264 string: ${staged_file#$root/}"
+    fi
+  done < <(find "$root" -type f -print0)
 
   echo "build-native-webos: package verify OK ($root)"
 }
@@ -130,6 +158,15 @@ verify_ipk() {
   data_tar="$(find "$cleanup/ar" -maxdepth 1 -type f -name 'data.tar*' -print -quit)"
   [[ -n "$data_tar" ]] || fail "no data.tar payload found in $ipk"
   tar -xf "$data_tar" -C "$cleanup/root"
+  local control_tar
+  control_tar="$(find "$cleanup/ar" -maxdepth 1 -type f -name 'control.tar*' -print -quit)"
+  if [[ -n "$control_tar" ]]; then
+    mkdir -p "$cleanup/control"
+    tar -xf "$control_tar" -C "$cleanup/control"
+    if grep -R -Eiq 'openh264|libopenh264|Wels[A-Za-z0-9_]*' "$cleanup/control"; then
+      fail "IPK control metadata contains an OpenH264 dependency or marker"
+    fi
+  fi
   local appinfo_path
   appinfo_path="$(find "$cleanup/root/usr/palm/applications" -maxdepth 2 -type f -name appinfo.json -print -quit 2>/dev/null || true)"
   [[ -n "$appinfo_path" ]] || appinfo_path="$(find "$cleanup/root" -type f -name appinfo.json -print -quit)"
@@ -168,6 +205,12 @@ if [[ "$skip_build" != "1" ]]; then
     fail "native submodules are not initialized; run: git submodule update --init third_party/backend_ndl third_party/IronRDP third_party/lvgl third_party/miniaudio"
   fi
 
+  native_cargo_graph="$(cargo tree --manifest-path "$repo_root/webrdp-min/Cargo.toml" --features native --locked)" ||
+    fail "failed to inspect the active native Cargo graph"
+  if grep -Eiq '(^|[[:space:]])openh264([[:space:]]|$)' <<<"$native_cargo_graph"; then
+    fail "active native Cargo graph unexpectedly includes OpenH264"
+  fi
+
   rustup target add "$target"
   CC_armv7_unknown_linux_gnueabi="$sdk/bin/arm-webos-linux-gnueabi-gcc" \
     AR_armv7_unknown_linux_gnueabi="$sdk/bin/arm-webos-linux-gnueabi-ar" \
@@ -181,8 +224,6 @@ if [[ "$skip_build" != "1" ]]; then
     -DCMAKE_TOOLCHAIN_FILE="$toolchain" \
     -DCMAKE_BUILD_TYPE="$build_type" \
     -DHELLOLG_WITH_NDL=ON \
-    -DHELLOLG_WITH_SDL=ON \
-    -DHELLOLG_WITH_PRECONNECT_UI=ON \
     -DHELLOLG_LINK_RDP_FFI=ON \
     -DBUILD_TESTING=OFF \
     -DRDP_FFI_LIB="$rdp_ffi_lib" \

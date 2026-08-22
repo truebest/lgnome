@@ -4,7 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#if defined(HELLOLG_WITH_SDL) && HELLOLG_WITH_SDL
+#ifdef HELLOLG_TARGET_WEBOS
 #include <SDL.h>
 #endif
 
@@ -33,7 +33,7 @@ uint16_t native_rgba_surface_width(const NativeRgbaSurface *surface);
 uint16_t native_rgba_surface_height(const NativeRgbaSurface *surface);
 int native_rgba_surface_has_frame(const NativeRgbaSurface *surface);
 
-#if defined(HELLOLG_WITH_SDL) && HELLOLG_WITH_SDL
+#ifdef HELLOLG_TARGET_WEBOS
 /* Draws the cached frame into the renderer's window backbuffer without presenting it.
  * Callers can composite translucent UI in the same backbuffer, then present once. */
 NativeRgbaResult native_rgba_surface_render(NativeRgbaSurface *surface, SDL_Renderer *renderer,

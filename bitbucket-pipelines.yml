@@ -23,7 +23,7 @@ pipelines:
           - git submodule update --init third_party/backend_ndl third_party/IronRDP third_party/lvgl third_party/miniaudio
           - cargo fmt --manifest-path webrdp-min/Cargo.toml --check
           # Quoted: a plain YAML scalar ending in ':' parses as a mapping key.
-          - "cargo test --manifest-path webrdp-min/Cargo.toml --features native --locked native::tests::"
+          - "cargo test --manifest-path webrdp-min/Cargo.toml --features native --locked native::"
           - ./tools/syntax-check-native.sh
           - cmake -S native -B /tmp/gnomecast-native-build
           - cmake --build /tmp/gnomecast-native-build

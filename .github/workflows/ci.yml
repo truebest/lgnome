@@ -32,7 +32,7 @@ jobs:
       - name: Rust format and tests
         run: |
           cargo fmt --manifest-path webrdp-min/Cargo.toml --check
-          cargo test --manifest-path webrdp-min/Cargo.toml --features native --locked native::tests::
+          cargo test --manifest-path webrdp-min/Cargo.toml --features native --locked native::
 
       - name: Native C syntax check
         run: ./tools/syntax-check-native.sh

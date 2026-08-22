@@ -33,8 +33,8 @@ void native_video_close(NativeVideo *video);
 uint16_t native_video_width(const NativeVideo *video);
 uint16_t native_video_height(const NativeVideo *video);
 /* Feed one AVC length-prefixed or Annex-B H.264 access unit from RDPEGFX. The
- * implementation normalizes it to Annex-B before passing it to the backend.
- */
-NativeVideoResult native_video_feed(NativeVideo *video, const uint8_t *data, size_t len, bool is_keyframe, uint64_t pts90k);
+ * implementation derives decoder-seed/keyframe state from the bytes and normalizes
+ * them to Annex-B before passing them to the backend; no transport hint is accepted. */
+NativeVideoResult native_video_feed(NativeVideo *video, const uint8_t *data, size_t len, uint64_t pts90k);
 
 #endif

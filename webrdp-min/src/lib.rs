@@ -4,6 +4,7 @@
 //! direct TCP/TLS/CredSSP transport, AVC420/H.264 passthrough for ss4s, and native
 //! RemoteFX/bitmap output. Historical WASM/RDCleanPath/browser exports were removed.
 
+#![deny(unsafe_op_in_unsafe_fn)]
 mod credssp;
 mod crypto;
 mod der;

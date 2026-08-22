@@ -9,12 +9,6 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 option(HELLOLG_LINK_RDP_FFI "Link the Rust RDP FFI static library" OFF)
 option(HELLOLG_WITH_NDL "Build the NDL DirectMedia hardware media backend (webOS)" OFF)
-option(HELLOLG_WITH_SDL "Build the native SDL lifecycle/input loop" OFF)
-set(HELLOLG_WITH_PRECONNECT_UI_DEFAULT OFF)
-if(HELLOLG_WITH_SDL)
-  set(HELLOLG_WITH_PRECONNECT_UI_DEFAULT ON)
-endif()
-option(HELLOLG_WITH_PRECONNECT_UI "Build the LVGL pre-connect UI for SDL product builds" ${HELLOLG_WITH_PRECONNECT_UI_DEFAULT})
 
 # The DirectMedia state machine is a standalone subproject. Only the three
 # NativeMedia/NativeVideo/NativeAudio adapters remain owned by gnomecast.
@@ -56,12 +50,8 @@ if(HELLOLG_TARGET_WEBOS)
   # luna-service2 client. A luna-send-pub subprocess is NOT an option: fork()ing this
   # process while the NDL/OMX pipeline is (re)loading raced its in-process decoder
   # state (black screens observed live), and a pipe cannot deliver subscribe events.
-  set(HELLOLG_WITH_LS2 ON)
   if(NOT HELLOLG_WITH_NDL)
     message(FATAL_ERROR "webOS product builds require HELLOLG_WITH_NDL=ON for H.264 hardware decode")
-  endif()
-  if(NOT HELLOLG_WITH_SDL)
-    message(FATAL_ERROR "webOS product builds require HELLOLG_WITH_SDL=ON for native input/RemoteFX presentation")
   endif()
 endif()
 
@@ -69,17 +59,62 @@ add_executable(gnomecast-native
   src/main.c
   src/rdp_log.c
   src/au_snapshot.c
+  src/camera_v4l2.c
+  src/camera_h264_stream.c
+  src/audio_input_alsa.c
+  src/audio_input_pcm.c
+  src/capture_audio_worker.c
+  src/capture_camera_worker.c
+  src/capture_redirect.c
+  src/capture_slots.c
   src/luna_volume.c
   src/webos_platform.c
   src/config_paths.c
+  src/native_config.c
+  src/native_config_launch.c
+  src/native_config_storage.c
+  src/native_json.c
+  src/native_capture_glue.c
+  src/native_hub_actions.c
+  src/native_hub_actions_connect.c
+  src/native_hub_actions_navigation.c
+  src/native_hub_actions_profiles.c
+  src/native_input_route.c
+  src/native_lifecycle.c
+  src/native_hub_runtime.c
+  src/native_loop.c
+  src/native_session_supervisor.c
+  src/native_streaming_transition.c
+  src/native_mixer_overlay.c
+  src/native_pointer.c
+  src/native_presentation.c
+  src/native_settings.c
+  src/native_rdp_audio.c
+  src/native_rdp_callbacks.c
+  src/native_rdp_media.c
+  src/native_rdp_state.c
+  src/native_rdp_video.c
+  src/native_rgba_owner.c
+  src/native_sdl_events.c
+  src/native_session.c
+  src/native_switch.c
+  src/native_switch_handoff.c
+  src/native_switch_navigation.c
+  src/native_switch_recovery.c
   src/settings_json.c
   src/video_rgba_sdl.c
   src/audio_pipeline.c
+  src/audio_pipeline_source.c
+  src/audio_jitter.c
   src/audio_opus.c
   src/h264_annexb.c
   src/input_sdl.c
   src/cursor_sdl.c
+  src/camera_preview.c
   src/ui_mixer.c
+  src/ui_mixer_geometry.c
+  src/ui_vu_meter.c
+  src/ui_key_queue.c
 )
 
 find_package(Threads REQUIRED)
@@ -124,8 +159,6 @@ target_include_directories(gnomecast-native PRIVATE include)
 target_compile_definitions(gnomecast-native PRIVATE
   $<$<BOOL:${HELLOLG_TARGET_WEBOS}>:HELLOLG_TARGET_WEBOS=1>
   $<$<BOOL:${HELLOLG_WITH_NDL}>:HELLOLG_WITH_NDL=1>
-  $<$<BOOL:${HELLOLG_WITH_SDL}>:HELLOLG_WITH_SDL=1>
-  $<$<BOOL:${HELLOLG_WITH_PRECONNECT_UI}>:HELLOLG_WITH_PRECONNECT_UI=1>
 )
 
 # libm: the volume overlay's meter math (log10f) lives in SDL builds, but linking m
@@ -135,13 +168,13 @@ target_link_libraries(gnomecast-native PRIVATE
   gnomecast-ndl-adapter
   category-log
   Threads::Threads
+  ${CMAKE_DL_LIBS}
   m
 )
 
-if(HELLOLG_WITH_LS2)
+if(HELLOLG_TARGET_WEBOS)
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(GLIB2 REQUIRED IMPORTED_TARGET glib-2.0)
-  target_compile_definitions(gnomecast-native PRIVATE HELLOLG_WITH_LS2=1)
   target_link_libraries(gnomecast-native PRIVATE PkgConfig::GLIB2 luna-service2)
 endif()
 
@@ -177,7 +210,7 @@ else()
   target_sources(gnomecast-native PRIVATE src/rdp_ffi_stub.c)
 endif()
 
-if(HELLOLG_WITH_SDL)
+if(HELLOLG_TARGET_WEBOS)
   find_package(SDL2 REQUIRED)
   if(TARGET SDL2::SDL2)
     target_link_libraries(gnomecast-native PRIVATE SDL2::SDL2)
@@ -210,15 +243,11 @@ if(HELLOLG_WITH_SDL)
   endif()
 
   target_sources(gnomecast-native PRIVATE src/input_evdev.c)
-  target_compile_definitions(gnomecast-native PRIVATE HELLOLG_WITH_EVDEV_MOUSE=1 HELLOLG_WITH_EVDEV_KEYBOARD=1)
 endif()
 
-if(HELLOLG_WITH_PRECONNECT_UI)
-  if(NOT HELLOLG_WITH_SDL)
-    message(FATAL_ERROR "HELLOLG_WITH_PRECONNECT_UI=ON requires HELLOLG_WITH_SDL=ON")
-  endif()
+if(HELLOLG_TARGET_WEBOS)
   if(NOT EXISTS "${HELLOLG_LVGL_SOURCE_DIR}/CMakeLists.txt")
-    message(FATAL_ERROR "HELLOLG_WITH_PRECONNECT_UI=ON requires initialized LVGL at ${HELLOLG_LVGL_SOURCE_DIR}; run git submodule update --init third_party/lvgl")
+    message(FATAL_ERROR "webOS product builds require initialized LVGL at ${HELLOLG_LVGL_SOURCE_DIR}; run git submodule update --init third_party/lvgl")
   endif()
 
   set(LV_CONF_PATH "${CMAKE_CURRENT_SOURCE_DIR}/include/lv_conf.h" CACHE STRING "gnomecast LVGL config" FORCE)
@@ -228,6 +257,18 @@ if(HELLOLG_WITH_PRECONNECT_UI)
   add_subdirectory("${HELLOLG_LVGL_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/third_party/lvgl" EXCLUDE_FROM_ALL)
   target_sources(gnomecast-native PRIVATE
     src/ui_preconnect.c
+    src/ui_preconnect_build.c
+    src/ui_preconnect_capture.c
+    src/ui_preconnect_capture_form.c
+    src/ui_preconnect_display.c
+    src/ui_preconnect_forms.c
+    src/ui_preconnect_hub.c
+    src/ui_preconnect_onboarding.c
+    src/ui_preconnect_profile.c
+    src/ui_preconnect_screen.c
+    src/ui_preconnect_theme.c
+    src/ui_preconnect_brand.c
+    src/ui_preconnect_widgets.c
     src/fonts/lv_font_ibm_plex_sans_semibold_86.c
     src/fonts/lv_font_ibm_plex_sans_semibold_86_profile.c
     src/fonts/lv_font_ibm_plex_sans_semibold_40.c
@@ -362,7 +403,7 @@ if(BUILD_TESTING)
     tests/test_video_rgba_sdl.c
     src/video_rgba_sdl.c
   )
-  target_compile_definitions(test-video-rgba-sdl PRIVATE HELLOLG_WITH_SDL=1)
+  target_compile_definitions(test-video-rgba-sdl PRIVATE HELLOLG_TARGET_WEBOS=1)
   target_include_directories(test-video-rgba-sdl PRIVATE tests/support/fake_sdl include)
   add_test(NAME video-rgba-sdl COMMAND test-video-rgba-sdl)
 
@@ -377,6 +418,14 @@ if(BUILD_TESTING)
   )
   target_include_directories(test-ui-host PRIVATE include)
   add_test(NAME ui-host COMMAND test-ui-host)
+
+  add_executable(test-ui-key-queue
+    tests/test_ui_key_queue.c
+    src/ui_key_queue.c
+  )
+  target_include_directories(test-ui-key-queue PRIVATE include)
+  target_link_libraries(test-ui-key-queue PRIVATE category-log)
+  add_test(NAME ui-key-queue COMMAND test-ui-key-queue)
 
   find_package(Python3 QUIET COMPONENTS Interpreter)
   if(Python3_Interpreter_FOUND)
@@ -413,7 +462,10 @@ if(BUILD_TESTING)
 
   add_executable(test-settings-json
     tests/test_settings_json.c
+    src/native_config_storage.c
+    src/native_settings.c
     src/settings_json.c
+    src/native_json.c
     src/config_paths.c
   )
   target_include_directories(test-settings-json PRIVATE include)
@@ -458,9 +510,18 @@ if(BUILD_TESTING)
   target_link_libraries(test-media-ndl-log-level PRIVATE backend_ndl::test_support category-log)
   add_test(NAME media-ndl-log-level COMMAND test-media-ndl-log-level)
 
+  add_executable(test-ui-mixer-geometry
+    tests/test_ui_mixer_geometry.c
+    src/ui_mixer_geometry.c
+    src/category_log.c
+  )
+  target_include_directories(test-ui-mixer-geometry PRIVATE include)
+  add_test(NAME ui-mixer-geometry COMMAND test-ui-mixer-geometry)
+
   add_executable(test-luna-volume
     tests/test_luna_volume.c
     src/luna_volume.c
+    src/native_json.c
   )
   target_include_directories(test-luna-volume PRIVATE include)
   target_link_libraries(test-luna-volume PRIVATE Threads::Threads)
@@ -469,18 +530,86 @@ if(BUILD_TESTING)
   add_executable(test-webos-platform
     tests/test_webos_platform.c
     src/webos_platform.c
+    src/native_json.c
   )
   target_include_directories(test-webos-platform PRIVATE include)
   add_test(NAME webos-platform COMMAND test-webos-platform)
 
+  add_executable(test-camera-v4l2
+    tests/test_camera_v4l2.c
+    src/camera_v4l2.c
+  )
+  target_include_directories(test-camera-v4l2 PRIVATE include src)
+  target_compile_definitions(test-camera-v4l2 PRIVATE HELLOLG_CAMERA_V4L2_TESTING=1)
+  add_test(NAME camera-v4l2 COMMAND test-camera-v4l2)
+
+  add_executable(test-native-rdp-state
+    tests/test_native_rdp_state.c
+    src/native_rdp_state.c
+  )
+  target_include_directories(test-native-rdp-state PRIVATE include)
+  target_link_libraries(test-native-rdp-state PRIVATE Threads::Threads)
+  add_test(NAME native-rdp-state COMMAND test-native-rdp-state)
+
+  add_executable(test-camera-h264-stream
+    tests/test_camera_h264_stream.c
+    src/camera_h264_stream.c
+    src/h264_annexb.c
+  )
+  target_include_directories(test-camera-h264-stream PRIVATE include)
+  add_test(NAME camera-h264-stream COMMAND test-camera-h264-stream)
+
+  add_executable(test-audio-input-pcm
+    tests/test_audio_input_pcm.c
+    src/audio_input_pcm.c
+  )
+  target_include_directories(test-audio-input-pcm PRIVATE include)
+  target_link_libraries(test-audio-input-pcm PRIVATE m)
+  add_test(NAME audio-input-pcm COMMAND test-audio-input-pcm)
+
+  add_executable(test-audio-input-alsa
+    tests/test_audio_input_alsa.c
+    src/audio_input_alsa.c
+  )
+  target_include_directories(test-audio-input-alsa PRIVATE include)
+  target_compile_definitions(test-audio-input-alsa PRIVATE HELLOLG_AUDIO_INPUT_ALSA_TESTING=1)
+  target_link_libraries(test-audio-input-alsa PRIVATE ${CMAKE_DL_LIBS})
+  add_test(NAME audio-input-alsa COMMAND test-audio-input-alsa)
+
+  add_executable(test-capture-redirect
+    tests/test_capture_redirect.c
+    src/capture_audio_worker.c
+    src/capture_camera_worker.c
+    src/camera_h264_stream.c
+    src/capture_redirect.c
+    src/capture_slots.c
+    src/native_capture_glue.c
+    src/audio_input_pcm.c
+    src/h264_annexb.c
+  )
+  target_include_directories(test-capture-redirect PRIVATE include)
+  target_compile_definitions(test-capture-redirect PRIVATE HELLOLG_CAPTURE_REDIRECT_TESTING=1)
+  target_link_libraries(test-capture-redirect PRIVATE Threads::Threads m)
+  add_test(NAME capture-redirect COMMAND test-capture-redirect)
+  add_test(NAME capture-redirect-init-failure COMMAND test-capture-redirect --init-failure)
+
   add_executable(test-audio-pipeline
     tests/test_audio_pipeline.c
     src/audio_pipeline.c
+    src/audio_pipeline_source.c
+    src/audio_jitter.c
   )
   target_include_directories(test-audio-pipeline PRIVATE include)
   target_compile_definitions(test-audio-pipeline PRIVATE HELLOLG_AUDIO_PIPELINE_TESTING=1)
   target_link_libraries(test-audio-pipeline PRIVATE hellolg-miniaudio Threads::Threads m)
   add_test(NAME audio-pipeline COMMAND test-audio-pipeline)
+
+  add_executable(test-audio-jitter
+    tests/test_audio_jitter.c
+    src/audio_jitter.c
+  )
+  target_include_directories(test-audio-jitter PRIVATE include)
+  add_test(NAME audio-jitter COMMAND test-audio-jitter)
 
   if(HELLOLG_WITH_OPUS)
     add_executable(test-audio-opus
@@ -498,7 +627,11 @@ if(BUILD_TESTING)
   foreach(native_test_target IN ITEMS
       test-rdp-ffi-layout test-rdp-log test-h264-annexb test-video-rgba-sdl test-input-sdl
       test-cursor-sdl test-config-paths test-settings-json test-au-snapshot
-      test-luna-volume test-webos-platform test-audio-pipeline test-audio-opus)
+      test-ui-mixer-geometry test-luna-volume test-webos-platform test-camera-v4l2
+      test-native-rdp-state
+      test-camera-h264-stream test-audio-input-pcm test-audio-input-alsa test-capture-redirect
+      test-audio-pipeline test-audio-jitter
+      test-audio-opus)
     if(TARGET ${native_test_target})
       target_link_libraries(${native_test_target} PRIVATE category-log)
     endif()

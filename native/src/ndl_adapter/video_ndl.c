@@ -144,7 +144,7 @@ void native_video_close(NativeVideo *video) {
     free(video);
 }
 
-NativeVideoResult native_video_feed(NativeVideo *video, const uint8_t *data, size_t len, bool is_keyframe, uint64_t pts90k) {
+NativeVideoResult native_video_feed(NativeVideo *video, const uint8_t *data, size_t len, uint64_t pts90k) {
     (void)pts90k;
     if (!video || !data || len == 0) {
         return NATIVE_VIDEO_ERROR;
@@ -191,22 +191,18 @@ NativeVideoResult native_video_feed(NativeVideo *video, const uint8_t *data, siz
     }
 
 #ifndef HELLOLG_WITH_NDL
-    (void)is_keyframe;
     (void)info;
     (void)annexb_len;
     return NATIVE_VIDEO_UNSUPPORTED;
 #else
-    bool config_idr = info.has_sps && info.has_pps && info.has_idr;
-    /* Only a real IDR clears the backend's after-reload keyframe gate. The transport
-     * flag (and grd) deliberately mark parameter-set-only AUs as keyframes, but a
-     * fresh decoder cannot start on an SPS without its IDR; clearing the gate on one
-     * would let following P-frames report OK with no recovery signal. A gated
-     * SPS-only AU is dropped as NEED_KEYFRAME; grd resends SPS+PPS with the IDR. */
-    (void)is_keyframe;
-    bool backend_keyframe = info.has_idr;
+    bool decoder_seed = info.can_seed_decoder;
+    /* Only an IDR preceded by SPS and PPS clears the backend's after-reload gate.
+     * This adapter classifies the exact bytes normalized and fed below; a config-only
+     * or IDR-before-config AU is dropped as NEED_KEYFRAME. */
+    bool backend_keyframe = decoder_seed;
 
     if (!video->video_opened) {
-        if (!config_idr) {
+        if (!decoder_seed) {
             return NATIVE_VIDEO_NEED_KEYFRAME;
         }
         NativeVideoResult open_result = native_video_open_stream(video);

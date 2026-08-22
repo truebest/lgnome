@@ -8,11 +8,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#if defined(HELLOLG_WITH_LS2) && HELLOLG_WITH_LS2
+#ifdef HELLOLG_TARGET_WEBOS
 #include <glib.h>
 #include <luna-service2/lunaservice.h>
 #include <pthread.h>
 #endif
+
+#include "native_json.h"
 
 #include "clog.h"
 
@@ -24,23 +26,25 @@ bool native_luna_volume_parse(const char *json, int *volume, bool *muted) {
     }
     /* Replies are single-line flat JSON from a system service; field scanning is enough
      * (and keeps a JSON library out of the build). An explicit failure beats guessing. */
-    if (strstr(json, "\"returnValue\":false")) {
+    const char *status = native_json_find_value(json, "returnValue");
+    if (status && strncmp(status, "false", 5) == 0) {
         return false;
     }
-    const char *field = strstr(json, "\"volume\":");
+    const char *field = native_json_find_value(json, "volume");
     if (!field) {
         return false;
     }
     char *end = NULL;
-    long value = strtol(field + strlen("\"volume\":"), &end, 10);
-    if (end == field + strlen("\"volume\":") || value < 0 || value > 100) {
+    long value = strtol(field, &end, 10);
+    if (end == field || value < 0 || value > 100) {
         return false;
     }
     if (volume) {
         *volume = (int)value;
     }
     if (muted) {
-        *muted = strstr(json, "\"muteStatus\":true") != NULL;
+        const char *mute = native_json_find_value(json, "muteStatus");
+        *muted = mute && strncmp(mute, "true", 4) == 0;
     }
     return true;
 }
@@ -57,7 +61,7 @@ unsigned native_luna_volume_reply_seq(const NativeLunaVolume *lv) {
     return lv ? atomic_load(&lv->reply_seq) : 0u;
 }
 
-#if defined(HELLOLG_WITH_LS2) && HELLOLG_WITH_LS2
+#ifdef HELLOLG_TARGET_WEBOS
 
 typedef struct NativeLunaVolumeImpl {
     NativeLunaVolume *owner;
@@ -373,7 +377,7 @@ void native_luna_volume_set(NativeLunaVolume *lv, int pct) {
     }
 }
 
-#else /* !HELLOLG_WITH_LS2: host builds — no Luna bus, the fader just stays dimmed */
+#else /* !HELLOLG_TARGET_WEBOS: host builds — no Luna bus, the fader just stays dimmed */
 
 bool native_luna_volume_start(NativeLunaVolume *lv) {
     if (!lv) {
@@ -400,4 +404,4 @@ void native_luna_volume_set(NativeLunaVolume *lv, int pct) {
     (void)pct;
 }
 
-#endif /* HELLOLG_WITH_LS2 */
+#endif /* HELLOLG_TARGET_WEBOS */

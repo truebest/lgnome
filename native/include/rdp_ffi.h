@@ -22,7 +22,7 @@ typedef enum RdpState {
     RDP_STATE_STOPPED = 9
 } RdpState;
 
-/* Values shared with RDP_AUDIO_CODEC_* constants in webrdp-min/src/native.rs. */
+/* Values shared with RDP_AUDIO_CODEC_* constants in webrdp-min/src/native/abi.rs. */
 typedef enum RdpAudioCodec {
     RDP_AUDIO_CODEC_OPUS = 1,
     RDP_AUDIO_CODEC_PCM_S16LE = 2
@@ -51,8 +51,14 @@ typedef struct RdpConfig {
     uint16_t height;
     uint16_t fps;
     /* Non-zero: advertise only PCM to rdpsnd for a lossless stream (grd would otherwise
-     * pick Opus when both are offered). Fits in RdpConfig's tail padding on both ABIs. */
+     * pick Opus when both are offered). */
     uint8_t prefer_pcm_audio;
+    uint8_t enable_camera;
+    uint8_t enable_audio_input;
+    uint8_t reserved0;
+    uint16_t camera_width;
+    uint16_t camera_height;
+    uint16_t camera_fps;
 } RdpConfig;
 
 typedef struct RdpCallbacks {
@@ -65,7 +71,9 @@ typedef struct RdpCallbacks {
     bool (*on_log_enabled)(void *ctx, RdpLogLevel level, const char *target);
     void (*on_log)(void *ctx, RdpLogLevel level, const char *target, const char *message);
     void (*on_desktop_size)(void *ctx, uint16_t width, uint16_t height);
-    void (*on_video_au)(void *ctx, const uint8_t *data, size_t len, bool is_keyframe, uint64_t pts90k);
+    /* Raw AVC420 access unit. The C shell classifies AVC/Annex-B framing and IDR
+     * state from these bytes before routing them to snapshots or the decoder. */
+    void (*on_video_au)(void *ctx, const uint8_t *data, size_t len, uint64_t pts90k);
     void (*on_bitmap_update)(void *ctx, uint16_t surface_id, uint32_t left, uint32_t top, uint32_t width,
                              uint32_t height, uint32_t stride, const uint8_t *rgba, size_t len);
     /* codec takes RdpAudioCodec values. Fired before the first on_audio_data of a stream
@@ -81,9 +89,19 @@ typedef struct RdpCallbacks {
     void (*on_pointer_position)(void *ctx, uint16_t x, uint16_t y);
     /* state takes RDP_POINTER_STATE_* values. */
     void (*on_pointer_state)(void *ctx, uint32_t state);
+    /* The stream generation must be echoed by submitted media. It changes on every
+     * start/stop so late capture-thread output is rejected safely. */
+    void (*on_camera_start)(void *ctx, uint64_t generation, uint16_t width, uint16_t height,
+                            uint16_t fps);
+    void (*on_camera_stop)(void *ctx, uint64_t generation);
+    /* One callback per granted-but-unanswered server sample credit. */
+    void (*on_camera_sample_request)(void *ctx, uint64_t generation);
+    void (*on_audio_input_start)(void *ctx, uint64_t generation, uint32_t sample_rate,
+                                 uint16_t channels, uint32_t frames_per_packet);
+    void (*on_audio_input_stop)(void *ctx, uint64_t generation);
 } RdpCallbacks;
 
-/* Values shared with RDP_POINTER_STATE_* constants in webrdp-min/src/native.rs. */
+/* Values shared with RDP_POINTER_STATE_* constants in webrdp-min/src/native/abi.rs. */
 enum {
     RDP_POINTER_STATE_HIDDEN = 0,
     RDP_POINTER_STATE_DEFAULT = 1
@@ -110,6 +128,17 @@ void rdp_set_suppress_output(RdpSession *session, bool allow_display);
  * Display Control DVC (forces gnome-remote-desktop to rebuild its encode session ->
  * RESET_GRAPHICS + IDR) and sends a classic full-screen Refresh Rect. */
 void rdp_request_refresh(RdpSession *session);
+/* Advertise/remove the configured physical camera on an already connected session. */
+void rdp_set_camera_available(RdpSession *session, bool available);
+/* Allows outgoing camera/microphone payload only for the foreground session. Closing
+ * synchronously purges queued payload without withdrawing either negotiated device. */
+void rdp_set_capture_active(RdpSession *session, bool active);
+/* Submission calls synchronously copy bytes into bounded real-time mailboxes. */
+bool rdp_submit_camera_h264(RdpSession *session, uint64_t generation, const uint8_t *data, size_t len,
+                            bool is_keyframe);
+bool rdp_submit_camera_error(RdpSession *session, uint64_t generation);
+bool rdp_submit_audio_input_pcm(RdpSession *session, uint64_t generation, const uint8_t *data,
+                                size_t len);
 
 #ifdef __cplusplus
 }

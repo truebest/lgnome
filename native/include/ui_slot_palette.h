@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#include "settings_json.h"
+#include "native_settings.h"
 
 /* Shared remote-button identity colors. Keep this header independent of SDL/LVGL so
  * streaming overlays and both native UI modules cannot drift onto separate palettes. */

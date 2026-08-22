@@ -119,6 +119,21 @@ typedef uint32_t cLogFlags;
         }                                                                                                   \
     } while (0)
 
+/* One-shot diagnostic: emits on the first execution of this call site, then
+ * never again for the process lifetime (even if the level is re-enabled
+ * later). The latch is a plain bool like the hand-rolled predecessors; a
+ * racing thread can at worst emit one duplicate line. For per-object or
+ * resettable edge-triggered logging keep an explicit flag next to the state
+ * that resets it. */
+#define clog_once(level_, ...)                                                                              \
+    do {                                                                                                    \
+        static bool clog_private_once_latched = false;                                                      \
+        if (!clog_private_once_latched) {                                                                   \
+            clog_private_once_latched = true;                                                               \
+            clog((level_), __VA_ARGS__);                                                                    \
+        }                                                                                                   \
+    } while (0)
+
 #ifndef NDEBUG
 #define clog_assert(expression_)                                                                            \
     do {                                                                                                    \

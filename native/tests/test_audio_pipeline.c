@@ -11,6 +11,8 @@
 #include <string.h>
 #include <time.h>
 
+#include "native_time.h"
+
 #include "audio_pipeline.h"
 
 typedef struct FakeClock {
@@ -781,14 +783,12 @@ static void test_pump_delivers_and_stops(void) {
     atomic_store(&fed_blocks, 0u);
     assert(native_audio_pipeline_pump_start(&pipeline, count_feed, NULL));
     for (int i = 0; i < 1000 && atomic_load(&fed_blocks) < 3u; i++) {
-        struct timespec pause = {0, 1000000L};
-        nanosleep(&pause, NULL);
+        native_sleep_ms(1u);
     }
     assert(atomic_load(&fed_blocks) >= 3u);
     native_audio_pipeline_pump_stop(&pipeline);
     unsigned stopped = atomic_load(&fed_blocks);
-    struct timespec pause = {0, 30000000L};
-    nanosleep(&pause, NULL);
+    native_sleep_ms(30u);
     assert(atomic_load(&fed_blocks) == stopped);
     native_audio_pipeline_destroy(&pipeline);
 }

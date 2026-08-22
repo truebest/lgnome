@@ -94,3 +94,38 @@ void rdp_set_suppress_output(RdpSession *session, bool allow_display) {
 void rdp_request_refresh(RdpSession *session) {
     (void)session;
 }
+
+void rdp_set_camera_available(RdpSession *session, bool available) {
+    (void)session;
+    (void)available;
+}
+
+void rdp_set_capture_active(RdpSession *session, bool active) {
+    (void)session;
+    (void)active;
+}
+
+bool rdp_submit_camera_h264(RdpSession *session, uint64_t generation, const uint8_t *data, size_t len,
+                            bool is_keyframe) {
+    (void)session;
+    (void)generation;
+    (void)data;
+    (void)len;
+    (void)is_keyframe;
+    return false;
+}
+
+bool rdp_submit_camera_error(RdpSession *session, uint64_t generation) {
+    (void)session;
+    (void)generation;
+    return false;
+}
+
+bool rdp_submit_audio_input_pcm(RdpSession *session, uint64_t generation, const uint8_t *data,
+                                size_t len) {
+    (void)session;
+    (void)generation;
+    (void)data;
+    (void)len;
+    return false;
+}

@@ -100,7 +100,7 @@ bool native_audio_pipeline_pump_start(NativeAudioPipeline *pipeline,
                                       void (*feed)(void *ctx, const int16_t *samples, size_t frames), void *feed_ctx);
 void native_audio_pipeline_pump_stop(NativeAudioPipeline *pipeline);
 
-#if defined(HELLOLG_AUDIO_PIPELINE_TESTING)
+#ifdef HELLOLG_AUDIO_PIPELINE_TESTING
 typedef void (*NativeAudioPipelineTestHook)(void *ctx, int source);
 void native_audio_pipeline_set_test_before_ring_read(NativeAudioPipeline *pipeline,
                                                      NativeAudioPipelineTestHook hook, void *ctx);

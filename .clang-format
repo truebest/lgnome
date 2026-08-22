@@ -1,0 +1,26 @@
+# Matches the dominant hand-written style of native/. Scope: C sources under
+# native/ (webrdp-min is cargo fmt territory; third_party/ and generated fonts
+# are never reformatted).
+BasedOnStyle: LLVM
+Language: Cpp
+IndentWidth: 4
+ContinuationIndentWidth: 4
+ColumnLimit: 120
+BreakStringLiterals: false
+BreakBeforeBraces: Attach
+PointerAlignment: Right
+AlignAfterOpenBracket: Align
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+ReflowComments: false
+SortIncludes: false
+IndentPPDirectives: None
+AlignConsecutiveAssignments: false
+AlignConsecutiveDeclarations: false
+AlignEscapedNewlines: Left
+SpaceAfterCStyleCast: false
+BinPackArguments: true
+BinPackParameters: true
+PenaltyBreakAssignment: 60
+PenaltyReturnTypeOnItsOwnLine: 200

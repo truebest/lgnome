@@ -4,6 +4,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "native_config_storage.h"
 #include "settings_json.h"
 
 static NativeSettings make_defaults(void) {
@@ -23,6 +24,15 @@ static void test_defaults(void) {
     }
     assert(s.width == 1920 && s.height == 1080);
     assert(s.wheel_step == 60 && s.wheel_scroll_divisor == 1);
+    assert(!s.camera_enabled && s.camera_device_id[0] == '\0');
+    assert(s.camera_width == 640 && s.camera_height == 480 &&
+           s.camera_fps == 15);
+    assert(!s.audio_input_enabled && s.audio_input_device_id[0] == '\0');
+    assert(s.audio_input_gain_db == 0);
+    for (int i = 0; i < NATIVE_SETTINGS_MAX_SESSIONS; i++) {
+        assert(!s.sessions[i].camera_redirect);
+        assert(!s.sessions[i].audio_input_redirect);
+    }
 }
 
 static void test_legacy_flat_applies_to_green(void) {
@@ -245,6 +255,64 @@ static void test_duck_mask_setting(void) {
     assert(native_settings_json_has_rdp_key("{ \"duckTriggers\": 15 }"));
 }
 
+static void test_local_capture_settings(void) {
+    NativeSettings s = make_defaults();
+    const char *json =
+        "{ \"sessions\": ["
+        " { \"slot\": \"green\", \"cameraRedirect\": true,"
+        "   \"audioInputRedirect\": true } ],"
+        " \"cameraEnabled\": true,"
+        " \"cameraDeviceId\": \"usb:046d:0943:serial\","
+        " \"cameraWidth\": 1024, \"cameraHeight\": 576, \"cameraFps\": 10,"
+        " \"audioInputEnabled\": true,"
+        " \"audioInputDeviceId\": \"alsa:B300:0\","
+        " \"audioInputGainDb\": -6 }";
+    assert(native_settings_apply_json(&s, json, "test"));
+    assert(s.camera_enabled);
+    assert(strcmp(s.camera_device_id, "usb:046d:0943:serial") == 0);
+    assert(s.camera_width == 1024 && s.camera_height == 576 &&
+           s.camera_fps == 10);
+    assert(s.audio_input_enabled);
+    assert(strcmp(s.audio_input_device_id, "alsa:B300:0") == 0);
+    assert(s.audio_input_gain_db == -6);
+    assert(s.sessions[NATIVE_SESSION_SLOT_GREEN].camera_redirect);
+    assert(s.sessions[NATIVE_SESSION_SLOT_GREEN].audio_input_redirect);
+
+    NativeSettings before = s;
+    assert(!native_settings_apply_json(
+        &s, "{ \"audioInputGainDb\": -13 }", "test"));
+    assert(memcmp(&s, &before, sizeof(s)) == 0);
+    assert(!native_settings_apply_json(
+        &s, "{ \"cameraFps\": 31 }", "test"));
+    assert(memcmp(&s, &before, sizeof(s)) == 0);
+    assert(!native_settings_apply_json(
+        &s, "{ \"cameraWidth\": 641 }", "test"));
+    assert(memcmp(&s, &before, sizeof(s)) == 0);
+    assert(!native_settings_apply_json(
+        &s, "{ \"cameraHeight\": 481 }", "test"));
+    assert(memcmp(&s, &before, sizeof(s)) == 0);
+    /* Sub-VGA modes were retired with the software-only encode path. */
+    assert(!native_settings_apply_json(
+        &s, "{ \"cameraWidth\": 320 }", "test"));
+    assert(memcmp(&s, &before, sizeof(s)) == 0);
+    assert(!native_settings_apply_json(
+        &s, "{ \"cameraHeight\": 360 }", "test"));
+    assert(memcmp(&s, &before, sizeof(s)) == 0);
+    assert(!native_settings_apply_json(
+        &s, "{ \"cameraWidth\": 2560 }", "test"));
+    assert(memcmp(&s, &before, sizeof(s)) == 0);
+    /* Modes are taken from the camera now, so anything it can report has to survive
+     * validation: 1080p at the top of the rate envelope, and off-preset pairs. */
+    assert(native_settings_apply_json(
+        &s, "{ \"cameraWidth\": 1920, \"cameraHeight\": 1080, \"cameraFps\": 30 }", "test"));
+    assert(s.camera_width == 1920 && s.camera_height == 1080 && s.camera_fps == 30);
+    assert(native_settings_apply_json(
+        &s, "{ \"cameraWidth\": 960, \"cameraHeight\": 540, \"cameraFps\": 12 }", "test"));
+    assert(s.camera_width == 960 && s.camera_height == 540 && s.camera_fps == 12);
+    assert(native_settings_json_has_rdp_key(
+        "{ \"cameraEnabled\": true }"));
+}
+
 static void test_has_rdp_key(void) {
     NativeSettings s = make_defaults();
     assert(!native_settings_json_has_rdp_key("{ \"unrelated\": 1 }"));
@@ -275,6 +343,18 @@ static void test_save_load_round_trip(void) {
     s.audio_codec = NATIVE_AUDIO_CODEC_PCM;
     s.sessions[0].duck_mask = 5;
     s.sessions[1].duck_mask = 15;
+    s.camera_enabled = true;
+    (void)snprintf(s.camera_device_id, sizeof(s.camera_device_id),
+                   "usb:046d:0943:serial");
+    s.camera_width = 1024;
+    s.camera_height = 576;
+    s.camera_fps = 15;
+    s.audio_input_enabled = true;
+    (void)snprintf(s.audio_input_device_id,
+                   sizeof(s.audio_input_device_id), "alsa:B300:0");
+    s.audio_input_gain_db = 9;
+    s.sessions[0].camera_redirect = true;
+    s.sessions[1].audio_input_redirect = true;
 
     char template_path[] = "/tmp/gnomecast-settings-test-XXXXXX";
     int fd = mkstemp(template_path);
@@ -300,6 +380,15 @@ static void test_save_load_round_trip(void) {
     assert(loaded.wheel_step == s.wheel_step);
     assert(loaded.wheel_scroll_divisor == s.wheel_scroll_divisor);
     assert(loaded.audio_codec == NATIVE_AUDIO_CODEC_PCM);
+    assert(loaded.camera_enabled == s.camera_enabled);
+    assert(strcmp(loaded.camera_device_id, s.camera_device_id) == 0);
+    assert(loaded.camera_width == s.camera_width &&
+           loaded.camera_height == s.camera_height &&
+           loaded.camera_fps == s.camera_fps);
+    assert(loaded.audio_input_enabled == s.audio_input_enabled);
+    assert(strcmp(loaded.audio_input_device_id,
+                  s.audio_input_device_id) == 0);
+    assert(loaded.audio_input_gain_db == s.audio_input_gain_db);
     /* duck_mask is compared by the sessions memcmp above; nothing global to check. */
 
     assert(unlink(template_path) == 0);
@@ -322,6 +411,7 @@ int main(void) {
     test_string_escapes();
     test_audio_codec_setting();
     test_duck_mask_setting();
+    test_local_capture_settings();
     test_has_rdp_key();
     test_save_load_round_trip();
     printf("test_settings_json: all tests passed\n");
