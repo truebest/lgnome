@@ -1,9 +1,9 @@
-#ifndef GNOMECAST_NATIVE_HUB_ACTIONS_H
-#define GNOMECAST_NATIVE_HUB_ACTIONS_H
+#ifndef LGNOME_NATIVE_HUB_ACTIONS_H
+#define LGNOME_NATIVE_HUB_ACTIONS_H
 
 /* HUB one-shot request handling (see native_hub_actions*.c). Preconnect-UI
  * builds only. */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 typedef struct App App;
 typedef struct NativePreconnectUi NativePreconnectUi;

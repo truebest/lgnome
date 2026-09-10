@@ -5,7 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build_dir="${NATIVE_WEBOS_BUILD_DIR:-$repo_root/build/native-webos}"
 stage_dir="${NATIVE_WEBOS_STAGING_DIR:-$build_dir/stage}"
 dist_dir="${NATIVE_WEBOS_DIST_DIR:-$repo_root/dist/native-webos}"
-# Size-optimized by default, but with -g kept (see CMAKE_*_FLAGS_MINSIZEREL below) so on-device
+# Size-optimized by default, but with -g kept (see CMAKE_C_FLAGS_MINSIZEREL below) so on-device
 # crashes stay debuggable. Override with NATIVE_WEBOS_BUILD_TYPE=RelWithDebInfo for -O2, etc.
 build_type="${NATIVE_WEBOS_BUILD_TYPE:-MinSizeRel}"
 target="${NATIVE_WEBOS_RUST_TARGET:-armv7-unknown-linux-gnueabi}"
@@ -41,8 +41,16 @@ find_toolchain() {
 verify_package_root() {
   local root="$1"
 
+  [[ ! -L "$root/settings" && ( ! -e "$root/settings" || -d "$root/settings" ) ]] ||
+    fail "invalid packaged settings directory"
+  if [[ -d "$root/settings" && -n "$(find "$root/settings" -mindepth 1 -print -quit)" ]]; then
+    fail "package must not contain saved settings"
+  fi
+  [[ -z "$(find "$root" \( -name settings.json -o -name config.local.json \) -print -quit)" ]] ||
+    fail "package must not contain configuration files"
+
   [[ -f "$root/appinfo.json" ]] || fail "missing appinfo.json in staged package"
-  [[ -f "$root/bin/gnomecast-native" ]] || fail "missing bin/gnomecast-native in staged package"
+  [[ -f "$root/bin/lgnome-native" ]] || fail "missing bin/lgnome-native in staged package"
   [[ -f "$root/icon.png" ]] || fail "missing icon.png in staged package"
   [[ -f "$root/licenses/THIRD_PARTY_PROVENANCE.md" ]] || fail "missing third-party provenance"
   [[ -f "$root/licenses/IBMPlex-OFL-1.1.txt" ]] || fail "missing IBM Plex OFL notice"
@@ -65,9 +73,9 @@ path = pathlib.Path(sys.argv[1])
 with path.open("r", encoding="utf-8") as f:
     appinfo = json.load(f)
 expected = {
-    "id": "com.truebest.gnomecast.native",
+    "id": "com.truebest.lgnome.native",
     "type": "native",
-    "main": "bin/gnomecast-native",
+    "main": "bin/lgnome-native",
     "icon": "icon.png",
 }
 for key, value in expected.items():
@@ -77,17 +85,17 @@ for key, value in expected.items():
 PY
 
   command -v strings >/dev/null 2>&1 || fail "strings is required to inspect native binary markers"
-  if grep -Fq "native RDP FFI stub" < <(strings "$root/bin/gnomecast-native"); then
+  if grep -Fq "native RDP FFI stub" < <(strings "$root/bin/lgnome-native"); then
     fail "native binary was linked with the C RDP FFI stub; product packages require the Rust staticlib"
   fi
-  if grep -Fq "SDL event loop is not compiled in" < <(strings "$root/bin/gnomecast-native"); then
+  if grep -Fq "SDL event loop is not compiled in" < <(strings "$root/bin/lgnome-native"); then
     fail "native binary was built without the webOS SDL runtime"
   fi
-  if grep -Fq "NDL backend is not linked" < <(strings "$root/bin/gnomecast-native"); then
-    fail "native binary was built without the NDL backend; product packages require HELLOLG_WITH_NDL=ON"
+  if grep -Fq "NDL backend is not linked" < <(strings "$root/bin/lgnome-native"); then
+    fail "native binary was built without the NDL backend; product packages require LGNOME_WITH_NDL=ON"
   fi
-  if ! grep -Fq "loaded NDL library" < <(strings "$root/bin/gnomecast-native"); then
-    fail "native binary lacks the NDL dlopen marker; HELLOLG_WITH_NDL build expected"
+  if ! grep -Fq "loaded NDL library" < <(strings "$root/bin/lgnome-native"); then
+    fail "native binary lacks the NDL dlopen marker; LGNOME_WITH_NDL build expected"
   fi
 
   for forbidden in app service; do
@@ -100,7 +108,7 @@ PY
 
   command -v readelf >/dev/null 2>&1 || fail "readelf is required to verify native binary dynamic tags"
   local dynamic_tags
-  dynamic_tags="$(readelf -d "$root/bin/gnomecast-native")" || fail "failed to inspect native binary dynamic tags"
+  dynamic_tags="$(readelf -d "$root/bin/lgnome-native")" || fail "failed to inspect native binary dynamic tags"
   # The NDL library must be dlopen-ed, never a hard DT_NEEDED: the binary has to
   # stay loadable when the firmware library is absent (probe log + clean failure).
   if grep -Eq 'NEEDED.*libNDL_directmedia' <<<"$dynamic_tags"; then
@@ -147,11 +155,12 @@ PY
   echo "build-native-webos: package verify OK ($root)"
 }
 
-verify_ipk() {
-  local ipk="$1"
+verify_ipk() (
+  local ipk
+  ipk="$(realpath "$1")"
   local cleanup
   cleanup="$(mktemp -d)"
-  trap 'rm -rf "$cleanup"' RETURN
+  trap 'rm -rf "$cleanup"' EXIT
   mkdir -p "$cleanup/ar" "$cleanup/root"
   (cd "$cleanup/ar" && ar x "$ipk")
   local data_tar
@@ -172,9 +181,13 @@ verify_ipk() {
   [[ -n "$appinfo_path" ]] || appinfo_path="$(find "$cleanup/root" -type f -name appinfo.json -print -quit)"
   [[ -n "$appinfo_path" ]] || fail "missing appinfo.json in $ipk"
   verify_package_root "$(dirname "$appinfo_path")"
-  rm -rf "$cleanup"
-  trap - RETURN
-}
+)
+
+if [[ "${1:-}" == --verify-ipk ]]; then
+  [[ $# == 2 && -f "$2" ]] || fail "usage: $0 --verify-ipk PATH"
+  verify_ipk "$2"
+  exit 0
+fi
 
 case "$rust_profile" in
   debug)
@@ -223,12 +236,11 @@ if [[ "$skip_build" != "1" ]]; then
     -B "$build_dir" \
     -DCMAKE_TOOLCHAIN_FILE="$toolchain" \
     -DCMAKE_BUILD_TYPE="$build_type" \
-    -DHELLOLG_WITH_NDL=ON \
-    -DHELLOLG_LINK_RDP_FFI=ON \
+    -DLGNOME_WITH_NDL=ON \
+    -DLGNOME_LINK_RDP_FFI=ON \
     -DBUILD_TESTING=OFF \
     -DRDP_FFI_LIB="$rdp_ffi_lib" \
     -DCMAKE_C_FLAGS_MINSIZEREL="-Os -DNDEBUG -g" \
-    -DCMAKE_CXX_FLAGS_MINSIZEREL="-Os -DNDEBUG -g" \
     "$@"
   cmake --build "$build_dir"
 elif [[ ! -f "$build_dir/CMakeCache.txt" ]]; then
@@ -248,7 +260,7 @@ command -v ares-package >/dev/null 2>&1 ||
   fail "ares-package not found. Load the webOS CLI, for example: source ~/.nvm/nvm.sh && nvm use 22"
 
 mkdir -p "$dist_dir"
-marker="$dist_dir/.gnomecast-package-start.$$"
+marker="$dist_dir/.lgnome-package-start.$$"
 : > "$marker"
 trap 'rm -f "$marker"' EXIT
 set +e
@@ -268,5 +280,4 @@ if [[ $ares_status -ne 0 ]]; then
 fi
 
 verify_ipk "$latest_ipk"
-printf '%s\n' "$latest_ipk" > "$dist_dir/latest-ipk.txt"
 echo "build-native-webos: wrote $latest_ipk"

@@ -6,7 +6,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_video, cLogLevelInfo, cLogFlags_Default, "video.rgba", NULL);
+clog_define(g_native_log_video, cLogLevelInfo, "video.rgba");
 
 #define NATIVE_RGBA_RENDER_COPY_MAX_ATTEMPTS 3u
 
@@ -16,7 +16,7 @@ struct NativeRgbaSurface {
     uint8_t *pixels;
     size_t pixels_len;
     bool has_frame;
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
     SDL_Texture *texture;
     SDL_Renderer *texture_renderer;
     uint16_t texture_width;
@@ -56,7 +56,7 @@ void native_rgba_surface_close(NativeRgbaSurface *surface) {
     if (!surface) {
         return;
     }
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
     if (surface->texture) {
         SDL_DestroyTexture(surface->texture);
     }
@@ -92,7 +92,7 @@ NativeRgbaResult native_rgba_surface_resize(NativeRgbaSurface *surface, uint16_t
     surface->width = width;
     surface->height = height;
     surface->has_frame = false;
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
     surface->render_copy_failures = 0;
     if (surface->texture) {
         SDL_DestroyTexture(surface->texture);
@@ -167,7 +167,7 @@ int native_rgba_surface_has_frame(const NativeRgbaSurface *surface) {
     return surface && surface->has_frame ? 1 : 0;
 }
 
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 static void native_rgba_drop_texture(NativeRgbaSurface *surface) {
     if (!surface) {
         return;
@@ -253,15 +253,6 @@ NativeRgbaResult native_rgba_surface_render(NativeRgbaSurface *surface, SDL_Rend
         surface->render_copy_failures = 0;
     }
     return NATIVE_RGBA_OK;
-}
-
-NativeRgbaResult native_rgba_surface_present(NativeRgbaSurface *surface, SDL_Renderer *renderer,
-                                             uint16_t viewport_width, uint16_t viewport_height) {
-    NativeRgbaResult result = native_rgba_surface_render(surface, renderer, viewport_width, viewport_height);
-    if (result == NATIVE_RGBA_OK) {
-        SDL_RenderPresent(renderer);
-    }
-    return result;
 }
 
 SDL_Texture *native_rgba_surface_take_texture(NativeRgbaSurface *surface) {

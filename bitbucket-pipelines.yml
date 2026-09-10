@@ -25,9 +25,9 @@ pipelines:
           # Quoted: a plain YAML scalar ending in ':' parses as a mapping key.
           - "cargo test --manifest-path webrdp-min/Cargo.toml --features native --locked native::"
           - ./tools/syntax-check-native.sh
-          - cmake -S native -B /tmp/gnomecast-native-build
-          - cmake --build /tmp/gnomecast-native-build
-          - ctest --test-dir /tmp/gnomecast-native-build --output-on-failure
+          - cmake -S native -B /tmp/lgnome-native-build
+          - cmake --build /tmp/lgnome-native-build
+          - ctest --test-dir /tmp/lgnome-native-build --output-on-failure
           - ./tools/build-native-webos.sh
         artifacts:
           - dist/native-webos/**

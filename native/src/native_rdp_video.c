@@ -10,10 +10,61 @@
 #include "native_rdp_state.h"
 #include "native_rdp_video.h"
 #include "native_rgba_owner.h"
+#include "native_time.h"
 
 #include "clog.h"
 
-clog_define(g_native_log_rdp_video, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_rdp_video, cLogLevelInfo, "native");
+
+/* Bound decoder rebuilds caused by codec interleaving within one connection. */
+#define NATIVE_MAX_GRAPHICS_PATH_SWITCHES 4
+
+/* Periodic decoder-input statistics. */
+#define NATIVE_VIDEO_PACING_LOG_MS 5000u
+
+/* Hold H.264 through bitmap refinements from the same owner. */
+#define NATIVE_H264_PATH_HOLD_MS 1500u
+
+/* Report one in this many discarded refinements. */
+#define NATIVE_TILE_DROP_LOG_INTERVAL 500u
+
+/* Flag a slow synchronous decoder call, not an idle remote desktop. */
+#define NATIVE_VIDEO_SLOW_FEED_MS 150u
+
+static void native_note_video_frame(App *app, NativeSessionSlot *slot, size_t len, uint32_t now_ms) {
+    app->video_frames_window++;
+    app->video_bytes_window += len;
+    if (!app->video_pacing_started) {
+        app->video_pacing_window_ms = now_ms;
+        app->video_pacing_started = true;
+        return;
+    }
+    uint32_t elapsed = now_ms - app->video_pacing_window_ms;
+    if (elapsed < NATIVE_VIDEO_PACING_LOG_MS) {
+        return;
+    }
+    clog(cLogLevelInfo,
+         "video: %u accepted AUs in %ums (%llu kbit/s, %.1f AU/s); shared decoder input, last_slot=%s, not displayed FPS",
+         app->video_frames_window, (unsigned)elapsed,
+         (unsigned long long)(app->video_bytes_window * 8ull / elapsed),
+         (double)app->video_frames_window * 1000.0 / (double)elapsed, native_session_slot_name(slot->index));
+    app->video_frames_window = 0;
+    app->video_bytes_window = 0;
+    app->video_pacing_window_ms = now_ms;
+}
+
+/* Only same-owner transitions reach this counter. */
+static bool native_note_graphics_path_switch(App *app, NativeSessionSlot *slot, const char *direction) {
+    slot->graphics_path_switches++;
+    clog(cLogLevelNotice, "switching graphics path %s", direction);
+    if (slot->graphics_path_switches <= NATIVE_MAX_GRAPHICS_PATH_SWITCHES) {
+        return false;
+    }
+    clog(cLogLevelError, "server interleaves H.264 and bitmap updates; neither path can present it");
+    app->decoder_errors++;
+    native_slot_report_terminal(slot, RDP_STATE_DECODER_ERROR, rdp_state_exit_code(RDP_STATE_DECODER_ERROR));
+    return true;
+}
 
 static void on_bitmap_update(void *ctx, uint16_t surface_id, uint32_t left, uint32_t top, uint32_t width, uint32_t height,
                              uint32_t stride, const uint8_t *rgba, size_t len) {
@@ -22,9 +73,7 @@ static void on_bitmap_update(void *ctx, uint16_t surface_id, uint32_t left, uint
         return;
     }
     App *app = slot->app;
-    /* Classify the graphics path BEFORE the background early-return: a backgrounded
-     * stream (e.g. fresh from a hidden reconnect) must still teach the switch logic
-     * that it renders via bitmaps and cannot be snapshot-switched. */
+    /* Classify background bitmap streams too: they cannot use AU snapshot switching. */
     atomic_store(&slot->video_via_bitmap, true);
     if (!native_slot_is_active(slot)) {
         /* Background session: only the active slot may touch the shared presentation. */
@@ -48,16 +97,29 @@ static void on_bitmap_update(void *ctx, uint16_t surface_id, uint32_t left, uint
     }
     unsigned owner_epoch = atomic_load(&slot->connect_epoch);
     if (app->rgba && !native_rgba_owner_matches(app, slot->index, owner_epoch)) {
-        /* A dirty rectangle can never be applied to another slot or connection
-         * generation's pixels. Keep any frozen HUB return surface separate and start
-         * this owner on a zeroed canvas. */
+        /* Dirty rectangles must not inherit another slot/epoch's pixels. */
         native_close_rgba_locked(app, true);
     }
     if (app->video) {
+        bool same_owner = app->video_owner_slot == slot->index && app->video_owner_epoch == owner_epoch;
+        uint32_t since_feed = native_monotonic_ms() - app->video_last_feed_ms;
+        if (same_owner && app->video_feed_started && since_feed < NATIVE_H264_PATH_HOLD_MS) {
+            /* Only the matching decoder owner may hold bitmap refinements behind live H.264. */
+            atomic_store(&slot->video_via_bitmap, false);
+            if (++app->tiles_dropped_under_video % NATIVE_TILE_DROP_LOG_INTERVAL == 0) {
+                clog(cLogLevelDebug, "video: %u refinement tiles dropped while H.264 is live",
+                     app->tiles_dropped_under_video);
+            }
+            pthread_mutex_unlock(&app->video_lock);
+            return;
+        }
         native_video_close(app->video);
         app->video = NULL;
         app->decoder_keyframe_pending = false;
-        clog(cLogLevelNotice, "switching graphics path from NDL/H.264 to native RemoteFX RGBA");
+        if (same_owner && native_note_graphics_path_switch(app, slot, "from NDL/H.264 to native RemoteFX RGBA")) {
+            pthread_mutex_unlock(&app->video_lock);
+            return;
+        }
     }
     if (!app->rgba) {
         app->rgba = native_rgba_surface_open(desktop_width, desktop_height);
@@ -67,7 +129,7 @@ static void on_bitmap_update(void *ctx, uint16_t surface_id, uint32_t left, uint
         }
     } else if (native_rgba_surface_width(app->rgba) != desktop_width ||
                native_rgba_surface_height(app->rgba) != desktop_height) {
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
         native_defer_rgba_texture_destroy(app);
 #endif
         if (native_rgba_surface_resize(app->rgba, desktop_width, desktop_height) != NATIVE_RGBA_OK) {
@@ -97,10 +159,7 @@ static void on_bitmap_update(void *ctx, uint16_t surface_id, uint32_t left, uint
     }
 }
 
-/* The single compressed-video ingest path: worker callbacks land here, and the
- * switch machinery replays snapshot AUs through it so every AU takes the same
- * classification/decoder path. Decoder-seed classification happens before routing or
- * decoder-ownership gates, so both paths use one native dual-framing verdict. */
+/* Shared ingest for live callbacks and snapshot replay. */
 void native_video_ingest_au(NativeSessionSlot *slot, const uint8_t *data, size_t len, uint64_t pts90k) {
     if (!slot) {
         return;
@@ -113,16 +172,9 @@ void native_video_ingest_au(NativeSessionSlot *slot, const uint8_t *data, size_t
      * routing so a backgrounded stream classifies its slot too. */
     atomic_store(&slot->video_via_bitmap, false);
     if (!native_slot_is_active(slot)) {
-        /* Background session: normally the server has been asked to suppress graphics —
-         * this also covers the in-flight tail and servers that ignore
-         * TS_SUPPRESS_OUTPUT_PDU. With the AU snapshot armed (hidden reconnect for a
-         * cacheable decoder seed) the compressed bytes are kept for replay on switch-to;
-         * without it they are dropped outright. */
         pthread_mutex_lock(&app->video_lock);
         if (native_slot_is_active(slot)) {
-            /* Promoted while we waited on the lock (a switch just took/cleared the
-             * snapshot): this AU belongs to the LIVE stream now — fall through to the
-             * active path below instead of silently losing it. */
+            /* The slot became active while waiting for video_lock; feed this AU live. */
             pthread_mutex_unlock(&app->video_lock);
         } else {
             if (slot->snapshot.armed) {
@@ -132,9 +184,7 @@ void native_video_ingest_au(NativeSessionSlot *slot, const uint8_t *data, size_t
                          "%s AU snapshot invalidated (overflow or malformed AU); switch-to will reconnect",
                          native_session_slot_name(slot->index));
                 }
-                /* The quiet-gate timestamp must be public BEFORE readiness: a reader
-                 * seeing ready=true with the previous (stale) timestamp could judge the
-                 * stream quiet at the very moment this AU is landing. */
+                /* Publish arrival time before readiness so replay cannot mistake this AU for a quiet stream. */
                 atomic_store(&slot->snapshot_last_au_ms, native_monotonic_ms());
                 atomic_store(&slot->snapshot_idr_ready, native_au_snapshot_ready(&slot->snapshot));
             }
@@ -149,11 +199,7 @@ void native_video_ingest_au(NativeSessionSlot *slot, const uint8_t *data, size_t
         return;
     }
 
-    /* The slot's desktop size reflects the server's real EGFX graphics output size
-     * (on_desktop_size is re-invoked on every RDPGFX_RESET_GRAPHICS_PDU, not just the
-     * initial MCS/GCC handshake), which can differ from the negotiated session size, e.g.
-     * a TV whose hardware decoder always runs at panel resolution. Reopen the hardware decoder
-     * whenever that size changes so it matches what the server actually encodes. */
+    /* Use the latest ResetGraphics size, which may differ from the connection handshake. */
     uint16_t desktop_width = (uint16_t)atomic_load(&slot->desktop_width);
     uint16_t desktop_height = (uint16_t)atomic_load(&slot->desktop_height);
     pthread_mutex_lock(&app->video_lock);
@@ -163,15 +209,16 @@ void native_video_ingest_au(NativeSessionSlot *slot, const uint8_t *data, size_t
         return;
     }
     if (app->rgba) {
+        bool same_owner = native_rgba_owner_matches(app, slot->index, atomic_load(&slot->connect_epoch));
         native_close_rgba_locked(app, true);
-        clog(cLogLevelNotice, "switching graphics path from native RemoteFX RGBA to NDL/H.264");
+        if (same_owner && native_note_graphics_path_switch(app, slot, "from native RemoteFX RGBA to NDL/H.264")) {
+            pthread_mutex_unlock(&app->video_lock);
+            return;
+        }
     }
     if (app->video && (app->video_owner_slot != slot->index ||
                        app->video_owner_epoch != atomic_load(&slot->connect_epoch))) {
-        /* The decoder still holds another stream's state (a switch left the old picture
-         * up on purpose). Swap only once THIS stream's keyframe is in hand: deltas fed
-         * into foreign decoder state would be garbage, and closing earlier would just
-         * black the screen for the whole handover. */
+        /* Keep the old picture until the new decoder owner supplies a keyframe. */
         if (!decoder_seed) {
             pthread_mutex_unlock(&app->video_lock);
             unsigned waited = atomic_fetch_add(&slot->keyframe_wait_drops, 1u) + 1u;
@@ -185,9 +232,7 @@ void native_video_ingest_au(NativeSessionSlot *slot, const uint8_t *data, size_t
         atomic_store(&slot->keyframe_wait_drops, 0u);
         if (desktop_width == native_video_width(app->video) &&
             desktop_height == native_video_height(app->video)) {
-            /* Same dimensions: hand the running decoder over in-band. gnome-remote-desktop
-             * sends SPS+PPS with every IDR, which restarts H.264 decode cleanly — no
-             * pipeline reload, no black gap, and the mixed audio track is never touched. */
+            /* SPS/PPS + IDR allow in-band handoff without reloading the shared audio pipeline. */
             clog(cLogLevelNotice, "handing the video decoder to the %s session in-band (%ux%u)",
                  native_session_slot_name(slot->index), (unsigned)desktop_width,
                  (unsigned)desktop_height);
@@ -217,12 +262,16 @@ void native_video_ingest_au(NativeSessionSlot *slot, const uint8_t *data, size_t
     if (!app->video) {
         NativeMedia *media = native_ensure_media_locked(app);
         if (media) {
-            /* Audio must attach before the video track: the video open below triggers
-             * the single pipeline load with the keyframe already in hand, whereas an
-             * audio open arriving later would reload the pipeline mid-stream. */
+            /* Attach audio before video to load both tracks once, at the keyframe. */
             native_open_speculative_audio_locked(app);
             app->video = native_video_open(media, desktop_width, desktop_height, slot->config.fps);
             if (app->video) {
+                clog(cLogLevelInfo,
+                     "%s video decoder opened: NDL H.264 %ux%u epoch=%u AU=%zu bytes NALs=%zu IDR=%d SPS=%d PPS=%d framing=%s",
+                     native_session_slot_name(slot->index), (unsigned)desktop_width, (unsigned)desktop_height,
+                     atomic_load(&slot->connect_epoch), len, h264_info.nal_count, h264_info.has_idr,
+                     h264_info.has_sps, h264_info.has_pps,
+                     h264_info.starts_with_annexb_start_code ? "Annex-B" : "AVC-length-prefixed");
                 app->video_owner_slot = slot->index;
                 app->video_owner_epoch = atomic_load(&slot->connect_epoch);
             }
@@ -238,40 +287,39 @@ void native_video_ingest_au(NativeSessionSlot *slot, const uint8_t *data, size_t
         }
     }
 
-    /* The callback byte lifetime is synchronous: do not retain data beyond native_video_feed.
-     * If this callback later queues AUs to another thread, copy the bytes before returning.
-     */
+    /* data is valid only for this synchronous callback. */
+    uint32_t feed_started_ms = native_monotonic_ms();
+    app->video_last_feed_ms = feed_started_ms;
+    app->video_feed_started = true;
     NativeVideoResult result = native_video_feed(app->video, data, len, pts90k);
+    uint32_t feed_finished_ms = native_monotonic_ms();
+    uint32_t feed_ms = feed_finished_ms - feed_started_ms;
+    if (feed_ms >= NATIVE_VIDEO_SLOW_FEED_MS) {
+        clog_limited(cLogLevelWarning, 2, NATIVE_VIDEO_PACING_LOG_MS,
+                     "video: decoder feed blocked for %ums", (unsigned)feed_ms);
+    }
     if (result == NATIVE_VIDEO_NEED_KEYFRAME) {
-        /* Published while still holding video_lock and only for the slot that is active
-         * RIGHT NOW: a switch flips active_index (and clears this flag) under the same
-         * lock, so a feed racing the switch cannot leave a stale request behind — the
-         * tick would send that refresh to the fresh target and arm its watchdog into a
-         * needless reconnect on a static desktop. */
+        /* Publish under video_lock so a switch cannot inherit the old owner's refresh request. */
         if (slot->index == atomic_load(&app->active_index) && !app->decoder_keyframe_pending) {
             clog(cLogLevelWarning,
                  "decoder requested keyframe/recovery; waiting for native RDP recovery, no web fallback");
             app->decoder_keyframe_pending = true;
-            /* Kick the SDL thread: refresh-capable servers deliver an IDR, refresh-
-             * ineffective ones fall to the keyframe watchdog's reconnect. Without this a
-             * broken reference chain (e.g. a stale snapshot replay) would freeze the
-             * stream forever — grd never resends an IDR on its own. */
             atomic_store(&app->video_refresh_needed, true);
         }
         pthread_mutex_unlock(&app->video_lock);
         return;
     }
-    pthread_mutex_unlock(&app->video_lock);
     if (result == NATIVE_VIDEO_OK) {
         app->decoder_keyframe_pending = false;
         /* Signals the SDL thread that the freshly switched-to stream is decoding. */
         atomic_fetch_add(&slot->video_ok_frames, 1u);
+        native_note_video_frame(app, slot, len, feed_finished_ms);
+        pthread_mutex_unlock(&app->video_lock);
         return;
     }
+    pthread_mutex_unlock(&app->video_lock);
     if (result == NATIVE_VIDEO_DROPPED) {
-        /* Discarded by a still-loading decoder: not progress (video_ok_frames must not
-         * move — the snapshot-replay success check and the switch watchdog read it as
-         * "frames actually consumed") but not an error either. */
+        /* DROPPED does not count as decoded progress for replay or the switch watchdog. */
         return;
     }
 

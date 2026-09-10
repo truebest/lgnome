@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_NATIVE_LOOP_H
-#define GNOMECAST_NATIVE_LOOP_H
+#ifndef LGNOME_NATIVE_LOOP_H
+#define LGNOME_NATIVE_LOOP_H
 
 /* The app loop (see native_loop.c). Returns the process exit code. */
 

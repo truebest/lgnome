@@ -4,7 +4,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_ui_theme, cLogLevelInfo, cLogFlags_Default, "ui.theme", NULL);
+clog_define(g_native_log_ui_theme, cLogLevelInfo, "ui.theme");
 
 static void ui_init_styles(NativePreconnectUi *ui) {
     lv_style_init(&ui->root_style);

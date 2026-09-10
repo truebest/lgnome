@@ -8,7 +8,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_cursor, cLogLevelInfo, cLogFlags_Default, "cursor", NULL);
+clog_define(g_native_log_cursor, cLogLevelInfo, "cursor");
 
 _Static_assert(NATIVE_CURSOR_HIDDEN == RDP_POINTER_STATE_HIDDEN,
                "NATIVE_CURSOR_HIDDEN must match the FFI constant");
@@ -23,10 +23,8 @@ void native_cursor_init(NativeCursor *cursor) {
     pthread_mutex_init(&cursor->lock, NULL);
     cursor->desired = NATIVE_CURSOR_DEFAULT;
     atomic_init(&cursor->generation, 0u);
-#ifdef HELLOLG_TARGET_WEBOS
-    /* The platform pointer starts visible; without this the first server-driven hide would
-     * be skipped by the "already hidden" short-circuit and the pointer would stay on screen
-     * while the server considers it hidden. */
+#ifdef LGNOME_TARGET_WEBOS
+    /* Match the initially visible platform cursor so the first hide is applied. */
     cursor->visible = true;
 #endif
 }
@@ -35,7 +33,7 @@ void native_cursor_destroy(NativeCursor *cursor) {
     if (!cursor) {
         return;
     }
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
     if (cursor->cursor) {
         SDL_FreeCursor(cursor->cursor);
         cursor->cursor = NULL;
@@ -103,12 +101,7 @@ void native_cursor_submit_state(NativeCursor *cursor, uint32_t state) {
     }
 }
 
-/* Area-average resample with alpha-weighted (premultiplied) accumulation. Every source
- * pixel contributes proportionally to its overlap with the destination pixel's footprint,
- * which both antialiases downscaled edges and acts as bilinear-ish filtering on upscale.
- * Color channels are weighted by alpha so transparent pixels (RGB zeroed by the decoder)
- * cannot darken the visible edge — the classic fringe artifact of naive averaging.
- * Runs only on cursor-shape changes (<= 384x384), so float math is fine. */
+/* Area resampling with premultiplied-alpha weights prevents dark cursor fringes. */
 bool native_cursor_scale_rgba(const uint8_t *src, uint16_t src_w, uint16_t src_h, uint8_t *dst,
                               uint16_t dst_w, uint16_t dst_h) {
     if (!src || !dst || src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0) {
@@ -204,14 +197,7 @@ void native_cursor_scaled_geometry(uint16_t shape_w, uint16_t shape_h, uint16_t 
         hx = cursor_scale_dim(hot_x, window_w, desktop_w, 0);
         hy = cursor_scale_dim(hot_y, window_h, desktop_h, 0);
     }
-    /* Cap the mapped size: a hostile/degenerate desktop advertisement must not balloon
-     * the shape into an allocation whose byte size overflows 32-bit size_t. Capped
-     * hotspots are derived from the ORIGINAL shape geometry, not from the mapped
-     * values: those may already be rounded — or saturated to UINT16_MAX by
-     * cursor_scale_dim under extreme ratios, which would degenerate the hx/w
-     * proportion to 1 and pin a centered anchor to the edge. The bitmap itself is
-     * scaled straight from the source shape to the capped size, so this mapping is
-     * the exact one. */
+    /* Bound allocations; derive capped hotspots from original geometry, before rounding/saturation. */
     if (w > NATIVE_CURSOR_MAX_SCALED_DIM) {
         w = NATIVE_CURSOR_MAX_SCALED_DIM;
         hx = (uint16_t)(((uint32_t)hot_x * w) / (shape_w ? shape_w : 1u));
@@ -240,29 +226,29 @@ void native_cursor_scaled_geometry(uint16_t shape_w, uint16_t shape_h, uint16_t 
     }
 }
 
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 static void native_cursor_log_state(uint32_t state) {
-    /* State transitions are sparse (unlike motion), and a late unexpected HIDDEN is the
-     * key discriminator between an RDP-side hide and a lost webOS cursor plane. Do not
-     * permanently suppress these after the first few minutes of a session. */
     clog(cLogLevelDebug, "applying server pointer %s",
          state == NATIVE_CURSOR_HIDDEN ? "hidden" : "default");
 }
 
 static bool native_cursor_platform_show(bool visible) {
-#if HELLOLG_HAVE_SDL_WEBOS_CURSOR
-    /* This webOS API can report SDL_FALSE with no SDL error on firmware where the
-     * visibility request is still best-effort. Cursor shapes may be applied repeatedly
-     * during motion, so logging every failure here stalls the hot path and can disturb
-     * the shared media pipeline. Keep one diagnostic for each requested state. */
+#if LGNOME_HAVE_SDL_WEBOS_CURSOR
+    /* Some firmware returns SDL_FALSE without an error; log once per visibility state. */
     static bool webos_failure_logged[2] = {false, false};
-    /* Never SDL_ShowCursor(SDL_DISABLE) on webOS: it stops pointer-event delivery
-     * entirely (verified live), so a server-driven hide (e.g. the remote browser hiding
-     * the pointer over a video) would become unrecoverable by mouse input — our moves
-     * would never reach the server and it would never re-show its cursor. The platform
-     * visibility call hides only the image; events keep flowing and the system re-shows
-     * the pointer on genuine activity, in step with the remote side doing the same. */
+    /* SDL_ShowCursor(SDL_DISABLE) also stops webOS pointer events; hide only the platform image. */
+    SDL_ClearError();
+    int sdl_result = SDL_ShowCursor(SDL_ENABLE);
+    if (sdl_result < 0) {
+        clog_limited(cLogLevelWarning, 4, 5000, "SDL_ShowCursor(SDL_ENABLE) failed: %s",
+                     SDL_GetError());
+    }
+    /* SDL 2.30 needs NULL to redraw the current cursor, but without focus that draws the default.
+     * Wait for pointer entry; apply platform visibility after redraw. */
+    if (visible && SDL_GetMouseFocus()) {
+        SDL_SetCursor(NULL);
+    }
     SDL_ClearError();
     SDL_bool webos_result = SDL_webOSCursorVisibility(visible ? SDL_TRUE : SDL_FALSE);
     unsigned visibility_index = visible ? 1u : 0u;
@@ -271,12 +257,6 @@ static bool native_cursor_platform_show(bool visible) {
         webos_failure_logged[visibility_index] = true;
         clog(cLogLevelWarning, "SDL_webOSCursorVisibility(%d) failed: %s", visible ? 1 : 0,
              error && error[0] ? error : "no SDL error");
-    }
-    SDL_ClearError();
-    int sdl_result = SDL_ShowCursor(SDL_ENABLE);
-    if (sdl_result < 0) {
-        clog_limited(cLogLevelWarning, 4, 5000, "SDL_ShowCursor(SDL_ENABLE) failed: %s",
-                     SDL_GetError());
     }
     return webos_result == SDL_TRUE && sdl_result >= 0;
 #else
@@ -375,9 +355,6 @@ static void native_cursor_apply_shape(NativeCursor *cursor, uint8_t *rgba, uint1
         }
         log_count++;
     } else {
-        /* Color cursors are unproven on the webOS SDL port; degrade to the visible default
-         * arrow (the server draws no pointer of its own and considers it shown, so leaving
-         * it hidden would strand the user with no pointer). Probe line logged once. */
         if (!cursor->color_cursor_unavailable) {
             /* The fallback visibility calls clear SDL's error state for their own
              * diagnostics, so report the cursor-creation failure before invoking them. */
@@ -406,9 +383,6 @@ void native_cursor_apply(NativeCursor *cursor, uint16_t desktop_w, uint16_t desk
         return;
     }
     unsigned generation = atomic_load(&cursor->generation);
-    /* A changed desktop-to-window mapping (RESET_GRAPHICS resize; the window is fixed
-     * on the TV) must rebuild the cursor even with no new pointer update: the shape's
-     * scale and hotspot are functions of that mapping. */
     bool geometry_changed = desktop_w != cursor->applied_desktop_w || desktop_h != cursor->applied_desktop_h ||
                             window_w != cursor->applied_window_w || window_h != cursor->applied_window_h;
     if (generation == cursor->applied_generation && !geometry_changed) {
@@ -439,11 +413,7 @@ void native_cursor_apply(NativeCursor *cursor, uint16_t desktop_w, uint16_t desk
     cursor->applied_window_w = window_w;
     cursor->applied_window_h = window_h;
 
-    /* Each case asserts the platform state unconditionally rather than short-circuiting on
-     * cursor->visible: that flag can be stale (the webOS compositor auto-hides/shows the
-     * pointer on idle/activity behind our back), so a guard there would skip a genuinely-needed
-     * re-hide or re-show. The SDL calls are idempotent and only run when the server actually
-     * changed the pointer. */
+    /* webOS changes visibility behind our back; do not trust cursor->visible here. */
     switch (desired) {
     case NATIVE_CURSOR_SHAPE:
         if (rgba) {
@@ -511,12 +481,8 @@ void native_cursor_reassert(NativeCursor *cursor) {
     if (!cursor) {
         return;
     }
-    /* Re-apply the last server-driven pointer state after a webOS overlay (TV menu) hid the
-     * platform pointer behind our back: unlike native_cursor_apply this ignores the
-     * generation gate, and unlike the old typing-hide recovery it does not skip when we think
-     * the cursor is already visible (the platform state is out of sync after the overlay). A
-     * server-requested hide is still honoured. The worker writes desired under the lock, so
-     * snapshot it under the same lock (focus regain can race an RDP pointer update). */
+    /* Restore after overlay focus loss, bypassing the generation gate but honoring server hide.
+     * Read desired state under the worker's lock. */
     pthread_mutex_lock(&cursor->lock);
     uint32_t desired = cursor->desired;
     pthread_mutex_unlock(&cursor->lock);
@@ -524,9 +490,7 @@ void native_cursor_reassert(NativeCursor *cursor) {
         (void)native_cursor_set_visible(cursor, false);
         return;
     }
-    /* Install the artwork first, then ask webOS to expose the cursor plane. Every other
-     * show path uses this ordering; doing it backwards here allowed a cursor replacement
-     * to race/undo the visibility request on some firmware revisions. */
+    /* Apply artwork before visibility: cursor replacement can undo a prior show request. */
     if (cursor->cursor) {
         SDL_SetCursor(cursor->cursor);
     } else {
@@ -538,4 +502,4 @@ void native_cursor_reassert(NativeCursor *cursor) {
     (void)native_cursor_set_visible(cursor, true);
 }
 
-#endif /* HELLOLG_TARGET_WEBOS */
+#endif /* LGNOME_TARGET_WEBOS */

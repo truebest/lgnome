@@ -1,27 +1,15 @@
-#ifndef GNOMECAST_CONFIG_PATHS_H
-#define GNOMECAST_CONFIG_PATHS_H
+#ifndef LGNOME_CONFIG_PATHS_H
+#define LGNOME_CONFIG_PATHS_H
 
 #include <stdbool.h>
 #include <stddef.h>
-
-/* SDL-free helpers for locating and validating the persisted-settings file.
- *
- * These are split out of main.c so the host test suite can exercise the path
- * joining, candidate ordering, directory creation, and security checks that
- * decide where the RDP credentials file is written and read from — none of
- * which need SDL and all of which have been the source of ordering/security
- * bugs. */
 
 #define NATIVE_PERSISTED_CONFIG_FILENAME "settings.json"
 #define NATIVE_PERSISTED_CONFIG_PATH_MAX 1024u
 #define NATIVE_PERSISTED_CONFIG_MAX_CANDIDATES 8u
 
-/* Ordered, de-duplicated list of settings-file paths to try. Index 0 is the
- * highest priority. `from_env` marks paths supplied by the user through an
- * environment override: those are trusted for reading even when they live on a
- * read-only or foreign-owned mount, whereas discovered paths must pass the
- * ownership/permission check before their contents (which include a plaintext
- * password) are written or trusted. */
+/* Paths in priority order, without duplicates. Explicit environment paths are trusted for reads;
+ * discovered paths require ownership/permission checks. Writes always require a secure directory. */
 typedef struct NativeConfigPathCandidates {
     char paths[NATIVE_PERSISTED_CONFIG_MAX_CANDIDATES][NATIVE_PERSISTED_CONFIG_PATH_MAX];
     bool from_env[NATIVE_PERSISTED_CONFIG_MAX_CANDIDATES];

@@ -14,6 +14,12 @@ _Static_assert(RDP_STATE_DECODER_ERROR == 6, "RDP_STATE_DECODER_ERROR value chan
 _Static_assert(RDP_STATE_NETWORK_ERROR == 7, "RDP_STATE_NETWORK_ERROR value changed");
 _Static_assert(RDP_STATE_PROTOCOL_ERROR == 8, "RDP_STATE_PROTOCOL_ERROR value changed");
 _Static_assert(RDP_STATE_STOPPED == 9, "RDP_STATE_STOPPED value changed");
+_Static_assert(RDP_STATE_DISCONNECTED == 10, "RDP_STATE_DISCONNECTED value changed");
+_Static_assert(RDP_STATE_RECONNECTING == 11, "RDP_STATE_RECONNECTING value changed");
+_Static_assert(sizeof(RdpDisconnectReason) == sizeof(int), "RdpDisconnectReason must stay C-int sized");
+typedef void (*ExpectedStateCallback)(void *, RdpState, RdpDisconnectReason, const char *);
+_Static_assert(_Generic(((RdpCallbacks *)0)->on_state, ExpectedStateCallback: 1, default: 0),
+               "RdpCallbacks.on_state must carry the typed reason");
 
 _Static_assert(RDP_AUDIO_CODEC_OPUS == 1, "RDP_AUDIO_CODEC_OPUS value changed");
 _Static_assert(RDP_AUDIO_CODEC_PCM_S16LE == 2, "RDP_AUDIO_CODEC_PCM_S16LE value changed");
@@ -46,6 +52,26 @@ _Static_assert(sizeof(((RdpCallbacks *)0)->ctx) == sizeof(void *), "RdpCallbacks
 typedef void (*ExpectedVideoAuCallback)(void *, const uint8_t *, size_t, uint64_t);
 _Static_assert(_Generic(((RdpCallbacks *)0)->on_video_au, ExpectedVideoAuCallback: 1, default: 0),
                "RdpCallbacks.on_video_au signature changed");
+
+_Static_assert(RDP_DISCONNECT_NONE == 0, "RDP_DISCONNECT_NONE value changed");
+_Static_assert(RDP_DISCONNECT_PEER_DISCONNECTED == 1, "RDP_DISCONNECT_PEER_DISCONNECTED value changed");
+_Static_assert(RDP_DISCONNECT_USER_DISCONNECT == 2, "RDP_DISCONNECT_USER_DISCONNECT value changed");
+_Static_assert(RDP_DISCONNECT_USER_LOGOFF == 3, "RDP_DISCONNECT_USER_LOGOFF value changed");
+_Static_assert(RDP_DISCONNECT_ADMIN_DISCONNECT == 4, "RDP_DISCONNECT_ADMIN_DISCONNECT value changed");
+_Static_assert(RDP_DISCONNECT_ADMIN_LOGOFF == 5, "RDP_DISCONNECT_ADMIN_LOGOFF value changed");
+_Static_assert(RDP_DISCONNECT_SESSION_REPLACED == 6, "RDP_DISCONNECT_SESSION_REPLACED value changed");
+_Static_assert(RDP_DISCONNECT_IDLE_TIMEOUT == 7, "RDP_DISCONNECT_IDLE_TIMEOUT value changed");
+_Static_assert(RDP_DISCONNECT_SESSION_TIMEOUT == 8, "RDP_DISCONNECT_SESSION_TIMEOUT value changed");
+_Static_assert(RDP_DISCONNECT_SERVER_SHUTDOWN == 9, "RDP_DISCONNECT_SERVER_SHUTDOWN value changed");
+_Static_assert(RDP_DISCONNECT_SERVER_REBOOT == 10, "RDP_DISCONNECT_SERVER_REBOOT value changed");
+_Static_assert(RDP_DISCONNECT_SERVER_ERROR == 11, "RDP_DISCONNECT_SERVER_ERROR value changed");
+_Static_assert(RDP_DISCONNECT_ACCESS_DENIED == 12, "RDP_DISCONNECT_ACCESS_DENIED value changed");
+_Static_assert(RDP_DISCONNECT_LICENSE_ERROR == 13, "RDP_DISCONNECT_LICENSE_ERROR value changed");
+_Static_assert(RDP_DISCONNECT_BROKER_ERROR == 14, "RDP_DISCONNECT_BROKER_ERROR value changed");
+_Static_assert(RDP_DISCONNECT_CONNECTION_FAILED == 15, "RDP_DISCONNECT_CONNECTION_FAILED value changed");
+_Static_assert(RDP_DISCONNECT_CONNECTION_LOST == 16, "RDP_DISCONNECT_CONNECTION_LOST value changed");
+_Static_assert(RDP_DISCONNECT_PROTOCOL_ERROR == 17, "RDP_DISCONNECT_PROTOCOL_ERROR value changed");
+_Static_assert(RDP_DISCONNECT_GRAPHICS_ERROR == 18, "RDP_DISCONNECT_GRAPHICS_ERROR value changed");
 
 #if UINTPTR_MAX == UINT64_MAX
 _Static_assert(offsetof(RdpConfig, host) == 0, "RdpConfig.host offset changed");

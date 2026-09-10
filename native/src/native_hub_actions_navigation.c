@@ -1,6 +1,6 @@
 /* HUB BACK/activate navigation requests. The caller orders this phase ahead of
  * every settings mutation and connection transaction. */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #include "native_hub_actions_internal.h"
 
@@ -11,7 +11,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_hub_navigation, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_hub_navigation, cLogLevelInfo, "native");
 
 bool native_hub_actions_drain_navigation(NativeHubActionsContext *context) {
     App *app = context->app;

@@ -17,7 +17,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_session, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_session, cLogLevelInfo, "native");
 
 /* Retargets foreground-only policies after every active_index store: playback ducking
  * follows the on-screen session while outgoing camera/microphone payloads stop for every
@@ -60,7 +60,7 @@ void native_stop_media(App *app) {
     app->video = NULL;
     native_media_close(app->media);
     app->media = NULL;
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
     /* native_stop_media() only ever runs on the SDL/main thread, so it's safe to destroy
      * directly here rather than deferring; drain any texture a worker-thread callback
      * handed off but the render loop hasn't gotten to yet. */
@@ -120,8 +120,8 @@ void native_stop_slot(App *app, int index) {
     slot->suppressed = false;
     atomic_store(&slot->current_state, (int)RDP_STATE_IDLE);
     atomic_store(&slot->session_failed, false);
-#ifdef HELLOLG_TARGET_WEBOS
-    app->session_started_ms[index] = 0;
+#ifdef LGNOME_TARGET_WEBOS
+    app->session_started_s[index] = 0;
     app->session_runtime_active[index] = false;
 #endif
 }
@@ -130,7 +130,7 @@ void native_stop_all_sessions(App *app) {
     if (!app) {
         return;
     }
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
     /* Release the global evdev grab so the compositor/preconnect UI gets USB input back. */
     native_evdev_input_stop(&app->evdev_input);
 #endif
@@ -151,14 +151,14 @@ bool native_slot_connect(App *app, int index, bool arm_snapshot) {
         return false;
     }
     NativeSessionSlot *slot = &app->sessions[index];
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
     /* All calls that reach here with a running slot are internal recovery reconnects,
      * except the explicit UI Connect path, which clears this clock before calling us. */
-    uint64_t logical_session_started_ms = app->session_started_ms[index];
+    uint32_t logical_session_started_s = app->session_started_s[index];
     bool logical_session_runtime_active = app->session_runtime_active[index];
 #endif
     native_stop_slot(app, index);
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
     pthread_mutex_lock(&app->video_lock);
     if (app->hub_return_rgba && app->hub_return_replacement_slot == index) {
         /* The old worker is joined, so this cumulative frame baseline is stable. Publish
@@ -180,13 +180,22 @@ bool native_slot_connect(App *app, int index, bool arm_snapshot) {
         pthread_mutex_unlock(&app->video_lock);
     }
     atomic_fetch_add(&slot->connect_epoch, 1u);
+    slot->graphics_path_switches = 0;
     atomic_store(&slot->terminal_state, (int)RDP_STATE_IDLE);
-    atomic_store(&slot->desktop_width, NATIVE_RDP_INITIAL_DESKTOP_WIDTH);
-    atomic_store(&slot->desktop_height, NATIVE_RDP_INITIAL_DESKTOP_HEIGHT);
+    atomic_store(&slot->terminal_reason, (int)RDP_DISCONNECT_NONE);
+    atomic_store(&slot->reconnecting, false);
+#ifdef LGNOME_TARGET_WEBOS
+    atomic_store(&slot->was_active, logical_session_runtime_active);
+#else
+    atomic_store(&slot->was_active, false);
+#endif
+    atomic_store(&slot->desktop_width, slot->config.desktop_width);
+    atomic_store(&slot->desktop_height, slot->config.desktop_height);
 
     bool is_active = index == atomic_load(&app->active_index);
     if (is_active) {
         app->decoder_errors = 0;
+        app->tiles_dropped_under_video = 0;
         app->decoder_keyframe_pending = false;
         native_present_invalidate(app);
         atomic_store(&app->exit_code, 0);
@@ -204,8 +213,8 @@ bool native_slot_connect(App *app, int index, bool arm_snapshot) {
         .username = slot->config.username,
         .password = slot->config.password,
         .domain = slot->config.domain,
-        .width = NATIVE_RDP_INITIAL_DESKTOP_WIDTH,
-        .height = NATIVE_RDP_INITIAL_DESKTOP_HEIGHT,
+        .width = slot->config.desktop_width,
+        .height = slot->config.desktop_height,
         .fps = slot->config.fps,
         .prefer_pcm_audio = app->audio_codec == NATIVE_AUDIO_CODEC_PCM ? 1 : 0,
         .enable_camera =
@@ -234,8 +243,8 @@ bool native_slot_connect(App *app, int index, bool arm_snapshot) {
     native_capture_redirect_set_slot(
         &app->capture_redirect, index, slot->rdp, config.enable_camera != 0,
         config.enable_audio_input != 0);
-#ifdef HELLOLG_TARGET_WEBOS
-    app->session_started_ms[index] = logical_session_started_ms;
+#ifdef LGNOME_TARGET_WEBOS
+    app->session_started_s[index] = logical_session_started_s;
     app->session_runtime_active[index] = logical_session_runtime_active;
 #endif
     native_publish_effective_solo_mask(app);

@@ -1,6 +1,6 @@
 /* Capture-device settings and profile save/delete transactions. Requests remain
  * ordered capture-save, profile-save, profile-delete exactly as emitted by the UI. */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #include "native_hub_actions_internal.h"
 
@@ -15,7 +15,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_hub_profiles, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_hub_profiles, cLogLevelInfo, "native");
 
 bool native_hub_actions_drain_profiles(NativeHubActionsContext *context) {
     App *app = context->app;
@@ -119,19 +119,11 @@ bool native_hub_actions_drain_profiles(NativeHubActionsContext *context) {
         handled = true;
     }
     if (delete_requested && deleted_slot >= 0 && deleted_slot < NATIVE_SETTINGS_MAX_SESSIONS) {
-        NativeSessionConfig empty = {0};
-        empty.port = 3389;
-        empty.fps = 60;
+        NativeSessionConfig empty;
+        native_session_config_defaults(&empty);
         NativeSettings candidate = *settings;
         candidate.sessions[deleted_slot] = empty;
-        candidate.camera_enabled = false;
-        candidate.audio_input_enabled = false;
-        for (int slot = 0; slot < NATIVE_SETTINGS_MAX_SESSIONS; slot++) {
-            candidate.camera_enabled |=
-                candidate.sessions[slot].camera_redirect;
-            candidate.audio_input_enabled |=
-                candidate.sessions[slot].audio_input_redirect;
-        }
+        native_settings_recompute_capture_gates(&candidate);
         NativeSessionSlot *runtime = &app->sessions[deleted_slot];
         bool deleted = false;
         char delete_status[128] = "";

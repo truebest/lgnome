@@ -7,7 +7,7 @@
 #include "clog.h"
 #include "h264_annexb.h"
 
-clog_define(g_native_log_camera_h264_stream, cLogLevelInfo, cLogFlags_Default, "camera.h264", NULL);
+clog_define(g_native_log_camera_h264_stream, cLogLevelInfo, "camera.h264");
 
 typedef struct NativeCameraOwnedAu {
     uint8_t *data;

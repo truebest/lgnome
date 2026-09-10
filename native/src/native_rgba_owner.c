@@ -11,9 +11,9 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_rgba_owner, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_rgba_owner, cLogLevelInfo, "native");
 
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 /* SDL_DestroyTexture() must run on the thread that owns the renderer (the SDL/main thread),
  * but native_rgba_surface_close()/resize() can be invoked from the RDP worker thread
  * (on_bitmap_update, on_video_au). Call this (while holding video_lock) before either, so
@@ -78,7 +78,7 @@ void native_close_rgba_locked(App *app, bool defer_texture) {
         }
         return;
     }
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
     if (defer_texture) {
         native_defer_rgba_texture_destroy(app);
     }
@@ -112,7 +112,7 @@ void native_close_hub_return_rgba_locked(App *app) {
 /* Freeze the frame that belongs to the session HUB promised BACK would return to.
  * A retry runs after active_index has already moved to the failed target, so it must
  * never replace this cache from old_index/current ownership. */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 void native_capture_hub_return_rgba_locked(App *app) {
     if (!app || !app->hub_visible || app->hub_return_rgba) {
         return;

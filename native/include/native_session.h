@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_NATIVE_SESSION_H
-#define GNOMECAST_NATIVE_SESSION_H
+#ifndef LGNOME_NATIVE_SESSION_H
+#define LGNOME_NATIVE_SESSION_H
 
 #include <stdbool.h>
 

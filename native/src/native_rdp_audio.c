@@ -9,7 +9,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_rdp_audio, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_rdp_audio, cLogLevelInfo, "native");
 
 /* Audio is strictly best-effort: any failure here logs and degrades to silence for that
  * session; neither handler ever stops a session (and must never call rdp_session_stop,

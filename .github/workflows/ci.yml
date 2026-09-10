@@ -18,7 +18,7 @@ jobs:
       - name: Install host dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libsdl2-dev cmake build-essential pkg-config libgtest-dev
+          sudo apt-get install -y --no-install-recommends cmake build-essential libgtest-dev
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -57,7 +57,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          tags: gnomecast-native-build
+          tags: lgnome-native-build
           load: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -67,7 +67,7 @@ jobs:
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/workspace" \
             -w /workspace \
-            gnomecast-native-build \
+            lgnome-native-build \
             bash -lc '
               set -euo pipefail
               git config --global --add safe.directory /workspace
@@ -77,6 +77,6 @@ jobs:
       - name: Upload .ipk artifact
         uses: actions/upload-artifact@v4
         with:
-          name: gnomecast-native-ipk
+          name: lgnome-native-ipk
           path: dist/native-webos/*.ipk
           if-no-files-found: error

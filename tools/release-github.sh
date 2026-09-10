@@ -13,8 +13,8 @@ set -euo pipefail
 #
 # This script only pushes the tag/commit. It does NOT create the GitHub Releases entry
 # (Releases page, release notes, .ipk asset) — that's a separate manual step:
-#   gh release create vX.Y.Z --repo truebest/gnomecast --title "gnomecast X.Y.Z" \
-#     --notes "..." dist/native-webos/com.truebest.gnomecast.native_X.Y.Z_arm.ipk
+#   gh release create vX.Y.Z --repo truebest/lgnome --title "lgnome X.Y.Z" \
+#     --notes "..." dist/native-webos/com.truebest.lgnome.native_X.Y.Z_arm.ipk
 
 version="${1:?usage: tools/release-github.sh <version>   e.g. 0.1.2}"
 remote="${RELEASE_REMOTE:-github}"
@@ -68,10 +68,10 @@ if git fetch --quiet "$remote" "$branch" 2>/dev/null; then
   [ "$(git rev-parse "$parent^{tree}")" = "$tree" ] && fail "tree is identical to the latest published release; nothing to release"
 fi
 
-commit="$(git commit-tree "$tree" "${parent_args[@]}" -m "gnomecast ${version}")"
+commit="$(git commit-tree "$tree" "${parent_args[@]}" -m "lgnome ${version}")"
 
 git tag "$tag" "$commit" >/dev/null
 git push "$remote" "$commit:refs/heads/$branch" "refs/tags/$tag"
 echo "release-github: published release commit $commit as $remote/$branch ($tag)"
 echo "release-github: tag pushed, but the GitHub Releases entry is NOT created yet — run:" >&2
-echo "  gh release create $tag --repo truebest/gnomecast --title \"gnomecast $version\" --notes \"...\" dist/native-webos/com.truebest.gnomecast.native_${version}_arm.ipk" >&2
+echo "  gh release create $tag --repo truebest/lgnome --title \"lgnome $version\" --notes \"...\" dist/native-webos/com.truebest.lgnome.native_${version}_arm.ipk" >&2

@@ -10,7 +10,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_capture_glue, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_capture_glue, cLogLevelInfo, "native");
 
 /* Records the applied device/format config (deep-copying the id strings into
  * App storage) so the next settings save can tell a device change from a
@@ -39,7 +39,7 @@ void native_capture_follow_active_slot(App *app) {
     }
 }
 
-#if defined(HELLOLG_TARGET_WEBOS) || defined(HELLOLG_CAPTURE_REDIRECT_TESTING)
+#if defined(LGNOME_TARGET_WEBOS) || defined(LGNOME_CAPTURE_REDIRECT_TESTING)
 void native_reconfigure_capture_redirect(App *app) {
     if (!app || !app->settings || app->camera_preview) {
         return;

@@ -15,6 +15,7 @@
 #include <string.h>
 #include <sys/eventfd.h>
 #include <sys/inotify.h>
+#include <sys/ioctl.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -24,7 +25,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_input, cLogLevelInfo, cLogFlags_Default, "input.evdev", NULL);
+clog_define(g_native_log_input, cLogLevelInfo, "input.evdev");
 
 #define NATIVE_EVDEV_MAX_DEVICES 16
 /* Consecutive poll() failures tolerated before the reader gives up (see evdev_thread). */
@@ -33,9 +34,7 @@ clog_define(g_native_log_input, cLogLevelInfo, cLogFlags_Default, "input.evdev",
 typedef struct NativeEvdevDevice {
     int fd;
     struct libevdev *dev;
-    /* A single /dev/input node can be both a pointer and a keyboard (e.g. an all-in-one
-     * wireless keyboard+trackpad on one dongle), so these are independent capabilities rather
-     * than one exclusive kind; events are routed per event type in evdev_dispatch. */
+    /* Combined keyboard/trackpad nodes have independent keyboard and pointer capabilities. */
     bool is_mouse;
     bool is_keyboard;
     /* A TV-remote virtual node, recognized by its stable webOS device name.
@@ -53,6 +52,7 @@ typedef struct NativeEvdevBackend {
 typedef struct NativeEvdevDrainResult {
     bool pushed;
     bool remove;
+    bool pending; /* Stopped at the cutoff; libevdev may still buffer events. */
 } NativeEvdevDrainResult;
 
 static bool evdev_is_mouse(const struct libevdev *dev) {
@@ -60,12 +60,7 @@ static bool evdev_is_mouse(const struct libevdev *dev) {
            libevdev_has_event_code(dev, EV_REL, REL_Y);
 }
 
-/* True for a device we should grab as a keyboard: it has the typing keys AND is either a pure
- * keyboard (no pointer buttons) or a genuine combined keyboard+trackpad (also a real relative
- * mouse). A node that carries pointer buttons but is NOT a relative mouse is a TV remote / gyro
- * pointer that merely advertises a full keymap (on webOS: "LGE RCU", "M-RCU", "CHECK INPUT",
- * "IoT keypad", "Bluetooth-audio-source", ...). Grabbing one of those steals the remote from
- * the compositor, so it must be rejected here. */
+/* Reject full-keymap TV remotes with pointer buttons but no relative-mouse capability. */
 static bool evdev_is_keyboard(const struct libevdev *dev) {
     if (!(libevdev_has_event_code(dev, EV_KEY, KEY_A) && libevdev_has_event_code(dev, EV_KEY, KEY_Z) &&
           libevdev_has_event_code(dev, EV_KEY, KEY_SPACE))) {
@@ -76,9 +71,7 @@ static bool evdev_is_keyboard(const struct libevdev *dev) {
     return !has_pointer_buttons || evdev_is_mouse(dev);
 }
 
-/* Visit each /dev/input/event* node, calling `visit(path, user)`; stops as soon as a visit
- * returns true and reports whether that happened. Shared by device probing and grab setup so
- * they never disagree about which nodes exist or how they are enumerated. */
+/* Stops and returns true when visit(path, user) returns true. */
 typedef bool (*NativeEvdevNodeVisitor)(const char *path, void *user);
 
 static bool evdev_for_each_input_node(NativeEvdevNodeVisitor visit, void *user) {
@@ -163,39 +156,9 @@ static uint8_t evdev_mouse_button(uint16_t code) {
     }
 }
 
-static bool evdev_push_mouse(NativeEvdevInput *input, const NativeMouseEv *ev) {
-    pthread_mutex_lock(&input->lock);
-    if (ev->kind == NATIVE_MOUSE_EV_MOTION && input->mouse_head != input->mouse_tail) {
-        unsigned last = (input->mouse_tail + NATIVE_EVDEV_MOUSE_RING - 1u) % NATIVE_EVDEV_MOUSE_RING;
-        if (input->mouse_ring[last].kind == NATIVE_MOUSE_EV_MOTION) {
-            input->mouse_ring[last].dx += ev->dx;
-            input->mouse_ring[last].dy += ev->dy;
-            pthread_mutex_unlock(&input->lock);
-            return true;
-        }
-    }
-    unsigned next = (input->mouse_tail + 1u) % NATIVE_EVDEV_MOUSE_RING;
-    if (next == input->mouse_head) {
-        input->mouse_head = (input->mouse_head + 1u) % NATIVE_EVDEV_MOUSE_RING;
-    }
-    input->mouse_ring[input->mouse_tail] = *ev;
-    input->mouse_tail = next;
-    pthread_mutex_unlock(&input->lock);
-    return true;
-}
-
-static bool evdev_push_keyboard(NativeEvdevInput *input, uint16_t code, bool down, bool from_remote) {
-    pthread_mutex_lock(&input->lock);
-    unsigned next = (input->keyboard_tail + 1u) % NATIVE_EVDEV_KEYBOARD_RING;
-    if (next == input->keyboard_head) {
-        input->keyboard_head = (input->keyboard_head + 1u) % NATIVE_EVDEV_KEYBOARD_RING;
-    }
-    input->keyboard_ring[input->keyboard_tail].code = code;
-    input->keyboard_ring[input->keyboard_tail].down = down;
-    input->keyboard_ring[input->keyboard_tail].from_remote = from_remote;
-    input->keyboard_tail = next;
-    pthread_mutex_unlock(&input->lock);
-    return true;
+/* The reader holds input->lock across the complete device sweep. */
+static uint64_t evdev_event_time(const struct input_event *raw) {
+    return (uint64_t)raw->time.tv_sec * 1000000u + (uint64_t)raw->time.tv_usec;
 }
 
 static bool evdev_dispatch_mouse(NativeEvdevInput *input, const struct input_event *raw) {
@@ -239,7 +202,10 @@ static bool evdev_dispatch_mouse(NativeEvdevInput *input, const struct input_eve
         return false;
     }
     atomic_fetch_add(&input->event_count, 1u);
-    return evdev_push_mouse(input, &ev);
+    NativeEvent event = {.time_us = evdev_event_time(raw), .kind = NATIVE_EVENT_MOUSE};
+    event.data.mouse = ev;
+    native_event_queue_push(&input->queue, &event);
+    return true;
 }
 
 static bool evdev_dispatch_keyboard(NativeEvdevInput *input, const NativeEvdevDevice *device,
@@ -248,7 +214,12 @@ static bool evdev_dispatch_keyboard(NativeEvdevInput *input, const NativeEvdevDe
         return false;
     }
     atomic_fetch_add(&input->event_count, 1u);
-    return evdev_push_keyboard(input, (uint16_t)raw->code, raw->value != 0, device->is_remote);
+    NativeEvent event = {.time_us = evdev_event_time(raw), .kind = NATIVE_EVENT_KEYBOARD};
+    event.data.keyboard = (NativeKeyboardEv){
+        .code = (uint16_t)raw->code, .down = raw->value != 0, .from_remote = device->is_remote,
+    };
+    native_event_queue_push(&input->queue, &event);
+    return true;
 }
 
 static bool evdev_dispatch(NativeEvdevInput *input, const NativeEvdevDevice *device, const struct input_event *raw) {
@@ -257,17 +228,12 @@ static bool evdev_dispatch(NativeEvdevInput *input, const NativeEvdevDevice *dev
         /* Relative motion/wheel is always pointer data. */
         return device->is_mouse ? evdev_dispatch_mouse(input, raw) : false;
     case EV_KEY:
-        /* Pointer buttons (BTN_LEFT..BTN_TASK) belong to the mouse ring; every other EV_KEY is
-         * a typing key for the keyboard ring. A combined device routes each to its ring. */
+        /* Pointer buttons (BTN_LEFT..BTN_TASK) are mouse events; every other EV_KEY is
+         * a typing key. Both share the same ordered queue. */
         if (raw->code >= BTN_LEFT && raw->code <= BTN_TASK) {
             return device->is_mouse ? evdev_dispatch_mouse(input, raw) : false;
         }
-        /* Remote color keys and the channel rocker (session switching/zapping) ride
-         * whatever grabbed node emits them: some Magic Remote firmwares expose virtual
-         * nodes that qualify only as relative mice, and the switch keys must not depend
-         * on that node also typing like a keyboard. The keyboard drain runs whenever the
-         * ring holds events, so these get through even with no keyboard-classified
-         * device present. (KEY_RED..KEY_BLUE and KEY_CHANNELUP/DOWN are contiguous.) */
+        /* Remote navigation keys can arrive on mouse-only nodes. */
         bool remote_confirm = device->is_remote &&
                               (raw->code == KEY_ENTER || raw->code == KEY_KPENTER || raw->code == KEY_OK);
         if ((raw->code >= KEY_RED && raw->code <= KEY_CHANNELDOWN) || remote_confirm) {
@@ -307,13 +273,20 @@ static NativeEvdevDrainResult evdev_drain_sync(NativeEvdevInput *input, NativeEv
     return result;
 }
 
-static NativeEvdevDrainResult evdev_drain_device(NativeEvdevInput *input, NativeEvdevDevice *device) {
+static NativeEvdevDrainResult evdev_drain_device(NativeEvdevInput *input, NativeEvdevDevice *device,
+                                                uint64_t before_us) {
     NativeEvdevDrainResult result = {0};
     for (;;) {
         struct input_event raw;
         int ret = libevdev_next_event(device->dev, LIBEVDEV_READ_FLAG_NORMAL, &raw);
         if (ret == LIBEVDEV_READ_STATUS_SUCCESS) {
             result.pushed = evdev_dispatch(input, device, &raw) || result.pushed;
+            /* Keep the first newer event queued but unpublished. Do not chase a
+             * continuously busy mouse while holding the consumer mutex. */
+            if (evdev_event_time(&raw) >= before_us) {
+                result.pending = true;
+                break;
+            }
         } else if (ret == LIBEVDEV_READ_STATUS_SYNC) {
             NativeEvdevDrainResult sync_result = evdev_drain_sync(input, device);
             result.pushed = sync_result.pushed || result.pushed;
@@ -397,12 +370,7 @@ static void evdev_remove_device(NativeEvdevInput *input, NativeEvdevBackend *bac
     evdev_update_active_flags(input, backend);
 }
 
-/* Ungrab and close every open device (releasing EVIOCGRAB) and clear the active flags, WITHOUT
- * freeing the backend. Used by the reader thread when it gives up on a persistent poll() error,
- * so grabbed USB devices are actually handed back to the compositor (real SDL fallback) instead
- * of staying captured until session teardown. The backend struct and its inotify fd remain for
- * native_evdev_input_stop() to free after joining the thread. Idempotent (evdev_close_device
- * clears fd/dev), so a later evdev_close_backend() over 0 devices is a no-op. */
+/* Release devices without freeing backend/inotify state; stop frees it after joining. */
 static void evdev_release_devices(NativeEvdevInput *input, NativeEvdevBackend *backend) {
     for (int i = 0; i < backend->ndevices; i++) {
         evdev_close_device(&backend->devices[i]);
@@ -436,9 +404,7 @@ static bool evdev_backend_has_path(const NativeEvdevBackend *backend, const char
 }
 
 static bool evdev_add_device(NativeEvdevInput *input, NativeEvdevBackend *backend, const char *path) {
-    /* Already grabbed (initial scan or a prior hotplug rescan): nothing to do. Skipping before
-     * open() also avoids a second EVIOCGRAB on a device we already hold, which would fail EBUSY
-     * and leave a duplicate ungrabbed entry. */
+    /* Skip before open: a duplicate EVIOCGRAB fails with EBUSY. */
     if (backend->ndevices >= NATIVE_EVDEV_MAX_DEVICES || evdev_backend_has_path(backend, path)) {
         return false;
     }
@@ -451,6 +417,14 @@ static bool evdev_add_device(NativeEvdevInput *input, NativeEvdevBackend *backen
         return false;
     }
 
+    /* Configure the fd before libevdev reads any events: all timestamps and
+     * publication cutoffs must use one clock unaffected by wall-clock changes. */
+    int clock_id = CLOCK_MONOTONIC;
+    if (ioctl(fd, EVIOCSCLOCKID, &clock_id) < 0) {
+        clog(cLogLevelWarning, "cannot select monotonic input clock for %s: %s", path, strerror(errno));
+        close(fd);
+        return false;
+    }
     struct libevdev *dev = NULL;
     int ret = libevdev_new_from_fd(fd, &dev);
     if (ret < 0) {
@@ -480,8 +454,13 @@ static bool evdev_add_device(NativeEvdevInput *input, NativeEvdevBackend *backen
 
     ret = libevdev_grab(dev, LIBEVDEV_GRAB);
     if (ret < 0) {
-        clog(cLogLevelWarning, "failed to grab %s %s: %s (kept ungrabbed)", kind_name, path,
+        clog(cLogLevelWarning, "failed to grab %s %s: %s (skipping device)", kind_name, path,
              strerror(-ret));
+        libevdev_free(dev);
+        close(fd);
+        device->dev = NULL;
+        device->fd = -1;
+        return false;
     } else {
         clog(cLogLevelInfo, "grabbed %s %s (%s)", kind_name, path, libevdev_get_name(dev));
     }
@@ -516,9 +495,6 @@ static NativeEvdevBackend *evdev_open_backend(NativeEvdevInput *input) {
         backend->devices[i].fd = -1;
     }
 
-    /* Watch /dev/input so a keyboard/mouse plugged in mid-session is grabbed without a restart
-     * (unplug is already handled by the reader's poll-error path). Best effort: if inotify is
-     * unavailable we simply fall back to a one-shot scan. */
     backend->inotify_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
     if (backend->inotify_fd >= 0 && inotify_add_watch(backend->inotify_fd, "/dev/input", IN_CREATE | IN_ATTRIB) < 0) {
         clog(cLogLevelWarning, "inotify watch on /dev/input failed (%s); hotplug add disabled",
@@ -530,9 +506,6 @@ static NativeEvdevBackend *evdev_open_backend(NativeEvdevInput *input) {
     struct evdev_open_context ctx = {input, backend};
     (void)evdev_for_each_input_node(evdev_open_visit, &ctx);
 
-    /* Keep the reader alive with zero devices as long as hotplug is watching, so "start
-     * streaming, then plug in a keyboard" still works. Only give up when there is nothing to
-     * read and no way to notice a later device. */
     if (backend->ndevices == 0 && backend->inotify_fd < 0) {
         evdev_close_backend(backend);
         return NULL;
@@ -540,10 +513,7 @@ static NativeEvdevBackend *evdev_open_backend(NativeEvdevInput *input) {
     return backend;
 }
 
-/* Drain the inotify queue (used only as a "something changed" trigger) and reconcile the
- * grabbed set against /dev/input, grabbing any node we do not already hold. A full rescan is
- * used rather than acting on individual inotify records so node renumbering across an
- * unplug/replug cannot slip through. Returns true if the device set changed. */
+/* Rescan all nodes: unplug/replug may renumber them. Returns whether the set changed. */
 static bool evdev_handle_hotplug(NativeEvdevInput *input, NativeEvdevBackend *backend) {
     if (backend->inotify_fd < 0) {
         return false;
@@ -565,6 +535,7 @@ static void *evdev_thread(void *arg) {
     /* +2 for the stop eventfd and the /dev/input inotify fd. */
     struct pollfd fds[NATIVE_EVDEV_MAX_DEVICES + 2];
     int poll_failures = 0;
+    bool queued = false;
 
     while (atomic_load(&input->running)) {
         fds[0].fd = input->stop_fd;
@@ -579,15 +550,14 @@ static void *evdev_thread(void *arg) {
             fds[i + 2].revents = 0;
         }
 
-        int ret = poll(fds, (nfds_t)(backend->ndevices + 2), -1);
+        /* A newer event may already be buffered in libevdev or the shared
+         * queue, with no kernel fd readiness left to wake the next sweep. */
+        int ret = poll(fds, (nfds_t)(backend->ndevices + 2), queued ? 1 : -1);
         if (ret < 0) {
             if (errno == EINTR) {
                 continue;
             }
             clog(cLogLevelWarning, "poll failed: %s", strerror(errno));
-            /* A persistent poll error (not EINTR) would otherwise spin the reader at 100% CPU,
-             * starving video decode and flooding the log. Back off briefly, and after a bounded
-             * run of consecutive failures give up so the app drops back to SDL input. */
             if (++poll_failures >= NATIVE_EVDEV_MAX_POLL_FAILURES) {
                 clog(cLogLevelWarning, "too many consecutive poll failures; stopping evdev reader");
                 /* Hand the devices back to the compositor before quitting, otherwise they stay
@@ -609,25 +579,36 @@ static void *evdev_thread(void *arg) {
 
         bool pushed = false;
         bool changed = false;
+        bool read_pending = false;
+        struct timespec sweep_start;
+        clock_gettime(CLOCK_MONOTONIC, &sweep_start);
+        uint64_t before_us = (uint64_t)sweep_start.tv_sec * 1000000u +
+                             (uint64_t)sweep_start.tv_nsec / 1000u;
+        pthread_mutex_lock(&input->lock);
         /* Handle disconnects first so the hotplug rescan below sees an accurate device set
          * (e.g. an unplug/replug that reuses the same eventN node). */
         for (int i = backend->ndevices - 1; i >= 0; i--) {
-            if (fds[i + 2].revents & (POLLIN | POLLERR | POLLHUP | POLLNVAL)) {
-                NativeEvdevDrainResult drain = evdev_drain_device(input, &backend->devices[i]);
-                pushed = drain.pushed || pushed;
-                if (drain.remove || (fds[i + 2].revents & (POLLERR | POLLHUP | POLLNVAL))) {
-                    evdev_remove_device(input, backend, i);
-                    changed = true;
-                }
+            /* Read every nonblocking fd, including devices which became ready
+             * after poll returned, before publishing this sweep. */
+            NativeEvdevDrainResult drain = evdev_drain_device(input, &backend->devices[i], before_us);
+            pushed = drain.pushed || pushed;
+            read_pending = drain.pending || read_pending;
+            if (drain.remove || (fds[i + 2].revents & (POLLERR | POLLHUP | POLLNVAL))) {
+                evdev_remove_device(input, backend, i);
+                changed = true;
             }
         }
+        native_event_queue_publish_before(&input->queue, before_us);
+        queued = read_pending || input->queue.count != 0;
+        bool ready = native_event_queue_next_kind(&input->queue) != NATIVE_EVENT_NONE;
+        pthread_mutex_unlock(&input->lock);
         /* Then pick up devices connected since the last scan. */
         if (fds[1].revents & POLLIN) {
             changed = evdev_handle_hotplug(input, backend) || changed;
         }
         /* Wake the main loop on new input and on a device-set change so it re-reads the
          * mouse/keyboard active flags and starts (or stops) draining promptly. */
-        if (pushed || changed) {
+        if (pushed || changed || ready) {
             evdev_notify_main(input);
         }
     }
@@ -641,6 +622,7 @@ bool native_evdev_input_start(NativeEvdevInput *input) {
     memset(input, 0, sizeof(*input));
     input->wake_fd = -1;
     input->stop_fd = -1;
+    native_event_queue_publish_before(&input->queue, 0);
     pthread_mutex_init(&input->lock, NULL);
     input->lock_initialized = true;
     atomic_init(&input->running, false);
@@ -679,6 +661,10 @@ bool native_evdev_input_start(NativeEvdevInput *input) {
 }
 
 void native_evdev_input_stop(NativeEvdevInput *input) {
+    native_evdev_input_stop_with_buttons(input, NULL);
+}
+
+void native_evdev_input_stop_with_buttons(NativeEvdevInput *input, uint8_t *buttons) {
     if (!input) {
         return;
     }
@@ -697,6 +683,35 @@ void native_evdev_input_stop(NativeEvdevInput *input) {
     }
 
     if (input->backend) {
+        NativeEvdevBackend *backend = input->backend;
+        if (buttons) {
+            uint8_t held = 0;
+            bool has_mouse = false;
+            /* Query kernel button state after join/ungrab; queued releases may never have reached SDL. */
+            for (int i = 0; i < backend->ndevices; i++) {
+                NativeEvdevDevice *device = &backend->devices[i];
+                if (!device->is_mouse) {
+                    continue;
+                }
+                has_mouse = true;
+                (void)libevdev_grab(device->dev, LIBEVDEV_UNGRAB);
+                unsigned char keys[(KEY_MAX + 8u) / 8u] = {0};
+                if (ioctl(device->fd, EVIOCGKEY(sizeof(keys)), keys) < 0) {
+                    clog_limited(cLogLevelWarning, 2, 5000,
+                                 "cannot read mouse buttons during input handoff: %s", strerror(errno));
+                    continue;
+                }
+                for (unsigned code = BTN_LEFT; code <= BTN_TASK; code++) {
+                    uint8_t button = evdev_mouse_button((uint16_t)code);
+                    if (button >= 1 && button <= SDL_BUTTON_X2 && (keys[code / 8u] & (1u << (code % 8u)))) {
+                        held |= (uint8_t)(1u << (button - 1u));
+                    }
+                }
+            }
+            if (has_mouse) {
+                *buttons = held;
+            }
+        }
         evdev_close_backend((NativeEvdevBackend *)input->backend);
         input->backend = NULL;
     }
@@ -721,30 +736,34 @@ bool native_evdev_input_active(const NativeEvdevInput *input) {
     return input && input->started && atomic_load(&input->running);
 }
 
-static bool evdev_mouse_queue_pending(NativeEvdevInput *input) {
-    bool pending;
+NativeEventKind native_evdev_input_next_kind(NativeEvdevInput *input) {
+    if (!input || !input->started) {
+        return NATIVE_EVENT_NONE;
+    }
     pthread_mutex_lock(&input->lock);
-    pending = input->mouse_head != input->mouse_tail;
+    NativeEventKind kind = native_event_queue_next_kind(&input->queue);
     pthread_mutex_unlock(&input->lock);
-    return pending;
+    return kind;
 }
 
-static bool evdev_keyboard_queue_pending(NativeEvdevInput *input) {
-    bool pending;
+bool native_evdev_input_take_reset(NativeEvdevInput *input) {
+    if (!input || !input->started) {
+        return false;
+    }
     pthread_mutex_lock(&input->lock);
-    pending = input->keyboard_head != input->keyboard_tail;
+    bool reset = native_event_queue_take_reset(&input->queue);
     pthread_mutex_unlock(&input->lock);
-    return pending;
+    return reset;
 }
 
 bool native_evdev_input_mouse_active(NativeEvdevInput *input) {
-    return native_evdev_input_active(input) &&
-           (atomic_load(&input->mouse_active) || evdev_mouse_queue_pending(input));
+    return input && input->started &&
+           (atomic_load(&input->mouse_active) || native_evdev_input_next_kind(input) == NATIVE_EVENT_MOUSE);
 }
 
 bool native_evdev_input_keyboard_active(NativeEvdevInput *input) {
-    return native_evdev_input_active(input) &&
-           (atomic_load(&input->keyboard_active) || evdev_keyboard_queue_pending(input));
+    return input && input->started &&
+           (atomic_load(&input->keyboard_active) || native_evdev_input_next_kind(input) == NATIVE_EVENT_KEYBOARD);
 }
 
 int native_evdev_input_wake_fd(const NativeEvdevInput *input) {
@@ -769,9 +788,9 @@ size_t native_evdev_input_pop_mouse_batch(NativeEvdevInput *input, NativeMouseEv
     }
     size_t count = 0;
     pthread_mutex_lock(&input->lock);
-    while (input->mouse_head != input->mouse_tail && count < cap) {
-        out[count++] = input->mouse_ring[input->mouse_head];
-        input->mouse_head = (input->mouse_head + 1u) % NATIVE_EVDEV_MOUSE_RING;
+    NativeEvent event;
+    while (count < cap && native_event_queue_pop(&input->queue, NATIVE_EVENT_MOUSE, &event)) {
+        out[count++] = event.data.mouse;
     }
     pthread_mutex_unlock(&input->lock);
     return count;
@@ -783,9 +802,9 @@ size_t native_evdev_input_pop_keyboard_batch(NativeEvdevInput *input, NativeKeyb
     }
     size_t count = 0;
     pthread_mutex_lock(&input->lock);
-    while (input->keyboard_head != input->keyboard_tail && count < cap) {
-        out[count++] = input->keyboard_ring[input->keyboard_head];
-        input->keyboard_head = (input->keyboard_head + 1u) % NATIVE_EVDEV_KEYBOARD_RING;
+    NativeEvent event;
+    while (count < cap && native_event_queue_pop(&input->queue, NATIVE_EVENT_KEYBOARD, &event)) {
+        out[count++] = event.data.keyboard;
     }
     pthread_mutex_unlock(&input->lock);
     return count;

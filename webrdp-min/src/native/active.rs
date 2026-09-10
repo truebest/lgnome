@@ -12,7 +12,7 @@ use ironrdp_session::{ActiveStageBuilder, ActiveStageOutput};
 
 use super::egfx::NativeBitmapUnit;
 use super::input::ControlCommand;
-use super::transport::{is_timeout, TlsStream};
+use super::transport::{is_timeout, monotonic_now, TlsStream};
 use super::{
     NativeError, NativeWorker, RdpState, RDP_POINTER_STATE_DEFAULT, RDP_POINTER_STATE_HIDDEN,
 };
@@ -25,6 +25,12 @@ impl NativeWorker {
     ) -> Result<(), NativeError> {
         let desktop_w = result.desktop_size.width;
         let desktop_h = result.desktop_size.height;
+        tracing::info!(target: super::LOG_TARGET_SESSION,
+            requested_width = self.config.width, requested_height = self.config.height,
+            negotiated_width = desktop_w, negotiated_height = desktop_h,
+            compression = ?result.compression_type,
+            server_pointer = result.enable_server_pointer,
+            "RDP activation complete; actual EGFX size and codec follow server graphics PDUs");
         self.callbacks.desktop_size(desktop_w, desktop_h);
         self.callbacks.emit_state(
             RdpState::Active,
@@ -50,10 +56,7 @@ impl NativeWorker {
         // stale pre-connect events into a fresh session would be wrong.
         self.pending_input.clear();
 
-        // Re-assert a commanded suppression on this fresh connection (see the latch field)
-        // — unless ANY suppress toggle is already pending: a queued resume (the user
-        // switched to this session mid-reconnect) is newer intent and must not be
-        // overridden by the stale latch.
+        // Reapply suppression unless a newer toggle is already queued.
         let suppress_toggle_pending = self
             .pending_control
             .iter()
@@ -96,7 +99,10 @@ impl NativeWorker {
             let mut buf = [0u8; 8192];
             match tls.read(&mut buf) {
                 Ok(0) => return Err(NativeError::network("RDP server closed the TLS stream")),
-                Ok(n) => self.inbuf.extend_from_slice(&buf[..n]),
+                Ok(n) => {
+                    self.last_read_at = Some(monotonic_now());
+                    self.inbuf.extend_from_slice(&buf[..n]);
+                }
                 Err(e) if is_timeout(&e) => {}
                 Err(e) => return Err(NativeError::network(format!("active read: {e}"))),
             }
@@ -118,26 +124,14 @@ impl NativeWorker {
                     self.write_all(tls, &frame, "active response")?
                 }
                 ActiveStageOutput::Terminate(reason) => {
-                    // Any Terminate we receive is server-side origin (a client
-                    // stop closes the TCP stream without one), and
-                    // gnome-remote-desktop sends its handoff ultimatum with the
-                    // reason wired as UserRequested — so every reason must reach
-                    // the reconnect loop in run(), which matches this message and
-                    // is guarded by the stop flag for genuine client stops.
-                    return Err(NativeError::protocol(format!(
-                        "received disconnect provider ultimatum: {}",
-                        reason.description()
-                    )));
+                    return Err(NativeError::disconnect(reason));
                 }
                 ActiveStageOutput::DeactivateAll => deactivate = true,
                 ActiveStageOutput::GraphicsUpdate(rect) => {
                     self.forward_slowpath_bitmap(image, &rect);
                 }
                 ActiveStageOutput::PointerBitmap(pointer) => {
-                    // A zero-dimension shape is IronRDP's decoded form of an
-                    // "invisible" server pointer (DecodedPointer::new_invisible); the
-                    // C side rejects empty bitmaps, so translate it to a hide request
-                    // rather than dropping it and leaving the cursor visible.
+                    // IronRDP represents an invisible pointer as a zero-sized bitmap.
                     if pointer.width == 0 || pointer.height == 0 {
                         self.callbacks.pointer_state(RDP_POINTER_STATE_HIDDEN);
                     } else {
@@ -159,11 +153,7 @@ impl NativeWorker {
         Ok(deactivate)
     }
 
-    /// Classic slow-path/fast-path bitmap updates (servers without EGFX/H.264)
-    /// are decoded by IronRDP directly into `image`; forward the changed region
-    /// to the native presenter the same way EGFX RemoteFX tiles are.
-    /// `data_for_rect` returns a slice through the full image buffer, so the
-    /// row stride is the image's own stride, not width * bytes-per-pixel.
+    /// data_for_rect retains the full image stride, not the rectangle width.
     fn forward_slowpath_bitmap(&mut self, image: &DecodedImage, rect: &InclusiveRectangle) {
         let width = u32::from(rect.width());
         let height = u32::from(rect.height());

@@ -9,14 +9,10 @@
 #endif
 
 #include <pthread.h>
-#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <unistd.h>
 
 #include "clog.h"
 
@@ -33,7 +29,6 @@
 
 typedef struct CapturedEvent {
     ClogxLevel level;
-    ClogxFlags flags;
     char category[80];
     char message[CAPTURE_MESSAGE_CAPACITY];
     char file[160];
@@ -50,18 +45,6 @@ typedef struct Capture {
     CapturedEvent events[CAPTURE_MAX_EVENTS];
 } Capture;
 
-typedef struct BlockingSink {
-    pthread_mutex_t lock;
-    pthread_cond_t condition;
-    bool entered;
-    bool release;
-} BlockingSink;
-
-typedef struct SinkSetter {
-    atomic_bool started;
-    atomic_bool returned;
-} SinkSetter;
-
 static Capture g_capture = {
     .lock = PTHREAD_MUTEX_INITIALIZER,
 };
@@ -69,18 +52,16 @@ static Capture g_capture = {
 void clog_test_emit_from_helper_one(void);
 void clog_test_emit_from_helper_two(void);
 
-CLOGX_CATEGORY_DEFINE(g_test_core, "test.core", CLOGX_LEVEL_INFO);
-CLOGX_CATEGORY_DEFINE(g_test_audio, "audio", CLOGX_LEVEL_INFO);
-CLOGX_CATEGORY_DEFINE(g_test_audio_pipeline, "audio.pipeline", CLOGX_LEVEL_INFO);
-CLOGX_CATEGORY_DEFINE(g_test_audio_other, "audio.other", CLOGX_LEVEL_NOTICE);
-CLOGX_CATEGORY_DEFINE(g_test_audiox, "audiox", CLOGX_LEVEL_INFO);
-CLOGX_CATEGORY_DEFINE(g_test_late, "late.child", CLOGX_LEVEL_INFO);
-CLOGX_CATEGORY_DEFINE(g_test_format, "format", CLOGX_LEVEL_TRACE);
-CLOGX_CATEGORY_DEFINE(g_test_rate, "rate", CLOGX_LEVEL_TRACE);
-CLOGX_CATEGORY_DEFINE(g_test_threads, "threads", CLOGX_LEVEL_INFO);
+static ClogxCategory g_test_core = CLOGX_CATEGORY_INITIALIZER("test.core", CLOGX_LEVEL_INFO);
+static ClogxCategory g_test_audio = CLOGX_CATEGORY_INITIALIZER("audio", CLOGX_LEVEL_INFO);
+static ClogxCategory g_test_audio_pipeline = CLOGX_CATEGORY_INITIALIZER("audio.pipeline", CLOGX_LEVEL_INFO);
+static ClogxCategory g_test_audio_other = CLOGX_CATEGORY_INITIALIZER("audio.other", CLOGX_LEVEL_NOTICE);
+static ClogxCategory g_test_audiox = CLOGX_CATEGORY_INITIALIZER("audiox", CLOGX_LEVEL_INFO);
+static ClogxCategory g_test_late = CLOGX_CATEGORY_INITIALIZER("late.child", CLOGX_LEVEL_INFO);
+static ClogxCategory g_test_threads = CLOGX_CATEGORY_INITIALIZER("threads", CLOGX_LEVEL_INFO);
 
 /* This is the primary API expected in application translation units. */
-clog_define(g_native_log_config, cLogLevelTrace, cLogFlags_Default, "ExampleApp", NULL);
+clog_define(g_native_log_config, cLogLevelTrace, "ExampleApp");
 
 static uint64_t g_fake_wall_ns;
 static uint64_t g_fake_monotonic_ns;
@@ -131,7 +112,6 @@ static void capture_sink(const ClogxEvent *event, void *context) {
         CapturedEvent *stored = &capture->events[index];
         memset(stored, 0, sizeof(*stored));
         stored->level = event->level;
-        stored->flags = event->flags;
         copy_string(stored->category, sizeof(stored->category), event->category);
         copy_string(stored->message, sizeof(stored->message), event->message);
         copy_string(stored->file, sizeof(stored->file), event->file);
@@ -142,19 +122,6 @@ static void capture_sink(const ClogxEvent *event, void *context) {
         stored->truncated = event->message_truncated;
     }
     pthread_mutex_unlock(&capture->lock);
-}
-
-static void blocking_sink(const ClogxEvent *event, void *context) {
-    BlockingSink *blocking = (BlockingSink *)context;
-    CHECK(event != NULL);
-    CHECK(blocking != NULL);
-    pthread_mutex_lock(&blocking->lock);
-    blocking->entered = true;
-    pthread_cond_broadcast(&blocking->condition);
-    while (!blocking->release) {
-        pthread_cond_wait(&blocking->condition, &blocking->lock);
-    }
-    pthread_mutex_unlock(&blocking->lock);
 }
 
 static void capture_reset(void) {
@@ -185,7 +152,7 @@ static void reset_logger(void) {
     g_fake_wall_ns = UINT64_C(1700000000123000000);
     g_fake_monotonic_ns = UINT64_C(5000000000);
     clogx_test_set_clocks(fake_wall_clock, fake_monotonic_clock);
-    clogx_set_sink(capture_sink, &g_capture);
+    clogx_test_set_sink(capture_sink, &g_capture);
     capture_reset();
 }
 
@@ -201,11 +168,12 @@ static void test_levels_and_disabled_arguments(void) {
     CHECK(clogx_enabled(&g_test_core, CLOGX_LEVEL_INFO));
 
     int side_effect = 0;
-    CLOGX_DEBUG(&g_test_core, "disabled %d", ++side_effect);
+    CHECK(clog_configure("ExampleApp=info") == cLogConfigOK);
+    clog(cLogLevelDebug, "disabled %d", ++side_effect);
     CHECK(side_effect == 0);
     CHECK(capture_count() == 0);
 
-    CLOGX_INFO(&g_test_core, "hello %d", 7);
+    clogx_logf(&g_test_core, CLOGX_LEVEL_INFO, __FILE__, __LINE__, __func__, "hello %d", 7);
     CHECK(capture_count() == 1);
     CapturedEvent event = capture_event(0);
     CHECK(event.level == CLOGX_LEVEL_INFO);
@@ -220,8 +188,6 @@ static void test_lowercase_facade(void) {
     reset_logger();
     CHECK(strcmp(g_native_log_config.name, "ExampleApp") == 0);
     CHECK(g_native_log_config.default_level == cLogLevelTrace);
-    CHECK(g_native_log_config.flags == cLogFlags_Default);
-    CHECK(g_native_log_config.config == NULL);
 
     clog(cLogLevelNotice, "Hello, World!\n");
     clog(cLogLevelError, "Error: %d\n", 7);
@@ -229,7 +195,6 @@ static void test_lowercase_facade(void) {
     CapturedEvent notice = capture_event(0);
     CapturedEvent error = capture_event(1);
     CHECK(notice.level == cLogLevelNotice);
-    CHECK(notice.flags == cLogFlags_Default);
     CHECK(strcmp(notice.category, "ExampleApp") == 0);
     CHECK(strcmp(notice.message, "Hello, World!") == 0);
     CHECK(error.level == cLogLevelError);
@@ -261,7 +226,6 @@ static void test_file_local_definitions(void) {
     CHECK(strcmp(capture_event(0).category, "helper.one") == 0);
     CapturedEvent helper_two = capture_event(1);
     CHECK(strcmp(helper_two.category, "helper.two") == 0);
-    CHECK(helper_two.flags == (cLogFlags_PrintLevel | cLogFlags_PrintPrefix));
 }
 
 static void test_facade_vlog_and_rate_limit(void) {
@@ -348,12 +312,12 @@ static void test_rules_apply_to_late_categories(void) {
 
 static void test_environment_configuration(void) {
     reset_logger();
-    CHECK(setenv("GNOMECAST_LOG", "test.core=debug", 1) == 0);
+    CHECK(setenv("LGNOME_LOG", "test.core=debug", 1) == 0);
     CHECK(clogx_configure_env() == CLOGX_CONFIG_OK);
     CHECK(clogx_enabled(&g_test_core, CLOGX_LEVEL_DEBUG));
 
     capture_reset();
-    CHECK(setenv("GNOMECAST_LOG", "test.core=loud", 1) == 0);
+    CHECK(setenv("LGNOME_LOG", "test.core=loud", 1) == 0);
     CHECK(clogx_configure_env() == CLOGX_CONFIG_INVALID);
     CHECK(clogx_enabled(&g_test_core, CLOGX_LEVEL_DEBUG));
     CHECK(capture_count() == 1);
@@ -361,14 +325,14 @@ static void test_environment_configuration(void) {
     CHECK(strcmp(warning.category, "diagnostics.internal") == 0);
     CHECK(warning.level == CLOGX_LEVEL_WARN);
 
-    CHECK(unsetenv("GNOMECAST_LOG") == 0);
+    CHECK(unsetenv("LGNOME_LOG") == 0);
     CHECK(clogx_configure_env() == CLOGX_CONFIG_OK);
     CHECK(!clogx_enabled(&g_test_core, CLOGX_LEVEL_DEBUG));
 }
 
 static void test_message_sanitizing_and_truncation(void) {
     reset_logger();
-    CLOGX_INFO(&g_test_core, "line one\nline two\r\n");
+    clogx_logf(&g_test_core, CLOGX_LEVEL_INFO, __FILE__, __LINE__, __func__, "line one\nline two\r\n");
     CapturedEvent multiline = capture_event(0);
     CHECK(strcmp(multiline.message, "line one line two") == 0);
     CHECK(!multiline.truncated);
@@ -376,7 +340,7 @@ static void test_message_sanitizing_and_truncation(void) {
     char huge[4096];
     memset(huge, 'x', sizeof(huge) - 1u);
     huge[sizeof(huge) - 1u] = '\0';
-    CLOGX_INFO(&g_test_core, "%s", huge);
+    clogx_logf(&g_test_core, CLOGX_LEVEL_INFO, __FILE__, __LINE__, __func__, "%s", huge);
     CapturedEvent truncated = capture_event(1);
     CHECK(truncated.truncated);
     CHECK(strlen(truncated.message) < 2048u);
@@ -386,7 +350,6 @@ static void test_message_sanitizing_and_truncation(void) {
 static void test_default_formatter(void) {
     ClogxEvent event = {
         .level = CLOGX_LEVEL_INFO,
-        .flags = CLOGX_FLAGS_DEFAULT,
         .category = "format",
         .message = "hello",
         .file = "test.c",
@@ -413,27 +376,14 @@ static void test_default_formatter(void) {
     CHECK(tiny[sizeof(tiny) - 1u] == '\0');
     CHECK(strstr(tiny, "<truncated>") != NULL);
 
-    event.level = CLOGX_LEVEL_INFO;
-    event.flags = CLOGX_FLAG_NONE;
-    CHECK(clogx_test_format_event(&event, line, sizeof(line)) == strlen("hello\n"));
-    CHECK(strcmp(line, "hello\n") == 0);
-
-    event.level = CLOGX_LEVEL_DEBUG;
-    CHECK(clogx_test_format_event(&event, line, sizeof(line)) == strlen("hello\n"));
-    CHECK(strcmp(line, "hello\n") == 0);
-
-    event.level = CLOGX_LEVEL_INFO;
-    event.flags = CLOGX_FLAG_PRINT_LEVEL | CLOGX_FLAG_PRINT_CATEGORY;
-    CHECK(clogx_test_format_event(&event, line, sizeof(line)) == strlen("INFO format: hello\n"));
-    CHECK(strcmp(line, "INFO format: hello\n") == 0);
-
-    event.flags = CLOGX_FLAG_PRINT_SOURCE;
-    CHECK(clogx_test_format_event(&event, line, sizeof(line)) == strlen("test.c:42 test_fn: hello\n"));
-    CHECK(strcmp(line, "test.c:42 test_fn: hello\n") == 0);
+    event.level = CLOGX_LEVEL_WARN;
+    event.category = "diagnostics.internal";
+    clogx_test_format_event(&event, line, sizeof(line));
+    CHECK(strstr(line, "WARN diagnostics.internal: test.c:42 test_fn: hello") != NULL);
 }
 
 static void emit_rate_limited(unsigned value) {
-    CLOGX_LOG_LIMITED(&g_test_rate, CLOGX_LEVEL_INFO, 2, 100, "limited %u", value);
+    clog_limited(cLogLevelInfo, 2, 100, "limited %u", value);
 }
 
 static void test_rate_limiter(void) {
@@ -460,104 +410,8 @@ static void test_rate_limiter(void) {
     CHECK(suppressed == 1);
 }
 
-static void test_assert_and_panic(void) {
-    reset_logger();
-    CHECK(clogx_configure("*=trace,diagnostics.backtrace=off,diagnostics.break=off") == CLOGX_CONFIG_OK);
-    CLOGX_ASSERT(&g_test_core, 1 == 2);
-    CLOGX_ASSERT_MSG(&g_test_audio, false, "bad value %d", 9);
-    CHECK(capture_count() == 2);
-    CHECK(strcmp(capture_event(0).category, "diagnostics.assert") == 0);
-    CHECK(strstr(capture_event(0).message, "test.core: assertion failed: 1 == 2") != NULL);
-    CHECK(strstr(capture_event(1).message, "audio: assertion failed: false (bad value 9)") != NULL);
-
-    char huge[4096];
-    memset(huge, 'a', sizeof(huge) - 1u);
-    huge[sizeof(huge) - 1u] = '\0';
-    CLOGX_ASSERT_MSG(&g_test_core, false, "%s", huge);
-    CapturedEvent long_assert = capture_event(2);
-    CHECK(long_assert.truncated);
-    CHECK(strstr(long_assert.message, "<truncated>") != NULL);
-
-    capture_reset();
-    CHECK(clogx_configure("*=trace,diagnostics.backtrace=error,diagnostics.break=off") == CLOGX_CONFIG_OK);
-    CLOGX_ASSERT(&g_test_core, false);
-    CHECK(capture_count() >= 1);
-    CHECK(strcmp(capture_event(0).category, "diagnostics.assert") == 0);
-#if defined(CLOGX_HAVE_EXECINFO) && CLOGX_HAVE_EXECINFO
-    CHECK(capture_count() > 1);
-    CHECK(strcmp(capture_event(1).category, "diagnostics.backtrace") == 0);
-#endif
-
-    CHECK(clogx_configure("diagnostics.break=fatal") == CLOGX_CONFIG_OK);
-    CHECK(!clogx_test_break_enabled(CLOGX_LEVEL_ERROR));
-    CHECK(clogx_test_break_enabled(CLOGX_LEVEL_FATAL));
-
-    pid_t child = fork();
-    CHECK(child >= 0);
-    if (child == 0) {
-        (void)clogx_configure("*=off");
-        CLOGX_PANIC(&g_test_core, "forced panic");
-    }
-    int status = 0;
-    CHECK(waitpid(child, &status, 0) == child);
-    CHECK(WIFSIGNALED(status));
-    CHECK(WTERMSIG(status) == SIGABRT);
-}
-
-static void *single_log_thread(void *arg) {
-    (void)arg;
-    CLOGX_INFO(&g_test_threads, "blocking sink event");
-    return NULL;
-}
-
-static void *sink_setter_thread(void *arg) {
-    SinkSetter *setter = (SinkSetter *)arg;
-    atomic_store(&setter->started, true);
-    clogx_set_sink(capture_sink, &g_capture);
-    atomic_store(&setter->returned, true);
-    return NULL;
-}
-
-static void test_sink_replacement_drains_callbacks(void) {
-    reset_logger();
-    BlockingSink blocking = {
-        .lock = PTHREAD_MUTEX_INITIALIZER,
-        .condition = PTHREAD_COND_INITIALIZER,
-    };
-    SinkSetter setter;
-    atomic_init(&setter.started, false);
-    atomic_init(&setter.returned, false);
-    clogx_set_sink(blocking_sink, &blocking);
-
-    pthread_t logger_thread;
-    CHECK(pthread_create(&logger_thread, NULL, single_log_thread, NULL) == 0);
-    pthread_mutex_lock(&blocking.lock);
-    while (!blocking.entered) {
-        pthread_cond_wait(&blocking.condition, &blocking.lock);
-    }
-    pthread_mutex_unlock(&blocking.lock);
-
-    pthread_t setter_thread;
-    CHECK(pthread_create(&setter_thread, NULL, sink_setter_thread, &setter) == 0);
-    while (!atomic_load(&setter.started)) {
-    }
-    struct timespec pause = {.tv_sec = 0, .tv_nsec = 20 * 1000 * 1000};
-    (void)nanosleep(&pause, NULL);
-    CHECK(!atomic_load(&setter.returned));
-
-    pthread_mutex_lock(&blocking.lock);
-    blocking.release = true;
-    pthread_cond_broadcast(&blocking.condition);
-    pthread_mutex_unlock(&blocking.lock);
-    CHECK(pthread_join(logger_thread, NULL) == 0);
-    CHECK(pthread_join(setter_thread, NULL) == 0);
-    CHECK(atomic_load(&setter.returned));
-    pthread_cond_destroy(&blocking.condition);
-    pthread_mutex_destroy(&blocking.lock);
-}
-
 static void emit_concurrent_limited(void) {
-    CLOGX_LOG_LIMITED(&g_test_rate, CLOGX_LEVEL_INFO, 10, 1000, "concurrent limited");
+    clog_limited(cLogLevelInfo, 10, 1000, "concurrent limited");
 }
 
 static void *rate_thread(void *arg) {
@@ -588,7 +442,7 @@ static void test_concurrent_rate_limiter(void) {
 static void *logging_thread(void *arg) {
     uintptr_t id = (uintptr_t)arg;
     for (unsigned i = 0; i < 500; i++) {
-        CLOGX_INFO(&g_test_threads, "worker %lu event %u", (unsigned long)id, i);
+        clogx_logf(&g_test_threads, CLOGX_LEVEL_INFO, __FILE__, __LINE__, __func__, "worker %lu event %u", (unsigned long)id, i);
     }
     return NULL;
 }
@@ -621,11 +475,9 @@ int main(void) {
     test_message_sanitizing_and_truncation();
     test_default_formatter();
     test_rate_limiter();
-    test_assert_and_panic();
-    test_sink_replacement_drains_callbacks();
     test_concurrent_rate_limiter();
     test_concurrent_logging_and_configuration();
-    clogx_reset_sink();
+    clogx_test_set_sink(NULL, NULL);
     clogx_test_set_clocks(NULL, NULL);
     puts("test_category_log: all tests passed");
     return 0;

@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_WEBOS_PLATFORM_H
-#define GNOMECAST_WEBOS_PLATFORM_H
+#ifndef LGNOME_WEBOS_PLATFORM_H
+#define LGNOME_WEBOS_PLATFORM_H
 
 #include <stdbool.h>
 

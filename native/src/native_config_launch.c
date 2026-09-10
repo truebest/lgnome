@@ -11,7 +11,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_config_launch, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_config_launch, cLogLevelInfo, "native");
 
 static bool native_config_apply_json_if_present(NativeSettings *settings, const char *json, const char *source,
                                                 bool *applied) {
@@ -88,12 +88,12 @@ bool native_config_apply_launch_params(NativeSettings *settings, int argc, char 
     return true;
 }
 
-static bool native_config_launch_json_ignores_saved_config(const char *json) {
-    bool ignore = false;
+static bool native_config_launch_json_bool_enabled(const char *json, const char *name) {
+    bool enabled = false;
     if (!json || json[0] != '{') {
         return false;
     }
-    if (native_json_read_bool(json, "ignoreSavedConfig", &ignore) > 0 && ignore) {
+    if (native_json_read_bool(json, name, &enabled) > 0 && enabled) {
         return true;
     }
 
@@ -104,7 +104,7 @@ static bool native_config_launch_json_ignores_saved_config(const char *json) {
             continue;
         }
         const char *nested_json = native_json_skip_ws(nested);
-        if (native_config_launch_json_ignores_saved_config(nested_json)) {
+        if (native_config_launch_json_bool_enabled(nested_json, name)) {
             return true;
         }
     }
@@ -114,30 +114,7 @@ static bool native_config_launch_json_ignores_saved_config(const char *json) {
 bool native_config_launch_ignores_saved_config(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
         const char *params = native_json_skip_ws(argv[i]);
-        if (native_config_launch_json_ignores_saved_config(params)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool native_config_launch_json_camera_preview(const char *json) {
-    bool enabled = false;
-    if (!json || json[0] != '{') {
-        return false;
-    }
-    if (native_json_read_bool(json, "cameraPreview", &enabled) > 0 && enabled) {
-        return true;
-    }
-
-    for (const char **key = (const char *[]){"params", "launchParams", NULL}; *key;
-         key++) {
-        char nested[NATIVE_CONFIG_MAX_FILE];
-        int result = native_json_read_string(json, *key, nested, sizeof(nested));
-        if (result <= 0) {
-            continue;
-        }
-        if (native_config_launch_json_camera_preview(native_json_skip_ws(nested))) {
+        if (native_config_launch_json_bool_enabled(params, "ignoreSavedConfig")) {
             return true;
         }
     }
@@ -150,7 +127,7 @@ bool native_camera_preview_requested(int argc, char **argv) {
             return true;
         }
         const char *params = native_json_skip_ws(argv[i]);
-        if (native_config_launch_json_camera_preview(params)) {
+        if (native_config_launch_json_bool_enabled(params, "cameraPreview")) {
             return true;
         }
     }
@@ -282,13 +259,6 @@ static bool apply_cli_audio_codec(int argc, char **argv, NativeSettings *setting
     return false;
 }
 
-static bool apply_cli_deprecated_audio_prebuffer(int argc, char **argv) {
-    if (native_arg_value(argc, argv, "--audio-prebuffer-ms", NULL)) {
-        native_settings_warn_deprecated_audio_prebuffer();
-    }
-    return true;
-}
-
 bool native_config_apply_cli(NativeSettings *settings, int argc, char **argv) {
     /* Flat CLI flags target the GREEN slot; the yellow
      * slot is configured via the settings file, launch JSON ("sessions" array) or UI. */
@@ -299,12 +269,9 @@ bool native_config_apply_cli(NativeSettings *settings, int argc, char **argv) {
           apply_cli_string(argc, argv, "--password", green->password, sizeof(green->password), "password") &&
           apply_cli_string(argc, argv, "--domain", green->domain, sizeof(green->domain), "domain") &&
           apply_cli_u16(argc, argv, "--port", 1, UINT16_MAX, &green->port) &&
-          apply_cli_u16(argc, argv, "--width", 1, UINT16_MAX, &settings->width) &&
-          apply_cli_u16(argc, argv, "--height", 1, UINT16_MAX, &settings->height) &&
           apply_cli_u16(argc, argv, "--fps", 1, 240, &green->fps) &&
           apply_cli_u16(argc, argv, "--wheel-step", 1, 120, &settings->wheel_step) &&
           apply_cli_u16(argc, argv, "--wheel-scroll-divisor", 1, 120, &settings->wheel_scroll_divisor) &&
-          apply_cli_deprecated_audio_prebuffer(argc, argv) &&
           apply_cli_audio_codec(argc, argv, settings))) {
         return false;
     }

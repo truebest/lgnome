@@ -1,24 +1,11 @@
-#ifndef GNOMECAST_SETTINGS_JSON_H
-#define GNOMECAST_SETTINGS_JSON_H
+#ifndef LGNOME_SETTINGS_JSON_H
+#define LGNOME_SETTINGS_JSON_H
 
 #include <stdio.h>
 
 #include "native_settings.h"
 
-/* Hand-rolled settings JSON (de)serialization, split out of main.c so the
- * multi-session config logic is host-testable. Two persisted formats are understood:
- *
- *   current (written): { "sessions": [ { "slot": "green", "name": ..., "host": ..., "port": n,
- *                    "username": ..., "password": ..., "domain": ..., "fps": n },
- *                    { "slot": "yellow", ... } ],
- *                    "wheelStep": n, "wheelScrollDivisor": n, "audioCodec": "auto",
- *                    "cameraEnabled": bool, "cameraDeviceId": ...,
- *                    "audioInputEnabled": bool, "audioInputDeviceId": ... }
- *   legacy (read): the old flat single-session object (host/port/username/password/domain/
- *                  fps/wheelStep/...) — applied to the green slot.
- *
- * Launch parameters, CLI flags and config.local.json keep the legacy flat shape and target
- * the green slot through the same native_settings_apply_json entry point. */
+/* Writes session-array JSON; also reads legacy flat settings into the green slot. */
 
 /* True when the JSON contains any recognized settings key (legacy flat or "sessions"). */
 bool native_settings_json_has_rdp_key(const char *json);

@@ -43,6 +43,10 @@ ironrdp-rdpsnd = { path = "../third_party/IronRDP/crates/ironrdp-rdpsnd" }
 # right after connect, so headless hosts with odd virtual-display defaults (e.g.
 # 2048x1152) stream at a resolution the TV pipeline can actually start on.
 ironrdp-displaycontrol = { path = "../third_party/IronRDP/crates/ironrdp-displaycontrol" }
+# Device redirection (MS-RDPEFS): announced with no devices. Windows hosts gate the
+# whole audio redirection stack on the client offering this channel — without it they
+# never open AUDIO_PLAYBACK_DVC.
+ironrdp-rdpdr = { path = "../third_party/IronRDP/crates/ironrdp-rdpdr" }
 
 # Diagnostics for the native direct TCP/TLS worker.
 tracing = "0.1"
@@ -50,7 +54,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["r
 
 # X.509 parsing to extract the server public key from the TLS certificate
 # for CredSSP pubKeyAuth.
-x509-cert = { version = "0.2", default-features = false, features = ["std"] }
+x509-cert = { version = "0.3", default-features = false, features = ["std"] }
 
 # Native-only direct TCP/TLS RDP transport.
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"], optional = true }

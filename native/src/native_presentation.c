@@ -3,7 +3,7 @@
  * replacement retirement), the pre-connect background, the colored session
  * indicator badge, the switch splash, and the streaming-frame composition.
  * SDL builds only. */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #include "native_presentation.h"
 
@@ -16,7 +16,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_presentation, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_presentation, cLogLevelInfo, "native");
 
 void native_present_renderer_frame(App *app, SDL_Renderer *renderer, bool *logged) {
     if (!renderer || !app || app->video_plane_punched) {

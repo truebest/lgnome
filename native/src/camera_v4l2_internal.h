@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_CAMERA_V4L2_INTERNAL_H
-#define GNOMECAST_CAMERA_V4L2_INTERNAL_H
+#ifndef LGNOME_CAMERA_V4L2_INTERNAL_H
+#define LGNOME_CAMERA_V4L2_INTERNAL_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -33,7 +33,7 @@ bool native_camera_v4l2_import_frame(const uint8_t *mapped_data, size_t mapped_l
                                      uint32_t flags, int64_t timestamp_sec, int64_t timestamp_usec,
                                      NativeCameraFrame *frame);
 
-#ifdef HELLOLG_CAMERA_V4L2_TESTING
+#ifdef LGNOME_CAMERA_V4L2_TESTING
 /* Host-test seam for the two mode-enumeration walks. The device table and these
  * three node calls are the only kernel contact those walks make, so a fake
  * covers candidate matching, descriptor filtering and the tri-state verdict

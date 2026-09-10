@@ -1,6 +1,6 @@
 /* Connect request validation, optional persistence, video-owner transition, and
  * asynchronous worker startup. This phase always consumes its one-shot request. */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #include "native_hub_actions_internal.h"
 
@@ -20,7 +20,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_hub_connect, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_hub_connect, cLogLevelInfo, "native");
 
 bool native_hub_actions_drain_connect(NativeHubActionsContext *context) {
     App *app = context->app;
@@ -78,6 +78,8 @@ bool native_hub_actions_drain_connect(NativeHubActionsContext *context) {
             NativeSessionConfig edited;
             if (native_preconnect_ui_get_slot_values(ui, requested_slot, &edited)) {
                 (void)snprintf(session->name, sizeof(session->name), "%s", edited.name);
+                session->desktop_width = edited.desktop_width;
+                session->desktop_height = edited.desktop_height;
                 session->camera_redirect = edited.camera_redirect;
                 session->audio_input_redirect =
                     edited.audio_input_redirect;
@@ -86,7 +88,6 @@ bool native_hub_actions_drain_connect(NativeHubActionsContext *context) {
             session->fps = requested_fps;
             candidate.audio_codec = requested_audio_codec;
             native_settings_recompute_capture_gates(&candidate);
-            native_config_apply_initial_desktop_hint(&candidate);
             if (!native_session_config_validate_connect(session, requested_slot, validation_message,
                                                         sizeof(validation_message))) {
                 ready_to_connect = false;
@@ -125,7 +126,7 @@ bool native_hub_actions_drain_connect(NativeHubActionsContext *context) {
              * redaction strings while winding down. This is an explicit user
              * connection, not an internal recovery reconnect, so it starts a new
              * logical-session clock once the replacement reaches ACTIVE. */
-            app->session_started_ms[requested_slot] = 0;
+            app->session_started_s[requested_slot] = 0;
             app->session_runtime_active[requested_slot] = false;
             native_stop_slot(app, requested_slot);
             if (native_session_endpoint_changed(&app->sessions[requested_slot].config, session)) {

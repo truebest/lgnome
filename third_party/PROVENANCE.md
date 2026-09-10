@@ -1,7 +1,7 @@
 # Third-party dependency provenance
 
 This file records native webOS dependencies that are pinned for the native-only
-`gnomecast` target. The historical browser app, JavaScript service, browser harnesses,
+`lgnome` target. The historical browser app, JavaScript service, browser harnesses,
 and browser WASM bundle were removed and are not runtime dependencies of the native package.
 
 ## backend_ndl (first-party submodule)
@@ -19,10 +19,12 @@ and browser WASM bundle were removed and are not runtime dependencies of the nat
 
 ## IronRDP
 
-- Path: `third_party/IronRDP` (git submodule — gnomecast fork
-  https://github.com/truebest/IronRDP, branch `gnome-rdp-support`)
-- Pinned commit: `eb07a79d89940bfeca28514ebaddf4303b226406`
+- Path: `third_party/IronRDP` (git submodule — lgnome fork)
+- Fork: https://github.com/truebest/IronRDP.
+- Branch: `release/lgnome-0.5.4`.
+- Pinned commit: `3bec84e1ee1d5721905580e381e0b6fc1d0f5d98`
 - Upstream: https://github.com/Devolutions/IronRDP
+- Upstream base: `1bec1d57f446a7ddef8f26b0c3c644059564cdc2` (2026-09-06).
 - Base commit and fork delta provenance: see `third_party/IronRDP/PROVENANCE.md`.
 - License: MIT OR Apache-2.0; see `third_party/IronRDP/LICENSE-MIT` and
   `third_party/IronRDP/LICENSE-APACHE`
@@ -64,7 +66,7 @@ and browser WASM bundle were removed and are not runtime dependencies of the nat
 
 - IBM Plex Sans: Regular 400 and SemiBold 600.
 - IBM Plex Mono: Regular 400 and SemiBold 600.
-- JetBrains Mono: SemiBold 600 for the `gnomecast_` wordmark.
+- JetBrains Mono: SemiBold 600 for the `lgnome_` wordmark.
 
 License: SIL Open Font License 1.1 — [IBM Plex license](https://github.com/IBM/plex/blob/master/LICENSE.txt),
 [JetBrains Mono license](https://github.com/JetBrains/JetBrainsMono/blob/master/OFL.txt).
@@ -77,6 +79,6 @@ Packaged builds include the corresponding copyright notices and complete OFL tex
 read-only reference for webOS toolchain conventions, dependency revisions, and general
 GUI behavior on TV. No Moonlight TV
 application code has been copied or adapted into this repository, and none may be:
-gnomecast's own code is MIT-licensed, which is incompatible with incorporating GPL
+lgnome's own code is MIT-licensed, which is incompatible with incorporating GPL
 application code. Only the dependency pins above (which carry their own licenses) are
 shared with it.

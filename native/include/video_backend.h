@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_VIDEO_BACKEND_H
-#define GNOMECAST_VIDEO_BACKEND_H
+#ifndef LGNOME_VIDEO_BACKEND_H
+#define LGNOME_VIDEO_BACKEND_H
 
 #include <stdbool.h>
 #include <stddef.h>

@@ -9,7 +9,7 @@
 #include <stddef.h>
 #include <string.h>
 
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 #include <glib.h>
 #include <luna-service2/lunaservice.h>
 #endif
@@ -18,7 +18,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_platform, cLogLevelInfo, cLogFlags_Default, "platform.webos", NULL);
+clog_define(g_native_log_platform, cLogLevelInfo, "platform.webos");
 
 static unsigned int native_sdk_major(const char *version) {
     if (!version || *version < '0' || *version > '9') {
@@ -93,7 +93,7 @@ const char *native_webos_tv_release(unsigned int sdk_major) {
     }
 }
 
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #define NATIVE_WEBOS_PLATFORM_TIMEOUT_MS 2000u
 

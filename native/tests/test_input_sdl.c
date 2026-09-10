@@ -1,4 +1,5 @@
 #include "input_sdl.h"
+#include "input_event_queue.h"
 
 #include <assert.h>
 #include <stdbool.h>
@@ -264,7 +265,115 @@ static void test_linux_keycode_to_rdp(void) {
     assert(!native_input_linux_keycode_to_rdp(240, &scancode, &extended));
 }
 
+/* Exercise the queue through the real Linux-keycode mapping and C RDP send
+ * boundary. Reconstruct the server's held modifiers at every pointer event. */
+static void test_modifier_mouse_chords(void) {
+    static const unsigned orders[6][3] = {
+        {0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0},
+    };
+    for (unsigned sides = 0; sides < 8; sides++) {
+        uint16_t codes[3] = {sides & 1 ? 97 : 29, sides & 2 ? 100 : 56, sides & 4 ? 54 : 42};
+        uint8_t scans[3] = {0x1d, 0x38, sides & 4 ? 0x36 : 0x2a};
+        for (unsigned press = 0; press < 6; press++) {
+            for (unsigned release = 0; release < 6; release++) {
+                for (unsigned mouse_first = 0; mouse_first < 2; mouse_first++) {
+                    NativeEvent events[16] = {0};
+                    size_t count = 0;
+                    unsigned expected_mask[16] = {0};
+                    unsigned mask = 0;
+                    for (unsigned i = 0; i < 3; i++) {
+                        unsigned mod = orders[press][i];
+                        events[count].kind = NATIVE_EVENT_KEYBOARD;
+                        events[count].data.keyboard = (NativeKeyboardEv){.code = codes[mod], .down = true};
+                        mask |= 1u << mod;
+                        expected_mask[count++] = mask;
+                    }
+                    NativeMouseEv actions[] = {
+                        {.kind = NATIVE_MOUSE_EV_MOTION, .dx = 10, .dy = 5},
+                        {.kind = NATIVE_MOUSE_EV_BUTTON, .sdl_button = 1, .down = true},
+                        {.kind = NATIVE_MOUSE_EV_MOTION, .dx = 20, .dy = 15},
+                        {.kind = NATIVE_MOUSE_EV_WHEEL, .wheel_y = 120},
+                    };
+                    for (unsigned i = 0; i < 4; i++) {
+                        events[count].kind = NATIVE_EVENT_MOUSE;
+                        events[count].data.mouse = actions[i];
+                        expected_mask[count++] = mask;
+                    }
+                    for (unsigned i = 0; i < 3; i++) {
+                        unsigned mod = orders[release][i];
+                        events[count].kind = NATIVE_EVENT_KEYBOARD;
+                        events[count].data.keyboard = (NativeKeyboardEv){.code = codes[mod], .down = false};
+                        mask &= ~(1u << mod);
+                        expected_mask[count++] = mask;
+                        events[count].kind = NATIVE_EVENT_MOUSE;
+                        events[count].data.mouse = (NativeMouseEv){.kind = NATIVE_MOUSE_EV_WHEEL, .wheel_y = -120};
+                        expected_mask[count++] = mask;
+                    }
+                    events[count].kind = NATIVE_EVENT_MOUSE;
+                    events[count].data.mouse = (NativeMouseEv){.kind = NATIVE_MOUSE_EV_BUTTON, .sdl_button = 1};
+                    expected_mask[count++] = 0;
+                    NativeEventQueue queue = {0};
+                    for (unsigned device = 0; device < 2; device++) {
+                        NativeEventKind kind = (device == mouse_first) ? NATIVE_EVENT_MOUSE : NATIVE_EVENT_KEYBOARD;
+                        for (size_t i = 0; i < count; i++) {
+                            events[i].time_us = i + 1;
+                            if (events[i].kind == kind) {
+                                native_event_queue_push(&queue, &events[i]);
+                            }
+                        }
+                    }
+                    struct RdpSession session = {0};
+                    NativeInput input;
+                    native_input_init(&input, &session, 1920, 1080);
+                    native_input_set_active(&input, true);
+                    fake_reset();
+                    for (size_t i = 0; i < count; i++) {
+                        NativeEvent event;
+                        assert(native_event_queue_pop(&queue, events[i].kind, &event));
+                        if (event.kind == NATIVE_EVENT_KEYBOARD) {
+                            uint8_t scancode;
+                            bool extended;
+                            assert(native_input_linux_keycode_to_rdp(event.data.keyboard.code, &scancode, &extended));
+                            assert(native_input_key(&input, scancode, event.data.keyboard.down, extended));
+                        } else {
+                            NativeMouseEv *m = &event.data.mouse;
+                            if (m->kind == NATIVE_MOUSE_EV_MOTION) {
+                                assert(native_input_pointer_move(&input, m->dx, m->dy));
+                            } else if (m->kind == NATIVE_MOUSE_EV_BUTTON) {
+                                assert(native_input_pointer_button(&input, 30, 20, NATIVE_INPUT_BUTTON_LEFT, m->down));
+                            } else {
+                                assert(native_input_pointer_wheel(&input, 30, 20, (int16_t)m->wheel_y));
+                            }
+                        }
+                    }
+                    assert(fake_call_count == count);
+                    mask = 0;
+                    bool button_held = false;
+                    for (size_t i = 0; i < count; i++) {
+                        FakeCall *call = &fake_calls[i];
+                        if (call->kind == FAKE_CALL_KEY) {
+                            unsigned mod = 0;
+                            while (mod < 3 && call->scancode != scans[mod]) mod++;
+                            assert(mod < 3);
+                            assert(call->extended == (mod < 2 && (sides & (1u << mod)) != 0));
+                            if (call->down) mask |= 1u << mod;
+                            else mask &= ~(1u << mod);
+                        } else if (call->kind == FAKE_CALL_BUTTON) {
+                            button_held = call->down;
+                        } else if (i == 5) {
+                            assert(button_held); /* Movement with all modifiers and left button held. */
+                        }
+                        assert(mask == expected_mask[i]);
+                    }
+                    assert(mask == 0 && !button_held);
+                }
+            }
+        }
+    }
+}
+
 int main(void) {
+    test_modifier_mouse_chords();
     test_mapping_and_inactive_guards();
     test_active_sends_values();
     test_sync_locks();

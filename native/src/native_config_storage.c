@@ -13,7 +13,7 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 #include <SDL.h>
 #endif
 
@@ -23,10 +23,10 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_config_storage, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_config_storage, cLogLevelInfo, "native");
 
-#ifdef HELLOLG_TARGET_WEBOS
-static const char native_config_app_id[] = "com.truebest.gnomecast.native";
+#ifdef LGNOME_TARGET_WEBOS
+static const char native_config_app_id[] = "com.truebest.lgnome.native";
 #endif
 
 /* Reads the whole file at `path` into a NUL-terminated heap buffer with a single open.
@@ -155,17 +155,17 @@ bool native_settings_save_file(const NativeSettings *settings, const char *path)
     return true;
 }
 
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 static void native_config_collect_persisted_candidates(NativeConfigPathCandidates *candidates) {
     memset(candidates, 0, sizeof(*candidates));
 
     /* User-provided overrides are trusted (from_env=true): they are honored for reads in
      * priority order even on a read-only or foreign-owned mount. Discovered locations below
      * must pass the ownership/permission check before their contents are written or trusted. */
-    (void)native_config_add_candidate_path(candidates, getenv("HELLOLG_NATIVE_SETTINGS_PATH"), true);
-    (void)native_config_add_candidate_dir(candidates, getenv("HELLOLG_NATIVE_SETTINGS_DIR"), true);
+    (void)native_config_add_candidate_path(candidates, getenv("LGNOME_NATIVE_SETTINGS_PATH"), true);
+    (void)native_config_add_candidate_dir(candidates, getenv("LGNOME_NATIVE_SETTINGS_DIR"), true);
 
-    char *pref_path = SDL_GetPrefPath("truebest", "gnomecast");
+    char *pref_path = SDL_GetPrefPath("truebest", "lgnome");
     if (pref_path) {
         (void)native_config_add_candidate_dir(candidates, pref_path, false);
         SDL_free(pref_path);
@@ -265,7 +265,7 @@ static NativeConfigLoadOutcome native_config_try_load_candidate(NativeSettings *
 }
 
 bool native_config_load_persisted(NativeSettings *settings, bool force_ignore) {
-    const char *ignore = getenv("HELLOLG_IGNORE_SAVED_CONFIG");
+    const char *ignore = getenv("LGNOME_IGNORE_SAVED_CONFIG");
     if (force_ignore || (ignore && strcmp(ignore, "1") == 0)) {
         clog(cLogLevelInfo,
              "skipped persisted config because saved settings were disabled for this launch");

@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_CAMERA_V4L2_H
-#define GNOMECAST_CAMERA_V4L2_H
+#ifndef LGNOME_CAMERA_V4L2_H
+#define LGNOME_CAMERA_V4L2_H
 
 #include <stdbool.h>
 #include <stddef.h>

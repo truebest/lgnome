@@ -1,9 +1,9 @@
-#ifndef GNOMECAST_NATIVE_POINTER_H
-#define GNOMECAST_NATIVE_POINTER_H
+#ifndef LGNOME_NATIVE_POINTER_H
+#define LGNOME_NATIVE_POINTER_H
 
 /* SDL-thread pointer/render-size/held-input helpers (see native_pointer.c).
  * SDL builds only. */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #include <SDL.h>
 #include <stdbool.h>

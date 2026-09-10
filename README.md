@@ -1,48 +1,18 @@
-# gnomecast
+# lgnome
 
-`gnomecast` is a native webOS RDP client for LG TVs, built to put GNOME desktops
-(`gnome-remote-desktop`) on the TV with hardware-decoded video and native mixed audio.
+`lgnome` is a native webOS RDP client for LG TVs, bringing **Windows** and
+**Linux desktops (Ubuntu and Fedora with GNOME)** to the TV with hardware-decoded
+video and native mixed audio. Hardware-accelerated H.264 streaming has been verified
+on remote hosts with **NVIDIA and Intel GPUs**.
 
-## 0.5.3 highlights
+Per-version release notes and the packaged `.ipk` live on the
+[Releases page](https://github.com/truebest/lgnome/releases). This file describes what
+the client does now, not what changed in any one version.
 
-Compared with 0.5.2, this release adds and hardens the following user-visible paths:
-
-- **USB camera and microphone redirection**: profiles can opt into RDPECAM and
-  RDPEAI independently. A TV-connected V4L2 camera supplies native Annex-B H.264
-  directly; ALSA microphone input is gain-adjusted, resampled, and packetized for
-  gnome-remote-desktop. Device, native-H.264 mode, and microphone-gain selection live
-  in the HUB. Camera consumers can close and reopen the redirected device without
-  permanently losing it from PipeWire or reconnecting RDP: RDPECAM stop is idempotent
-  and completes accepted sample requests before acknowledging the stop. Corrupt or
-  malformed buffers, queue overflow, handoff, and submission failure discard the camera
-  reference chain and reopen capture until a self-contained SPS+PPS+IDR decoder seed is
-  available. Dropped buffers are not treated that way: a jump in the V4L2 sequence
-  counter re-gates the decoder seed but keeps the device, the queued access units, and
-  the cached parameter sets, because reopening would additionally restart mid-GOP. A
-  bounded wait answers an accepted sample credit with `SampleError` without reopening
-  capture, so a camera that starts inside a long GOP, or loses buffers mid-stream, can
-  continue to its next decoder seed.
-- **Capture privacy across sessions**: outgoing camera and microphone payload is sent
-  only to the session currently on screen. A switch closes and drains the old
-  session's payload gate before publishing the new owner and purges queued microphone
-  data. The old session's camera is removed from RDPECAM/PipeWire while it is in the
-  background, then advertised again with a fresh device channel when it returns.
-- **Broader H.264 host compatibility**: the hardware-video path is now verified with
-  both NVIDIA/NVENC and Intel GPU/VA-API gnome-remote-desktop hosts. Decoder restart,
-  session handoff, and snapshot recovery use one parser for both AVC length-prefixed
-  and Annex-B access units, including the AUD-first framing from the tested Intel
-  encoder. Stable Intel streaming also needs the VA-API `frame_num` wrap fix from
-  [gnome-remote-desktop MR !412][grd-vaapi-frame-num], which was reported from this
-  testing. Current upstream `main` includes the fix and works normally with this
-  hardware-decode path; so will the first release containing MR !412.
-- **NDL sink diagnostics**: with `GNOMECAST_LOG='media.ndl=debug'`, every 300
-  accepted video access units produce the NDL render-buffer value plus synchronous
-  `NDL_DirectVideoPlay` timing and errors. These are intentionally diagnostic rather
-  than automatic pacing inputs; see the display-rate limitation below.
-- **Interaction and compatibility fixes**: extra mouse buttons open the HUB and
-  mixer, Display Control channel recreation is more robust, capture-device fallback
-  is improved, and the native/Rust lifecycle has received further concurrency
-  hardening.
+> **For work use:** block the smart TV or monitor's internet access at your router,
+> while allowing the local connections needed for RDP, to limit telemetry and the
+> risk of third-party apps relaying traffic through your home IP. Allow internet
+> access temporarily when needed for updates or Developer Mode renewal.
 
 ## Features
 
@@ -95,11 +65,10 @@ Compared with 0.5.2, this release adds and hardens the following user-visible pa
 - **Network autodetection**: the client answers connect-time and continuous RTT
   measurements over the MCS message channel — gnome-remote-desktop refuses audio
   redirection without it.
-- **Display Control (MS-RDPEDISP)**: right after connect the client tells the server to
-  switch its (virtual) monitor to the client's standard target resolution (currently
-  3840×2160), so headless hosts with unusual display defaults (e.g. 2048×1152) stream
-  at a resolution the TV pipeline can decode (see Known limitations for servers without
-  this channel).
+- **Display Control (MS-RDPEDISP)**: right after connect the client requests the
+  profile's saved desktop resolution (3840×2160 by default). Each profile can select
+  its own size; a server mirroring a physical monitor can retain that monitor's size
+  (see Known limitations for servers without this channel).
 - **Auto-reconnect**: gnome-remote-desktop closes sessions with a provider-initiated
   disconnect as a normal part of daemon handoffs; the client reconnects automatically
   (up to 3 attempts), matching mstsc/FreeRDP behavior.
@@ -135,10 +104,16 @@ about this one.
 
 ## Remote host
 
-The server side is gnome-remote-desktop with RDP enabled. The AVC420 hardware-video
-path has been verified end to end with both **NVIDIA/NVENC** and **Intel GPU/VA-API**
-hosts (the tested Intel path uses the iHD driver). The encoder paths do not use one
-universal wire framing: gnomecast accepts both AVC length-prefixed and Annex-B H.264
+Supported remote hosts:
+
+- **Windows** with its built-in Remote Desktop (RDP) server. H.264 streaming works
+  through RDPEGFX; see the AVC420/AVC444 requirements under Known limitations below.
+- **Ubuntu and Fedora Linux** with GNOME and `gnome-remote-desktop` RDP enabled.
+
+On Linux, the AVC420 hardware-video path has been verified end to end with both
+**NVIDIA/NVENC** and **Intel GPU/VA-API** hosts (the tested Intel path uses the iHD
+driver). Windows H.264 hardware encoding has also been verified with **Intel Quick
+Sync**. The encoder paths do not use one universal wire framing: lgnome accepts both AVC length-prefixed and Annex-B H.264
 access units, including the AUD-prefixed units observed from Intel VA-API, and feeds
 Annex-B to the TV decoder. This records tested configurations rather than guaranteeing
 every VA-API driver or gnome-remote-desktop version.
@@ -155,7 +130,7 @@ streaming therefore requires upstream `main`, a backport, or the first released
 gnome-remote-desktop version that contains MR !412.
 
 Separately, when the server has no usable H.264 encoder at all it falls back to RemoteFX
-Progressive, which gnomecast renders in software at a noticeably higher cost on both
+Progressive, which lgnome renders in software at a noticeably higher cost on both
 ends.
 
 ## Known limitations
@@ -187,39 +162,45 @@ ends.
   so their (virtual) display should use a known-good standard resolution server-side —
   and note that a headless server's display can revert to its unusual default after a
   service restart.
-- **AVC444 is not negotiated** — the client advertises AVC420 (4:2:0) only (see
-  "Chroma subsampling" below). Servers without a usable H.264 encoder fall back to
-  software RemoteFX rendering (slower, and rendered on the ~1080p UI plane rather than
-  the native-resolution video plane).
+- **The native video path presents AVC420 only.** The client requests AVC420 through
+  EGFX V8.1 and also advertises V10 because the tested Windows host enables H.264 only
+  for a V10 client. That host sends a self-contained 4:2:0 stream when its AVC444
+  prioritization policy is disabled. A server that actually sends the AVC444 auxiliary
+  view is not supported correctly (see "Chroma subsampling" below). Servers without a
+  usable H.264 encoder fall back to software RemoteFX rendering (slower, and rendered on
+  the ~1080p UI plane rather than the native-resolution video plane).
 - **EGFX surface-composition operations are ignored** (SolidFill, SurfaceToSurface,
   CacheToSurface). Harmless with gnome-remote-desktop — it sends SurfaceToSurface during
   routine AVC420 sessions and the picture is complete since the video plane carries full
   frames — but a server that relied on them for the software RemoteFX path would show
   stale regions.
 
-### Chroma subsampling: why there is no AVC444 mode
+### Chroma subsampling: why AVC444 cannot use the native video path
 
-The client negotiates AVC420 (H.264 4:2:0) only. This is a platform ceiling,
-not a missing feature:
+The hardware plane presents H.264 4:2:0. V10 remains a Windows compatibility
+fallback, but it does not make two-view AVC444 presentable; that is a platform
+ceiling rather than a missing pixel conversion:
 
-- RDP's AVC444 is not a single 4:4:4 stream. Per MS-RDPEGFX it is *two*
-  AVC420 bitstreams (a luma frame plus an auxiliary frame carrying the packed
-  chroma samples) that the client must decode independently and recombine in
-  the pixel domain. The NDL media pipeline feeds the elementary
-  stream straight to the hardware video plane and never exposes decoded frames
-  to the application, so the recombination step has nowhere to run.
+- RDP's AVC444 carries a luma view plus an auxiliary view with packed chroma.
+  The views can share one H.264 reference-picture sequence, so discarding the
+  auxiliary access units can also break prediction in later luma pictures. The
+  NDL media pipeline renders every access unit it accepts and never exposes
+  decoded frames to the application, so it can neither consume an auxiliary
+  picture without displaying it nor recombine the two views in the pixel domain.
 - On the validated webOS 23/24 targets, the available hardware profiles are H.264
   BP/MP/HP, HEVC Main/Main10, and AV1 Main — no Hi444PP, HEVC RExt, or AV1 High.
 - Decoding the AVC444 stream pair in software would forfeit the hardware
   video plane and cannot sustain 4K on TV SoCs.
 
 The same composition ceiling applies to any hardware-plane client that cannot access
-decoded frames.
+decoded frames. The client warns and drops an unexpected auxiliary view; the result is
+best-effort and may remain corrupted until a new independent decoder seed. Production
+Windows profiles must therefore select a self-contained 4:2:0 stream.
 
 ## Layout
 
 - `native/` — C11/CMake shell: webOS lifecycle, raw evdev mouse+keyboard reader
-  (`input_evdev.c`, with an SDL pointer fallback), SDL presentation, gnomecast-specific
+  (`input_evdev.c`, with an SDL pointer fallback), SDL presentation, lgnome-specific
   DirectMedia adapters under `native/src/ndl_adapter/`, RemoteFX RGBA presentation,
   pre-connect UI, and package targets.
 - `third_party/backend_ndl/` — standalone MIT C11 DirectMedia git submodule with a public SDK-independent
@@ -251,7 +232,7 @@ browser runtime fallback paths.
 
 ## License
 
-gnomecast's own code is released under the [MIT License](LICENSE).
+lgnome's own code is released under the [MIT License](LICENSE).
 
 Bundled dependencies under `third_party/` keep their own licenses: IronRDP
 (MIT OR Apache-2.0), LVGL (MIT), miniaudio (MIT-0), and the IBM Plex and JetBrains Mono

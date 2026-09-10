@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_CAMERA_H264_STREAM_H
-#define GNOMECAST_CAMERA_H264_STREAM_H
+#ifndef LGNOME_CAMERA_H264_STREAM_H
+#define LGNOME_CAMERA_H264_STREAM_H
 
 #include <stdbool.h>
 #include <stddef.h>

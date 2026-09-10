@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_AUDIO_INPUT_ALSA_H
-#define GNOMECAST_AUDIO_INPUT_ALSA_H
+#ifndef LGNOME_AUDIO_INPUT_ALSA_H
+#define LGNOME_AUDIO_INPUT_ALSA_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -23,7 +23,7 @@ long native_audio_input_capture_read(NativeAudioInputCapture *capture, int16_t *
 uint32_t native_audio_input_capture_rate(const NativeAudioInputCapture *capture);
 uint16_t native_audio_input_capture_channels(const NativeAudioInputCapture *capture);
 
-#ifdef HELLOLG_AUDIO_INPUT_ALSA_TESTING
+#ifdef LGNOME_AUDIO_INPUT_ALSA_TESTING
 bool native_audio_input_candidate_name_for_test(const char *stable_id,
                                                 const NativeAudioInputDeviceInfo *devices,
                                                 size_t device_count, size_t index,

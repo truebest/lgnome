@@ -5,7 +5,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_video, cLogLevelInfo, cLogFlags_Default, "video.snapshot", NULL);
+clog_define(g_native_log_video, cLogLevelInfo, "video.snapshot");
 
 bool native_au_snapshot_arm(NativeAuSnapshot *snap) {
     if (!snap) {

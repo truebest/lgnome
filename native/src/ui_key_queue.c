@@ -2,7 +2,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_ui_key_queue, cLogLevelInfo, cLogFlags_Default, "ui.keypad", NULL);
+clog_define(g_native_log_ui_key_queue, cLogLevelInfo, "ui.keypad");
 
 bool native_ui_key_queue_empty(const NativeUiKeyQueue *queue) {
     return !queue || queue->head == queue->tail;

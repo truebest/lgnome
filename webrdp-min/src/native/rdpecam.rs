@@ -22,9 +22,9 @@ pub(super) use enumerator::CameraEnumerator;
 use wire::*;
 
 pub(super) const ENUMERATOR_CHANNEL_NAME: &str = "RDCamera_Device_Enumerator";
-pub(super) const DEVICE_CHANNEL_NAME: &str = "GnomeCast_Camera_0";
+pub(super) const DEVICE_CHANNEL_NAME: &str = "lgnome_Camera_0";
 
-const DEVICE_DISPLAY_NAME: &str = "GnomeCast Camera";
+const DEVICE_DISPLAY_NAME: &str = "lgnome Camera";
 const MAX_PENDING_SAMPLE_REQUESTS: u8 = 8;
 
 #[cfg(test)]
@@ -78,7 +78,7 @@ mod tests {
 
     #[test]
     fn enumerator_advertises_after_version_and_availability() {
-        let bridge = CameraBridge::new(CallbackSink::empty(), 640, 480, 15);
+        let bridge = CameraBridge::new(CallbackSink::default(), 640, 480, 15);
         let mut enumerator = CameraEnumerator::new(bridge.clone());
         let start = enumerator.start(42).unwrap();
         assert_eq!(encoded(&start[0]), [2, 3]);
@@ -86,7 +86,7 @@ mod tests {
         let (_, added) = bridge.set_available(true).unwrap();
         let bytes = encoded(&added[0]);
         assert_eq!(&bytes[..2], &[2, 5]);
-        assert!(bytes.ends_with(b"GnomeCast_Camera_0\0"));
+        assert!(bytes.ends_with(b"lgnome_Camera_0\0"));
     }
 
     #[test]
@@ -97,7 +97,7 @@ mod tests {
         }
 
         CREDITS.store(0, Ordering::SeqCst);
-        let mut callbacks = CallbackSink::empty();
+        let mut callbacks = CallbackSink::default();
         callbacks.callbacks.on_camera_sample_request = Some(on_sample_request);
         let bridge = ready_bridge(callbacks);
         let device = open_device(&bridge, 7);
@@ -133,7 +133,7 @@ mod tests {
         }
 
         STOPS.store(0, Ordering::SeqCst);
-        let mut callbacks = CallbackSink::empty();
+        let mut callbacks = CallbackSink::default();
         callbacks.callbacks.on_camera_stop = Some(on_stop);
         let bridge = ready_bridge(callbacks);
         let device = open_device(&bridge, 7);
@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn stop_while_deactivated_is_not_initialized() {
-        let bridge = ready_bridge(CallbackSink::empty());
+        let bridge = ready_bridge(CallbackSink::default());
         let device = open_device(&bridge, 7);
         let response = device.process_request(7, &[2, MSG_STOP_STREAMS]);
         assert_eq!(response.len(), 1);
@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn availability_before_negotiation_is_advertised_once_negotiated() {
-        let bridge = CameraBridge::new(CallbackSink::empty(), 640, 480, 15);
+        let bridge = CameraBridge::new(CallbackSink::default(), 640, 480, 15);
         assert!(bridge.set_available(true).is_none());
         assert!(bridge.set_available(true).is_none());
 
@@ -225,7 +225,7 @@ mod tests {
         }
 
         STOPS.store(0, Ordering::SeqCst);
-        let mut callbacks = CallbackSink::empty();
+        let mut callbacks = CallbackSink::default();
         callbacks.callbacks.on_camera_stop = Some(on_stop);
         let bridge = ready_bridge(callbacks);
         let device = open_device(&bridge, 7);
@@ -290,7 +290,7 @@ mod tests {
         }
 
         STOPS.store(0, Ordering::SeqCst);
-        let mut callbacks = CallbackSink::empty();
+        let mut callbacks = CallbackSink::default();
         callbacks.callbacks.on_camera_stop = Some(on_stop);
         let bridge = ready_bridge(callbacks);
         let device = open_device(&bridge, 7);
@@ -330,7 +330,7 @@ mod tests {
 
     #[test]
     fn stale_processor_cannot_touch_readded_device_with_reused_channel_id() {
-        let bridge = ready_bridge(CallbackSink::empty());
+        let bridge = ready_bridge(CallbackSink::default());
         let mut old = open_device(&bridge, 7);
         assert_eq!(
             encoded(&old.process_request(7, &[2, MSG_ACTIVATE_DEVICE])[0]),
@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn processor_created_before_device_added_is_retired() {
-        let bridge = ready_bridge(CallbackSink::empty());
+        let bridge = ready_bridge(CallbackSink::default());
         assert!(bridge.set_available(false).is_some());
 
         let stale_token = bridge.allocate_device_token().unwrap();
@@ -428,7 +428,7 @@ mod tests {
         START_UNLOCKED.store(false, Ordering::SeqCst);
         STOP_UNLOCKED.store(false, Ordering::SeqCst);
         SAMPLE_UNLOCKED.store(false, Ordering::SeqCst);
-        let mut callbacks = CallbackSink::empty();
+        let mut callbacks = CallbackSink::default();
         callbacks.callbacks.on_camera_start = Some(on_start_unlocked);
         callbacks.callbacks.on_camera_stop = Some(on_stop_unlocked);
         callbacks.callbacks.on_camera_sample_request = Some(on_sample_unlocked);

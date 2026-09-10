@@ -1,17 +1,10 @@
-#ifndef GNOMECAST_AUDIO_OPUS_H
-#define GNOMECAST_AUDIO_OPUS_H
+#ifndef LGNOME_AUDIO_OPUS_H
+#define LGNOME_AUDIO_OPUS_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-/* Thin per-session libopus decoder for the audio pipeline: rdpsnd delivers encoded Opus
- * packets (grd prefers Opus over PCM when the client offers both — ~96kbps instead of
- * ~1.4Mbps raw), and mixing needs raw samples, so each session decodes on its own
- * rdp-worker thread before pushing into its source ring. libopus decode is cheap (~1-2%
- * of one ARM core per 48kHz stereo stream, NEON-optimized).
- *
- * Builds without HELLOLG_WITH_OPUS stub out to "unavailable": open returns NULL and the
- * caller degrades that session to silence with a log. */
+/* Per-session libopus decoder, called on the RDP worker before mixing. */
 
 typedef struct NativeOpusDecoder NativeOpusDecoder;
 

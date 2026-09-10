@@ -2,7 +2,7 @@
  * window events, mixer-overlay pointer protocol, the compositor-pointer
  * fallback, remote color keys, and the preconnect-screen selective pump.
  * SDL builds only. */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #include "native_sdl_events.h"
 
@@ -17,7 +17,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_sdl_events, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_sdl_events, cLogLevelInfo, "native");
 
 void native_handle_sdl_event(App *app, SDL_Window *window, SDL_Renderer *renderer, const SDL_Event *event) {
     switch (event->type) {

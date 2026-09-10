@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_AUDIO_BACKEND_H
-#define GNOMECAST_AUDIO_BACKEND_H
+#ifndef LGNOME_AUDIO_BACKEND_H
+#define LGNOME_AUDIO_BACKEND_H
 
 #include <stddef.h>
 #include <stdint.h>
@@ -14,7 +14,7 @@ typedef enum NativeAudioResult {
 } NativeAudioResult;
 
 /* Attaches an audio track to the shared media pipeline. codec takes RdpAudioCodec
- * values from rdp_ffi.h; the gnomecast sink accepts only PCM S16LE (2=PCM) — Opus
+ * values from rdp_ffi.h; the lgnome sink accepts only PCM S16LE (2=PCM) — Opus
  * is decoded and mixed upstream, so no passthrough path exists. Returns NULL when
  * the backend is not linked, the format is unsupported, or the hardware open fails
  * — callers degrade to silent video. Jitter buffering and resampling live upstream

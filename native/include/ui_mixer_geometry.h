@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_UI_MIXER_GEOMETRY_H
-#define GNOMECAST_UI_MIXER_GEOMETRY_H
+#ifndef LGNOME_UI_MIXER_GEOMETRY_H
+#define LGNOME_UI_MIXER_GEOMETRY_H
 
 /* Mixer-overlay layout constants and pure geometry (see ui_mixer_geometry.c).
  * No LVGL/SDL dependency: compiled and tested on the host. The public
@@ -68,6 +68,5 @@ int ui_mixer_pct_to_y(int pct);
 int ui_mixer_panel_x(int win_w);
 int ui_mixer_panel_y(int win_h);
 bool ui_mixer_point_in_panel(int win_w, int win_h, int x, int y);
-void native_ui_mixer_geometry_log_panel(int win_w, int win_h);
 
 #endif

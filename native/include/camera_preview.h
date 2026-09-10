@@ -1,8 +1,8 @@
-#ifndef GNOMECAST_CAMERA_PREVIEW_H
-#define GNOMECAST_CAMERA_PREVIEW_H
+#ifndef LGNOME_CAMERA_PREVIEW_H
+#define LGNOME_CAMERA_PREVIEW_H
 
 /* Diagnostic local-camera mode (see camera_preview.c). SDL builds only. */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #include <stdatomic.h>
 

@@ -5,7 +5,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_audio_source, cLogLevelInfo, cLogFlags_Default, "audio.source", NULL);
+clog_define(g_native_log_audio_source, cLogLevelInfo, "audio.source");
 
 #define NATIVE_AUDIO_TARGET_INITIAL_MS NATIVE_AUDIO_JITTER_TARGET_INITIAL_MS
 #define NATIVE_AUDIO_TARGET_MIN_MS NATIVE_AUDIO_JITTER_TARGET_MIN_MS
@@ -49,7 +49,7 @@ static void source_raise_target(NativeAudioSource *source, uint32_t desired_ms) 
 }
 
 static void source_update_arrival_controller(NativeAudioSource *source, size_t frames, uint32_t timestamp_ms,
-                                             uint64_t now_ms, unsigned write_boundary) {
+                                             uint32_t now_ms, unsigned write_boundary) {
     unsigned target = atomic_load_explicit(&source->target_delay_ms, memory_order_relaxed);
     unsigned underruns = atomic_load_explicit(&source->underruns, memory_order_relaxed);
     NativeAudioJitterUpdate update =
@@ -230,11 +230,7 @@ static size_t source_convert_frames(NativeAudioSource *source, float *out, size_
     size_t produced = 0;
     *discontinuity_applied = false;
     while (produced < frames && source->converter_initialized) {
-        /* The producer publishes a format/talkspurt generation before it publishes
-         * the corresponding new PCM through write_cursor. Loading the cursor first
-         * and rechecking both generations afterwards means that either this snapshot
-         * contains only the old generation, or the discontinuity is applied before
-         * any newly published ring frames are consumed. */
+        /* Load write_cursor before rechecking generations so new PCM cannot bypass discontinuity handling. */
         unsigned write = atomic_load_explicit(&source->write_cursor, memory_order_acquire);
         bool format_changed = source_apply_generation(source);
         bool talkspurt_changed = source_apply_talkspurt(source);
@@ -270,10 +266,7 @@ static size_t source_convert_frames(NativeAudioSource *source, float *out, size_
 
 static void source_apply_discontinuity_envelope(NativeAudioSource *source, float *frames, size_t frame_count,
                                                 float meter_gain, float *peak_left, float *peak_right) {
-    /* The ma_sound voice owns user gain and its smoothing. These short fades are transport
-     * discontinuity guards around an adaptive-buffer trim, so they stay next to the exact
-     * frame where the converter is reset. Source meters include the voice's target gain;
-     * its one-block miniaudio smoothing window is shorter than the UI refresh interval. */
+    /* Keep trim fades at the converter reset; ma_sound handles user-gain smoothing. */
     for (size_t frame = 0; frame < frame_count; frame++) {
         float envelope = 1.0f;
         if (source->fade_out_remaining > 0) {
@@ -301,7 +294,7 @@ static void source_apply_discontinuity_envelope(NativeAudioSource *source, float
     }
 }
 
-static void source_publish_peaks(NativeAudioSource *source, float left, float right, uint64_t now_ms) {
+static void source_publish_peaks(NativeAudioSource *source, float left, float right, uint32_t now_ms) {
     atomic_store_explicit(&source->peak_left, (unsigned)native_audio_float_peak_to_i32(left), memory_order_relaxed);
     atomic_store_explicit(&source->peak_right, (unsigned)native_audio_float_peak_to_i32(right), memory_order_relaxed);
     atomic_store_explicit(&source->peak_when_ms, (unsigned)now_ms, memory_order_release);
@@ -311,7 +304,7 @@ typedef struct NativeSourceReadBlock {
     NativeAudioSource *source;
     float *out;
     size_t frames;
-    uint64_t now_ms;
+    uint32_t now_ms;
     float meter_gain;
     float peak_left;
     float peak_right;
@@ -358,7 +351,7 @@ static void source_mark_unavailable(NativeAudioSource *source) {
     source->rebuffering = true;
 }
 
-static bool source_prepare_playout(NativeAudioSource *source, uint64_t now_ms,
+static bool source_prepare_playout(NativeAudioSource *source, uint32_t now_ms,
                                    bool *trim_requested_out) {
     uint32_t target_ms = atomic_load_explicit(&source->target_delay_ms, memory_order_relaxed);
     uint32_t queue_ms = native_audio_source_queue_ms(source);
@@ -459,7 +452,7 @@ static ma_result source_read(ma_data_source *data_source, void *frames_out, ma_u
     memset(out, 0, frames * NATIVE_AUDIO_PIPELINE_CHANNELS * sizeof(float));
     (void)source_apply_generation(source);
     (void)source_apply_talkspurt(source);
-#ifdef HELLOLG_AUDIO_PIPELINE_TESTING
+#ifdef LGNOME_AUDIO_PIPELINE_TESTING
     if (source->pipeline->before_ring_read) {
         source->pipeline->before_ring_read(source->pipeline->before_ring_read_ctx, source->index);
     }
@@ -682,7 +675,7 @@ size_t native_audio_pipeline_push(NativeAudioPipeline *pipeline, int source_inde
         source->producer_channels == 0) {
         return 0;
     }
-    uint64_t now_ms = native_audio_pipeline_now_ms(source->pipeline);
+    uint32_t now_ms = native_audio_pipeline_now_ms(source->pipeline);
     unsigned write = atomic_load_explicit(&source->write_cursor, memory_order_relaxed);
     source_update_arrival_controller(source, frames, timestamp_ms, now_ms, write);
     unsigned read = atomic_load_explicit(&source->read_cursor, memory_order_acquire);
@@ -725,7 +718,7 @@ size_t native_audio_pipeline_push(NativeAudioPipeline *pipeline, int source_inde
     return dropped;
 }
 
-#ifdef HELLOLG_AUDIO_PIPELINE_TESTING
+#ifdef LGNOME_AUDIO_PIPELINE_TESTING
 void native_audio_pipeline_set_test_before_ring_read(NativeAudioPipeline *pipeline,
                                                      NativeAudioPipelineTestHook hook, void *ctx) {
     if (!pipeline || !pipeline->impl) {

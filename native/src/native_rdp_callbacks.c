@@ -11,42 +11,22 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_rdp_callbacks, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_rdp_callbacks, cLogLevelInfo, "native");
 
-static void on_state(void *ctx, RdpState state, const char *detail) {
+static void on_state(void *ctx, RdpState state, RdpDisconnectReason reason, const char *detail) {
     NativeSessionSlot *slot = (NativeSessionSlot *)ctx;
     App *app = slot ? slot->app : NULL;
-    if (slot) {
-        atomic_store(&slot->current_state, (int)state);
-        /* Input arming/NumLock sync happen on the SDL thread, derived from this state
-         * (see the per-tick block in the app loop): writing shared input state from a
-         * worker here would race the SDL thread's switch sequence — a demoted slot's
-         * stale set_active(false) landing after the switch would strand input off. */
-    }
 
     const char *safe_detail = redact_if_sensitive(app, detail);
     clog(cLogLevelInfo, "%s session state=%s(%d)%s%s",
          slot ? native_session_slot_name(slot->index) : "?", rdp_state_name(state), (int)state,
          safe_detail[0] ? " " : "", safe_detail);
 
-    if (slot && rdp_state_is_terminal_error(state)) {
-        clog(cLogLevelError, "terminal native error on the %s session: %s",
-             native_session_slot_name(slot->index), rdp_state_name(state));
-        native_slot_report_terminal(slot, state, rdp_state_exit_code(state));
-    } else if (slot && state == RDP_STATE_STOPPED && atomic_load(&app->exit_code) == 0 &&
-               !atomic_load(&slot->session_failed)) {
-        /* Graceful server-side stop: flag it for the SDL thread (interactive builds go
-         * back to the pre-connect UI or auto-switch; non-interactive builds exit). The
-         * session_failed guard keeps the worker's final Stopped emission from
-         * overwriting a terminal error already recorded for this slot — the UI must
-         * report "failed: NetworkError", not "session stopped". */
-        native_slot_report_terminal(slot, state, 0);
-    }
+    native_slot_record_state(slot, state, reason);
 }
 
-static bool on_log_enabled(void *ctx, RdpLogLevel level, const char *target) {
+static bool on_log_enabled(void *ctx, RdpLogLevel level) {
     (void)ctx;
-    (void)target;
     return native_rdp_log_is_enabled(level);
 }
 
@@ -101,7 +81,7 @@ static void on_pointer_position(void *ctx, uint16_t x, uint16_t y) {
     if (!slot || !native_slot_is_active(slot)) {
         return;
     }
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
     App *app = slot->app;
     atomic_store(&app->pointer_warp_x, (unsigned)x);
     atomic_store(&app->pointer_warp_y, (unsigned)y);

@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_UI_SLOT_PALETTE_H
-#define GNOMECAST_UI_SLOT_PALETTE_H
+#ifndef LGNOME_UI_SLOT_PALETTE_H
+#define LGNOME_UI_SLOT_PALETTE_H
 
 #include <stdint.h>
 

@@ -4,7 +4,7 @@
 [submodule "third_party/IronRDP"]
 	path = third_party/IronRDP
 	url = https://github.com/truebest/IronRDP.git
-	branch = gnome-rdp-support
+	branch = release/lgnome-0.5.4
 [submodule "third_party/miniaudio"]
 	path = third_party/miniaudio
 	url = https://github.com/mackron/miniaudio.git

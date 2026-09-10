@@ -15,7 +15,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_ui, cLogLevelInfo, cLogFlags_Default, "ui.preconnect", NULL);
+clog_define(g_native_log_ui, cLogLevelInfo, "ui.preconnect");
 
 _Static_assert(NATIVE_UI_KEY_QUEUE_CAP - 1u >= 2u * (UI_USERNAME_MAX - 1u),
                "key queue must hold username paste");
@@ -164,12 +164,10 @@ NativePreconnectUi *native_preconnect_ui_create(SDL_Window *window,
     ui->key_indev = lv_indev_drv_register(&ui->key_drv.base);
 
     native_ui_preconnect_theme_init(ui);
-    native_ui_preconnect_widgets_ready();
-    native_ui_preconnect_forms_ready();
     const NativeSessionConfig *initial = &ui->slot_values[ui->selected_slot];
     native_ui_preconnect_build(ui, initial->host, initial->port, initial->username,
                                initial->password, initial->domain, initial->fps,
-                               audio_codec);
+                               initial->desktop_width, initial->desktop_height, audio_codec);
     ui_load_slot_into_form(ui, ui->selected_slot);
     ui_update_hub(ui);
     native_preconnect_ui_set_keyboard_available(ui, true);
@@ -304,37 +302,37 @@ void native_preconnect_ui_set_hardware_video_plane(NativePreconnectUi *ui, bool 
 
 void native_preconnect_ui_set_slot_state(NativePreconnectUi *ui, int slot,
                                          NativePreconnectSessionState state, const char *detail) {
+    RdpDisconnectReason reason = RDP_DISCONNECT_NONE;
+    if (ui && slot >= 0 && slot < NATIVE_SETTINGS_MAX_SESSIONS &&
+        ui->slot_states[slot] == state && !detail && native_ui_session_terminal(state)) {
+        reason = ui->slot_reasons[slot];
+    }
+    native_preconnect_ui_set_slot_status(ui, slot, state, reason, detail);
+}
+
+void native_preconnect_ui_set_slot_status(NativePreconnectUi *ui, int slot,
+                                          NativePreconnectSessionState state,
+                                          RdpDisconnectReason reason, const char *detail) {
     if (!ui || slot < 0 || slot >= NATIVE_SETTINGS_MAX_SESSIONS) {
         return;
     }
-    if (!ui_slot_configured(&ui->slot_values[slot]) && state != NATIVE_PRECONNECT_SESSION_CONNECTING &&
-        state != NATIVE_PRECONNECT_SESSION_ERROR) {
+    if (!ui_slot_configured(&ui->slot_values[slot]) && !native_ui_session_connecting(state) &&
+        !native_ui_session_terminal(state)) {
         state = NATIVE_PRECONNECT_SESSION_NOT_SET_UP;
     }
     const char *next_detail = detail ? detail : "";
-    bool same_detail;
-    if (detail) {
-        same_detail = strcmp(ui->slot_details[slot], next_detail) == 0;
-    } else {
-        same_detail = state == NATIVE_PRECONNECT_SESSION_ERROR || ui->slot_details[slot][0] == '\0';
-    }
-    if (ui->slot_states[slot] == state && same_detail) {
+    bool preserve_detail = !detail && native_ui_session_terminal(state) &&
+                           ui->slot_states[slot] == state && ui->slot_reasons[slot] == reason;
+    if (ui->slot_states[slot] == state && ui->slot_reasons[slot] == reason &&
+        (preserve_detail || strcmp(ui->slot_details[slot], next_detail) == 0)) {
         return;
     }
     ui->slot_states[slot] = state;
-    if (detail) {
-        (void)snprintf(ui->slot_details[slot], UI_DETAIL_MAX, "%s", detail);
-    } else if (state != NATIVE_PRECONNECT_SESSION_ERROR) {
-        ui->slot_details[slot][0] = '\0';
+    ui->slot_reasons[slot] = reason;
+    if (!preserve_detail) {
+        (void)snprintf(ui->slot_details[slot], UI_DETAIL_MAX, "%s", next_detail);
     }
-    if (slot == ui->selected_slot) {
-        ui_update_hub(ui);
-    } else {
-        char fallback[32];
-        lv_label_set_text(ui->card_name_labels[slot], ui_slot_display_name(ui, slot, fallback, sizeof(fallback)));
-        lv_label_set_text(ui->card_badge_labels[slot], ui_badge_text(state));
-        ui_update_hub(ui);
-    }
+    ui_update_hub(ui);
     ui_update_connect_state(ui);
 }
 
@@ -402,7 +400,7 @@ void native_preconnect_ui_set_input_unavailable(NativePreconnectUi *ui) {
     lv_obj_set_style_bg_color(ui->keyboard_dot, lv_color_hex(0xe35d55), 0);
     lv_obj_set_style_bg_color(ui->mouse_dot, lv_color_hex(0xe35d55), 0);
     lv_label_set_text(ui->keyboard_warning_label,
-                      "USB input capture is unavailable - reconnect the devices or restart GnomeCast.");
+                      "USB input capture is unavailable - reconnect the devices or restart lgnome.");
     lv_obj_clear_flag(ui->keyboard_warning, LV_OBJ_FLAG_HIDDEN);
 }
 

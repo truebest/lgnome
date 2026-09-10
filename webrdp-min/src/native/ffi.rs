@@ -12,7 +12,7 @@ use std::ffi::{c_char, CStr};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use ironrdp_pdu::input::fast_path::SynchronizeFlags;
@@ -30,7 +30,7 @@ pub struct RdpSession {
     tx: SyncSender<WorkerCommand>,
     media: Arc<MediaGate>,
     desired_camera_available: Arc<AtomicBool>,
-    worker: Mutex<Option<JoinHandle<()>>>,
+    worker: Option<JoinHandle<()>>,
 }
 
 /// The pointer contract shared by every entry point below: `session` must be
@@ -127,7 +127,7 @@ pub unsafe extern "C" fn rdp_session_start(
     let callbacks = unsafe { callbacks.as_ref() }
         .copied()
         .map(CallbackSink::new)
-        .unwrap_or_else(CallbackSink::empty);
+        .unwrap_or_default();
     let config = match unsafe { copy_config(config) } {
         Ok(config) => config,
         Err(detail) => {
@@ -168,7 +168,7 @@ pub unsafe extern "C" fn rdp_session_start(
         tx,
         media,
         desired_camera_available,
-        worker: Mutex::new(Some(worker)),
+        worker: Some(worker),
     }))
 }
 
@@ -184,14 +184,12 @@ pub unsafe extern "C" fn rdp_session_stop(session: *mut RdpSession) {
     if session.is_null() {
         return;
     }
-    let session = unsafe { Box::from_raw(session) };
+    let mut session = unsafe { Box::from_raw(session) };
     session.stop.store(true, Ordering::SeqCst);
     let _ = session.tx.try_send(WorkerCommand::Stop);
-    if let Ok(mut worker) = session.worker.lock() {
-        if let Some(worker) = worker.take() {
-            let _ = worker.join();
-        }
-    };
+    if let Some(worker) = session.worker.take() {
+        let _ = worker.join();
+    }
 }
 
 /// # Safety
@@ -430,12 +428,14 @@ pub unsafe extern "C" fn rdp_send_sync(
 mod tests {
     use super::super::media_mailbox::CameraSubmission;
     use super::*;
+    use std::sync::Mutex;
 
     #[test]
     fn null_config_reports_protocol_error() {
         extern "C" fn on_state(
             ctx: *mut core::ffi::c_void,
             state: RdpState,
+            _reason: crate::native::RdpDisconnectReason,
             _detail: *const c_char,
         ) {
             let states = unsafe { &*(ctx.cast::<Mutex<Vec<RdpState>>>()) };
@@ -446,21 +446,7 @@ mod tests {
         let callbacks = RdpCallbacks {
             ctx: (&states as *const Mutex<Vec<RdpState>>).cast_mut().cast(),
             on_state: Some(on_state),
-            on_log_enabled: None,
-            on_log: None,
-            on_desktop_size: None,
-            on_video_au: None,
-            on_bitmap_update: None,
-            on_audio_format: None,
-            on_audio_data: None,
-            on_pointer_bitmap: None,
-            on_pointer_position: None,
-            on_pointer_state: None,
-            on_camera_start: None,
-            on_camera_stop: None,
-            on_camera_sample_request: None,
-            on_audio_input_start: None,
-            on_audio_input_stop: None,
+            ..RdpCallbacks::default()
         };
         let session = unsafe { rdp_session_start(ptr::null(), &callbacks) };
         assert!(session.is_null());
@@ -475,7 +461,7 @@ mod tests {
             tx,
             media: Arc::new(MediaGate::default()),
             desired_camera_available: Arc::new(AtomicBool::new(false)),
-            worker: Mutex::new(None),
+            worker: None,
         };
         let session_ptr = &mut session as *mut RdpSession;
 
@@ -495,7 +481,7 @@ mod tests {
             tx,
             media: Arc::clone(&media),
             desired_camera_available: Arc::new(AtomicBool::new(false)),
-            worker: Mutex::new(None),
+            worker: None,
         };
         let session_ptr = &mut session as *mut RdpSession;
         let camera = [1u8, 2, 3];

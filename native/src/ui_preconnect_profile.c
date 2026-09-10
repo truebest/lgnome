@@ -12,7 +12,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_ui_profile, cLogLevelInfo, cLogFlags_Default, "ui.profile", NULL);
+clog_define(g_native_log_ui_profile, cLogLevelInfo, "ui.profile");
 
 static bool ui_queue_connect(NativePreconnectUi *ui, int slot, bool force_save);
 
@@ -51,6 +51,8 @@ static void ui_store_form_to_slot(NativePreconnectUi *ui, int slot) {
     (void)snprintf(values->domain, sizeof(values->domain), "%s", domain ? domain : "");
     (void)snprintf(values->password, sizeof(values->password), "%s", password ? password : "");
     values->fps = ui->selected_fps;
+    values->desktop_width = ui->selected_desktop_width;
+    values->desktop_height = ui->selected_desktop_height;
     ui_store_profile_capture_toggles(ui, slot);
     native_ui_mixer_set_profiles(ui->mixer, ui->slot_values);
 }
@@ -107,6 +109,8 @@ void ui_load_slot_into_form(NativePreconnectUi *ui, int slot) {
     size_t fps_index = ui_select_fps_index(ui, values->fps);
     ui_set_fps_options(ui);
     ui_set_selected_fps(ui, fps_index);
+    ui_set_desktop_options(ui);
+    ui_set_selected_desktop(ui, ui_desktop_option_index(values->desktop_width, values->desktop_height));
     if (values->camera_redirect) {
         lv_obj_add_state(ui->profile_camera_checkbox, LV_STATE_CHECKED);
     } else {
@@ -277,10 +281,11 @@ void native_preconnect_ui_finish_save(NativePreconnectUi *ui, int slot, bool suc
                        sizeof(ui->committed_audio_input_device_id), "%s",
                        ui->audio_input_device_id);
         if (ui->slot_states[slot] != NATIVE_PRECONNECT_SESSION_CONNECTED &&
-            ui->slot_states[slot] != NATIVE_PRECONNECT_SESSION_CONNECTING) {
+            !native_ui_session_connecting(ui->slot_states[slot])) {
             ui->slot_states[slot] = NATIVE_PRECONNECT_SESSION_OFFLINE;
         }
         ui->slot_details[slot][0] = '\0';
+        ui->slot_reasons[slot] = RDP_DISCONNECT_NONE;
         if (ui->selected_slot == slot) {
             ui_set_text(ui->status_label, status ? status : "Saved on this TV.");
             ui_show_setup(ui, false);
@@ -317,6 +322,7 @@ void native_preconnect_ui_finish_connect_save(NativePreconnectUi *ui, int slot, 
         /* The request never replaced the card's prior runtime state. Restore its
          * complete presentation; the setup status below carries the new rejection. */
         ui->slot_states[slot] = ui->requested_previous_state;
+        ui->slot_reasons[slot] = ui->requested_previous_reason;
         (void)snprintf(ui->slot_details[slot], UI_DETAIL_MAX, "%s", ui->requested_previous_detail);
         native_preconnect_ui_open_setup(ui, slot);
         ui_set_text(ui->status_label, status ? status : "Could not save settings on this TV.");
@@ -332,9 +338,8 @@ void native_preconnect_ui_finish_delete(NativePreconnectUi *ui, int slot, bool s
     }
     ui->delete_pending = false;
     if (success) {
-        NativeSessionConfig empty = {0};
-        empty.port = 3389;
-        empty.fps = 60;
+        NativeSessionConfig empty;
+        native_session_config_defaults(&empty);
         ui->slot_values[slot] = empty;
         ui->committed_values[slot] = empty;
         ui->committed_camera_enabled = false;
@@ -351,6 +356,7 @@ void native_preconnect_ui_finish_delete(NativePreconnectUi *ui, int slot, bool s
         ui->slot_port_valid[slot] = true;
         ui->slot_states[slot] = NATIVE_PRECONNECT_SESSION_NOT_SET_UP;
         ui->slot_details[slot][0] = '\0';
+        ui->slot_reasons[slot] = RDP_DISCONNECT_NONE;
         ui->delete_armed = false;
         native_ui_mixer_set_profiles(ui->mixer, ui->slot_values);
         if (ui->selected_slot == slot) {
@@ -366,68 +372,6 @@ void native_preconnect_ui_finish_delete(NativePreconnectUi *ui, int slot, bool s
     }
     ui_update_hub(ui);
     ui_update_connect_state(ui);
-}
-
-bool native_preconnect_ui_read_current(NativePreconnectUi *ui, char *host, size_t host_cap, uint16_t *port,
-                                       char *username, size_t username_cap, char *password, size_t password_cap,
-                                       char *domain, size_t domain_cap, uint16_t *fps, uint16_t *audio_codec) {
-    if (!ui) {
-        return false;
-    }
-
-    uint16_t parsed_port = 0;
-    const char *current_host = lv_textarea_get_text(ui->host_input);
-    char normalized_host[UI_HOST_MAX];
-    if (!native_ui_host_normalize(current_host, normalized_host, sizeof(normalized_host)) ||
-        !ui_parse_port(lv_textarea_get_text(ui->port_input), &parsed_port)) {
-        return false;
-    }
-
-    const char *current_username = lv_textarea_get_text(ui->username_input);
-    const char *current_password = lv_textarea_get_text(ui->password_input);
-    const char *current_domain = lv_textarea_get_text(ui->domain_input);
-    if (!current_username || !current_password) {
-        return false;
-    }
-
-    if (host && host_cap > 0) {
-        size_t len = strlen(normalized_host);
-        if (len >= host_cap) {
-            return false;
-        }
-        memcpy(host, normalized_host, len + 1);
-    }
-    if (port) {
-        *port = parsed_port;
-    }
-    if (username && username_cap > 0) {
-        size_t len = strlen(current_username);
-        if (len >= username_cap) {
-            return false;
-        }
-        memcpy(username, current_username, len + 1);
-    }
-    if (password && password_cap > 0) {
-        size_t len = strlen(current_password);
-        if (len >= password_cap) {
-            return false;
-        }
-        memcpy(password, current_password, len + 1);
-    }
-    if (domain && domain_cap > 0) {
-        size_t len = strlen(current_domain ? current_domain : "");
-        if (len >= domain_cap) {
-            return false;
-        }
-        memcpy(domain, current_domain ? current_domain : "", len + 1);
-    }
-    if (fps) {
-        *fps = ui->selected_fps;
-    }
-    if (audio_codec) {
-        *audio_codec = ui_current_audio_codec(ui);
-    }
-    return true;
 }
 
 void native_ui_preconnect_input_changed(lv_event_t *event) {
@@ -464,6 +408,18 @@ void ui_profile_name_insert(lv_event_t *event) {
          * codepoints. Reject the character instead of truncating a later UTF-8 copy. */
         lv_textarea_set_insert_replace(input, "");
     }
+}
+
+void ui_desktop_changed(lv_event_t *event) {
+    NativePreconnectUi *ui = (NativePreconnectUi *)lv_event_get_user_data(event);
+    if (!ui || ui->connecting || ui->loading_form) {
+        return;
+    }
+    ui_set_selected_desktop(ui, lv_dropdown_get_selected(ui->desktop_dropdown));
+    ui->delete_armed = false;
+    lv_label_set_text(ui->delete_label, "Delete profile");
+    ui_set_text(ui->status_label, "Changes are not saved yet.");
+    lv_obj_set_style_text_color(ui->status_label, lv_color_hex(0xaeb6bf), 0);
 }
 
 void ui_fps_changed(lv_event_t *event) {
@@ -536,6 +492,7 @@ static bool ui_queue_connect(NativePreconnectUi *ui, int slot, bool force_save) 
     ui->requested_audio_codec = ui_current_audio_codec(ui);
     ui->requested_slot = slot;
     ui->requested_previous_state = ui->slot_states[slot];
+    ui->requested_previous_reason = ui->slot_reasons[slot];
     (void)snprintf(ui->requested_previous_detail, UI_DETAIL_MAX, "%s", ui->slot_details[slot]);
     ui->requested_requires_save = force_save || ui_profile_dirty(ui, slot);
     ui->connect_requested = true;
@@ -543,6 +500,7 @@ static bool ui_queue_connect(NativePreconnectUi *ui, int slot, bool force_save) 
          ui->requested_requires_save ? "save-and-connect" : "connect", slot);
     ui->connect_save_pending = true;
     ui->slot_states[slot] = NATIVE_PRECONNECT_SESSION_CONNECTING;
+    ui->slot_reasons[slot] = RDP_DISCONNECT_NONE;
     ui->slot_details[slot][0] = '\0';
     ui_update_hub(ui);
     ui_show_setup(ui, false);
@@ -574,7 +532,10 @@ void ui_save_clicked(lv_event_t *event) {
 }
 
 void ui_cancel_clicked(lv_event_t *event) {
-    NativePreconnectUi *ui = (NativePreconnectUi *)lv_event_get_user_data(event);
+    ui_cancel_setup((NativePreconnectUi *)lv_event_get_user_data(event));
+}
+
+void ui_cancel_setup(NativePreconnectUi *ui) {
     if (!ui || ui->connecting || ui_profile_action_pending(ui)) {
         return;
     }
@@ -643,9 +604,10 @@ void native_preconnect_ui_set_connecting(NativePreconnectUi *ui, int slot, bool 
         }
         if (connecting) {
             ui->slot_states[slot] = NATIVE_PRECONNECT_SESSION_CONNECTING;
+            ui->slot_reasons[slot] = RDP_DISCONNECT_NONE;
             (void)snprintf(ui->slot_details[slot], UI_DETAIL_MAX, "%s", status ? status : "");
             ui_show_setup(ui, false);
-        } else if (ui->slot_states[slot] == NATIVE_PRECONNECT_SESSION_CONNECTING) {
+        } else if (native_ui_session_connecting(ui->slot_states[slot])) {
             ui->slot_states[slot] = ui_slot_configured(&ui->slot_values[slot]) ? NATIVE_PRECONNECT_SESSION_OFFLINE
                                                                                : NATIVE_PRECONNECT_SESSION_NOT_SET_UP;
         }
@@ -684,7 +646,7 @@ void ui_hero_action_clicked(lv_event_t *event) {
         ui->activate_requested = true;
     } else if (state == NATIVE_PRECONNECT_SESSION_NOT_SET_UP) {
         native_preconnect_ui_open_setup(ui, ui->selected_slot);
-    } else if (state != NATIVE_PRECONNECT_SESSION_CONNECTING) {
+    } else if (!native_ui_session_connecting(state)) {
         (void)ui_queue_connect(ui, ui->selected_slot, false);
     }
 }

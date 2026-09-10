@@ -5,7 +5,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_input, cLogLevelInfo, cLogFlags_Default, "input.sdl", NULL);
+clog_define(g_native_log_input, cLogLevelInfo, "input.sdl");
 
 static uint16_t clamp_dimension(uint16_t value) {
     return value == 0 ? 1 : value;
@@ -52,10 +52,6 @@ void native_input_set_active(NativeInput *input, bool active) {
     if (was_active != active) {
         clog(cLogLevelDebug, "SDL input %s", active ? "activated" : "deactivated");
     }
-}
-
-bool native_input_is_active(const NativeInput *input) {
-    return input && atomic_load(&input->active);
 }
 
 void native_input_set_desktop_size(NativeInput *input, uint16_t desktop_width, uint16_t desktop_height) {

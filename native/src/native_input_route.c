@@ -1,8 +1,4 @@
-/* Input routing for the SDL thread: decoding webOS remote keys from SDL,
- * the system-key event filter, the grabbed-evdev mouse/keyboard drains (with
- * their HUB/mixer shortcuts), loop-tick pacing against the evdev wake fd, and
- * the streaming-input grab lifecycle. SDL builds only. */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #include "native_input_route.h"
 
@@ -18,17 +14,14 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_input_route, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_input_route, cLogLevelInfo, "native");
 
-/* Color buttons on the TV remote select the session slot with the same name, in the
- * remote's own order: red, green, yellow, blue. The remote is deliberately NOT
- * evdev-grabbed, so these arrive as SDL scancodes (sysroot SDL_webOS.h; 486..489 are the
- * literal values for builds without that header). */
+/* webOS SDL color scancodes; fallback values match SDL_webOS.h. */
 int native_sdl_webos_color_slot(const SDL_KeyboardEvent *event) {
     if (!event) {
         return -1;
     }
-#if HELLOLG_HAVE_SDL_WEBOS_CURSOR
+#if LGNOME_HAVE_SDL_WEBOS_CURSOR
     if (event->keysym.scancode == SDL_WEBOS_SCANCODE_RED || event->keysym.scancode == 486) {
         return NATIVE_SESSION_SLOT_RED;
     }
@@ -58,14 +51,12 @@ int native_sdl_webos_color_slot(const SDL_KeyboardEvent *event) {
     return -1;
 }
 
-/* webOS reports Magic Remote/LSM pointer visibility as synthetic key scancodes. They are
- * not RDP keyboard input: use them to keep the cursor-plane diagnostic state honest and
- * to arm recovery when the platform hides a cursor the server still considers visible. */
+/* Synthetic webOS visibility scancodes are cursor notifications, not RDP keys. */
 int native_sdl_webos_cursor_visibility(const SDL_KeyboardEvent *event) {
     if (!event) {
         return -1;
     }
-#if HELLOLG_HAVE_SDL_WEBOS_CURSOR
+#if LGNOME_HAVE_SDL_WEBOS_CURSOR
     if (event->keysym.scancode == SDL_WEBOS_SCANCODE_CURSOR_SHOW) {
         return 1;
     }
@@ -94,9 +85,6 @@ bool native_sdl_confirm_key(const SDL_KeyboardEvent *event) {
 /* Volume-mixer overlay key hooks for the evdev drain (definitions live with the overlay
  * code, after the presenters they use). */
 
-/* Pre-connect screen: swallow session-navigation keys before the LVGL key queue eats
- * them. Onboarding temporarily owns the remote; after that, colours activate their
- * fixed profiles and CH +/- moves the hub selection. */
 int native_filter_webos_system_keys(void *userdata, SDL_Event *event) {
     App *app = (App *)userdata;
     if (!event || (event->type != SDL_KEYDOWN && event->type != SDL_KEYUP)) {
@@ -165,11 +153,7 @@ void native_cursor_reassert_for_activity(App *app) {
     }
 }
 
-/* SDL thread: apply queued raw-evdev mouse events. Relative motion is integrated into the
- * logical pointer and sent as an absolute server position; buttons/wheel are sent at the
- * current position. Because the mouse is grabbed, the compositor no longer moves the OS
- * pointer, so we warp it to the logical position to make the server cursor (drawn on the
- * platform cursor plane) follow. */
+/* Grabbed evdev bypasses compositor motion; warp the platform cursor to our logical position. */
 void native_drain_evdev_mouse(App *app, SDL_Window *window) {
     if (!native_evdev_input_mouse_active(&app->evdev_input)) {
         return;
@@ -193,13 +177,7 @@ void native_drain_evdev_mouse(App *app, SDL_Window *window) {
             case NATIVE_MOUSE_EV_BUTTON: {
                 native_flush_pending_evdev_motion(app, &pending_dx, &pending_dy, &moved);
                 if (ev->sdl_button >= SDL_BUTTON_X1) {
-                    /* Extra mouse buttons never reach the server (native_button_from_sdl
-                     * maps only left/right/middle), so they drive the UI instead: the
-                     * side/back button opens HUB (the central remote button's contract:
-                     * on release, so the grab drop cannot hand the press's second half
-                     * to the compositor) and the extra/forward button toggles the
-                     * volume mixer (the active color key's contract). Swallow both
-                     * edges either way. */
+                    /* Side/back opens HUB on release; forward toggles the mixer. Consume both edges. */
                     bool opens_hub =
                         ev->sdl_button == SDL_BUTTON_X1 || ev->sdl_button == SDL_BUTTON_X2 + 2;
                     if (opens_hub) {
@@ -212,10 +190,7 @@ void native_drain_evdev_mouse(App *app, SDL_Window *window) {
                                 !app->mixer_overlay_visible) {
                                 native_show_hub(app);
                                 if (app->hub_visible) {
-                                    /* HUB owns input now: the show dropped the evdev
-                                     * grab, so the rest of this batch is stale. The
-                                     * show self-guards (no preconnect UI, overlay up):
-                                     * when it declined, keep draining normally. */
+                                    /* After HUB takes input, discard the rest of this stale batch. */
                                     return;
                                 }
                             }
@@ -228,24 +203,7 @@ void native_drain_evdev_mouse(App *app, SDL_Window *window) {
                         } else if (app->streaming_visible) {
                             native_mixer_overlay_show(app);
                             if (app->mixer_overlay_visible) {
-                                /* The show dropped the evdev grab and disarmed RDP
-                                 * input: forwarding the rest of this batch would track
-                                 * stray held-button state and fight the overlay's
-                                 * cursor. Fold its button edges into the overlay's
-                                 * held mask instead — they predate the handoff and
-                                 * will never reach SDL. (The RGBA badge-only path
-                                 * leaves the overlay hidden and keeps draining.) */
-                                for (size_t j = i + 1; j < count; j++) {
-                                    if (events[j].kind != NATIVE_MOUSE_EV_BUTTON) {
-                                        continue;
-                                    }
-                                    uint8_t bit = native_overlay_button_bit(events[j].sdl_button);
-                                    if (events[j].down) {
-                                        app->mixer_overlay_pointer_buttons |= bit;
-                                    } else {
-                                        app->mixer_overlay_pointer_buttons &= (uint8_t)~bit;
-                                    }
-                                }
+                                /* Do not overwrite post-ungrab physical state with this older batch. */
                                 return;
                             }
                         }
@@ -285,17 +243,7 @@ static void native_log_unmapped_evdev_key(uint16_t code, bool down) {
                  down ? "down" : "up", (unsigned)code);
 }
 
-/* SDL thread: apply queued raw-evdev keyboard events. Each Linux keycode is translated to its
- * RDP set-1 scancode (+E0 flag) and injected as a scancode key event; there is no unicode/IME
- * path (the grabbed keyboard delivers physical scancodes only), so no TEXTINPUT suppression is
- * needed. Unlike the SDL path, typing does NOT hide the pointer: with the mouse grabbed we
- * own the cursor outright, so its visibility follows the RDP server's pointer state alone. A
- * local hide-on-keypress would only fight that (and is what made the cursor vanish mid-typing
- * before). */
-/* The Magic Remote's virtual input nodes ("Smart Remote RCU Input", "LGE Network
- * Input") qualify as relative mice and therefore ARE evdev-grabbed during streaming, so
- * the remote's color keys arrive here as Linux key codes instead of reaching SDL through
- * the compositor. Map them to session-slot navigation, same as the SDL scancode path. */
+/* Grabbed Magic Remote nodes deliver navigation as Linux keycodes instead of SDL scancodes. */
 static int native_evdev_color_slot(uint16_t code) {
     switch (code) {
     case 398: /* KEY_RED */
@@ -327,6 +275,11 @@ void native_drain_evdev_keyboard(App *app) {
             break;
         }
         for (size_t i = 0; i < count; i++) {
+            /* A remote shortcut can hand input to HUB and stop the reader.
+             * Do not route the remainder of that old batch into the new UI. */
+            if (!app->evdev_input.started) {
+                return;
+            }
             if (events[i].from_remote) {
                 /* Remote presses are sparse; keep this diagnostic because key codes
                  * vary between webOS firmware and remote models. */
@@ -336,12 +289,7 @@ void native_drain_evdev_keyboard(App *app) {
             int color_slot = native_evdev_color_slot(events[i].code);
             if (color_slot >= 0) {
                 if (events[i].down) {
-                    /* May stop evdev input from under this drain (the configurator and
-                     * mixer-overlay paths release the grab). That is safe by
-                     * construction: the rest of THIS batch lives in the local array, a
-                     * repeated stop early-returns on !lock_initialized, and the next
-                     * pop_keyboard_batch returns 0 via its !started guard without
-                     * touching the destroyed lock. */
+                    /* This callback may stop evdev; the current batch is local and later pops check reader state. */
                     native_request_session_switch(app, color_slot);
                 }
                 continue;
@@ -353,12 +301,7 @@ void native_drain_evdev_keyboard(App *app) {
                 continue;
             }
             if (events[i].from_remote && native_evdev_confirm_key(events[i].code)) {
-                /* The central remote button owns HUB, but Enter from a physical USB
-                 * keyboard (from_remote=false) remains an ordinary RDP key. Swallow
-                 * both edges. Open on release so native_show_hub can drop EVIOCGRAB
-                 * only after the compositor can no longer inherit the other half of
-                 * this press and reinterpret it as BACK. Autorepeat merely keeps the
-                 * held latch armed. */
+                /* Open HUB on remote release before dropping the grab; USB Enter remains an RDP key. */
                 if (events[i].down) {
                     app->hub_open_key_held = true;
                 } else {
@@ -392,16 +335,35 @@ void native_drain_evdev_keyboard(App *app) {
     }
 }
 
+/* Typed drains stop at the first event belonging to the other device class. */
+void native_drain_evdev_input(App *app, SDL_Window *window) {
+    for (;;) {
+        switch (native_evdev_input_next_kind(&app->evdev_input)) {
+        case NATIVE_EVENT_MOUSE:
+            native_drain_evdev_mouse(app, window);
+            break;
+        case NATIVE_EVENT_KEYBOARD:
+            native_drain_evdev_keyboard(app);
+            break;
+        case NATIVE_EVENT_RESET:
+            if (native_evdev_input_take_reset(&app->evdev_input)) {
+                native_flush_held_inputs(app);
+                app->wheel_accumulator = 0;
+                app->hub_open_key_held = false;
+                app->hub_open_button_held = false;
+            }
+            break;
+        default:
+            return;
+        }
+    }
+}
+
 void native_wait_for_loop_tick(App *app, uint32_t delay_ms) {
     uint32_t timeout_ms = delay_ms == 0 ? 1u : delay_ms;
     int wake_fd = app ? native_evdev_input_wake_fd(&app->evdev_input) : -1;
     if (wake_fd >= 0) {
-        /* Input can wake the loop before the full frame timeout so a keystroke/click is not
-         * gated by the render sleep. But a 500-1000 Hz USB mouse would otherwise wake it on
-         * every report and spin the whole loop (UI tick, present checks, SDL pump) at report
-         * rate. So once input has arrived, process it after at most min_interval_ms (bounding
-         * added latency to half a frame and the loop to ~2x/frame); while idle, wait the full
-         * frame timeout as before. Bursty input coalesces in the reader's ring meanwhile. */
+        /* Coalesce input wakeups to avoid running the UI loop at the USB mouse report rate. */
         const uint32_t min_interval_ms = timeout_ms > 2u ? timeout_ms / 2u : 0u;
         uint32_t start = SDL_GetTicks();
         bool woke = false;
@@ -434,21 +396,12 @@ void native_wait_for_loop_tick(App *app, uint32_t delay_ms) {
     SDL_Delay((Uint32)timeout_ms);
 }
 
-/* Start the evdev input readers when streaming becomes active. The mouse degrades to the SDL
- * compositor-pointer path (Magic Remote) when no USB mouse is present, so a failed mouse grab
- * is informational; a failed keyboard grab means NO keyboard input (there is no SDL keyboard
- * fallback), so it is a loud warning. Returns NATIVE_INPUT_START_OK when the keyboard reader is
- * active, NATIVE_INPUT_START_NO_KEYBOARD when there is simply no keyboard to grab, and
- * NATIVE_INPUT_START_UNAVAILABLE when the reader could not start at all (so callers do not
- * misreport a resource failure as an absent keyboard). */
+/* Mouse has an SDL fallback; keyboard does not. Distinguish absent devices from reader failure. */
 NativeInputStartResult native_start_streaming_input(App *app) {
     if (!app) {
         return NATIVE_INPUT_START_UNAVAILABLE;
     }
     if (!native_evdev_input_start(&app->evdev_input)) {
-        /* The reader failed to come up; the grab path cannot tell us whether a keyboard exists.
-         * Probe /dev/input directly so an eventfd/thread failure with a keyboard attached is
-         * reported as a resource failure, not "no keyboard detected". */
         if (native_evdev_input_probe_keyboard()) {
             clog(cLogLevelWarning,
                  "input capture failed to start even though a USB keyboard is attached; this session has no "
@@ -472,9 +425,6 @@ NativeInputStartResult native_start_streaming_input(App *app) {
     return NATIVE_INPUT_START_OK;
 }
 
-/* Release the evdev grabs (mouse + keyboard). Safe when nothing is grabbed (idempotent). Used
- * on focus loss / backgrounding: EVIOCGRAB is a GLOBAL capture, so a running-but-unfocused app
- * must not keep holding it or the webOS home UI / TV overlay menus get no mouse or keyboard. */
 void native_stop_streaming_input(App *app) {
     if (!app) {
         return;
@@ -484,23 +434,17 @@ void native_stop_streaming_input(App *app) {
     native_flush_held_inputs(app);
     app->hub_open_key_held = false;
     app->hub_open_button_held = false;
-    native_evdev_input_stop(&app->evdev_input);
+    native_evdev_input_stop_with_buttons(&app->evdev_input,
+                                        app->mixer_overlay_visible ? &app->mixer_overlay_pointer_buttons : NULL);
 }
 
-/* Re-acquire input after regaining focus / returning to foreground, but only on the streaming
- * screen (the preconnect UI needs the SDL mouse, so we must not grab there). Besides re-grabbing,
- * re-assert the server cursor and re-home the OS pointer: a webOS overlay leaves the platform
- * pointer hidden behind our back, so without this the RDP cursor stays invisible until a big
- * mouse sweep. */
 void native_resume_streaming_input(App *app, SDL_Window *window) {
     if (!app || !app->streaming_visible ||
         atomic_load(&native_active_slot(app)->current_state) != (int)RDP_STATE_ACTIVE) {
         return;
     }
     if (app->mixer_overlay_visible) {
-        /* The overlay deliberately released the grab so SDL delivers fader clicks;
-         * re-grabbing on focus regain would steal the pointer back from it. Its hide
-         * path re-grabs (focus-gated) once it closes. */
+        /* The mixer owns SDL input until its hide path re-grabs. */
         return;
     }
     (void)native_start_streaming_input(app);

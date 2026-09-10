@@ -1,7 +1,4 @@
-//! Display Control (MS-RDPEDISP): pushes the configured resolution at connect
-//! and re-submits the current layout on refresh, because gnome-remote-desktop
-//! recreates its encode sessions (ending in RESET_GRAPHICS and a fresh IDR) on
-//! every monitor-layout submission — even a byte-identical one.
+//! MS-RDPEDISP resolution requests and layout-based keyframe refresh.
 
 #![forbid(unsafe_code)]
 
@@ -9,27 +6,39 @@ use ironrdp_displaycontrol::client::DisplayControlClient;
 use ironrdp_displaycontrol::pdu::{
     DisplayControlMonitorLayout, DisplayControlPdu, MonitorLayoutEntry,
 };
-use ironrdp_dvc::{DvcChannelListener, DvcMessage, DvcProcessor, DynamicChannelId};
+use std::sync::{Arc, Mutex};
+
+use ironrdp_dvc::{
+    DvcChannelListener, DvcClientProcessor, DvcMessage, DvcProcessor, DynamicChannelId,
+};
 use ironrdp_session::ActiveStage;
 use ironrdp_svc::SvcMessage;
 
+use super::egfx::NativeGfxState;
 use super::{CallbackSink, NativeError, RdpLogLevel, LOG_TARGET_GRAPHICS};
 
-/// Builds the client that dictates the server's monitor resolution the moment
-/// the channel becomes operational (server capabilities received — before the
-/// video stream starts). Headless hosts otherwise come up with virtual-display
-/// defaults like 2048x1152 that the TV's hardware video pipeline silently
-/// cannot start on. Failures log and send nothing: a DVC processor error is
-/// session-fatal, and an unchanged server layout is a working (if suboptimal)
-/// session.
+/// Request the configured resolution when the DVC opens; errors preserve the existing session.
 pub(super) fn make_display_control(
     width: u16,
     height: u16,
     sink: CallbackSink,
+    gfx: Arc<Mutex<NativeGfxState>>,
 ) -> DisplayControlClient {
     DisplayControlClient::new(move |caps| {
         let (width, height) =
             MonitorLayoutEntry::adjust_display_size(u32::from(width), u32::from(height));
+        // Windows ends the session a few seconds after a layout it is already using;
+        // only ask when the server's own output size differs.
+        if let Ok(shared) = gfx.lock() {
+            if shared.graphics_width == width && shared.graphics_height == height {
+                sink.log(
+                    RdpLogLevel::Info,
+                    LOG_TARGET_GRAPHICS,
+                    format_args!("display: server already at {width}x{height}; keeping its layout"),
+                );
+                return Ok(Vec::new());
+            }
+        }
         if u64::from(width) * u64::from(height) > caps.max_monitor_area() {
             sink.log(
                 RdpLogLevel::Warning,
@@ -62,16 +71,12 @@ pub(super) fn make_display_control(
     })
 }
 
-/// Serves a fresh [`DisplayControlClient`] for every DYNVC_CREATE_REQ. A once-registered
-/// processor (`with_dynamic_channel`) is consumed by the first create, so a server that
-/// closes and re-creates this channel would leave `rdp_request_refresh`'s layout-resubmit
-/// path without a channel for the rest of the connection. Defensive: the old grd builds
-/// in the field (≤45) never open this channel at all — against them every refresh takes
-/// the reconnect fallback regardless.
+/// Create a fresh processor whenever the server reopens the display DVC.
 pub(super) struct DisplayControlFactory {
     pub(super) width: u16,
     pub(super) height: u16,
     pub(super) sink: CallbackSink,
+    pub(super) gfx: Arc<Mutex<NativeGfxState>>,
 }
 
 impl DvcChannelListener for DisplayControlFactory {
@@ -79,11 +84,12 @@ impl DvcChannelListener for DisplayControlFactory {
         ironrdp_displaycontrol::CHANNEL_NAME
     }
 
-    fn create(&mut self, _channel_id: DynamicChannelId) -> Option<Box<dyn DvcProcessor>> {
+    fn create(&mut self, _channel_id: DynamicChannelId) -> Option<Box<dyn DvcClientProcessor>> {
         Some(Box::new(make_display_control(
             self.width,
             self.height,
             self.sink,
+            Arc::clone(&self.gfx),
         )))
     }
 }
@@ -98,11 +104,8 @@ pub(super) fn encode_refresh_layout(
     let (width, height) =
         MonitorLayoutEntry::adjust_display_size(u32::from(width), u32::from(height));
     match active.get_dvc::<DisplayControlClient>() {
-        Some(dvc) => match (
-            dvc.channel_id(),
-            dvc.channel_processor_downcast_ref::<DisplayControlClient>(),
-        ) {
-            (Some(channel_id), Some(client)) if client.ready() => client
+        Some(dvc) => match (dvc.channel_id(), dvc.processor()) {
+            (channel_id, client) if client.ready() => client
                 .encode_single_primary_monitor(channel_id, width, height, None, None)
                 .map_err(|e| NativeError::protocol(format!("refresh layout encode: {e}")))
                 .map(Some),
@@ -118,10 +121,7 @@ mod tests {
     use ironrdp_core::{Decode as _, ReadCursor};
     use ironrdp_displaycontrol::pdu::DisplayControlCapabilities;
 
-    /// Encodes the full `DISPLAYCONTROL_CAPS_PDU` as a real server puts it on the wire:
-    /// the `DISPLAYCONTROL_HEADER` (Type + Length) followed by the capability set
-    /// (MS-RDPEDISP 2.2.2.1). Feeding the raw capability body without the header would
-    /// exercise a wire shape no server ever sends.
+    /// Include the DISPLAYCONTROL_HEADER, as sent on the wire.
     fn display_caps_payload(max_num_monitors: u32, factor_a: u32, factor_b: u32) -> Vec<u8> {
         let caps: DisplayControlPdu =
             DisplayControlCapabilities::new(max_num_monitors, factor_a, factor_b)
@@ -154,7 +154,12 @@ mod tests {
                 0x38, 0x04, 0x00, 0x00, // MaxMonitorAreaFactorB = 1080
             ]
         );
-        let mut client = make_display_control(1920, 1080, CallbackSink::empty());
+        let mut client = make_display_control(
+            1920,
+            1080,
+            CallbackSink::default(),
+            Arc::new(Mutex::new(NativeGfxState::default())),
+        );
         let replies = client.process(0, &payload).expect("process caps");
         assert_eq!(replies.len(), 1);
         let layout = decode_monitor_layout(&replies[0]);
@@ -170,7 +175,8 @@ mod tests {
         let mut factory = DisplayControlFactory {
             width: 1920,
             height: 1080,
-            sink: CallbackSink::empty(),
+            sink: CallbackSink::default(),
+            gfx: Arc::new(Mutex::new(NativeGfxState::default())),
         };
         // grd closes and re-creates the channel mid-session; each create must yield a
         // live client that still pushes the configured layout on caps.
@@ -189,7 +195,12 @@ mod tests {
 
     #[test]
     fn display_control_skips_layout_exceeding_server_area() {
-        let mut client = make_display_control(1920, 1080, CallbackSink::empty());
+        let mut client = make_display_control(
+            1920,
+            1080,
+            CallbackSink::default(),
+            Arc::new(Mutex::new(NativeGfxState::default())),
+        );
         // A 640x480 max monitor area cannot fit 1920x1080; must stay silent, never error.
         let replies = client
             .process(0, &display_caps_payload(1, 640, 480))
@@ -199,7 +210,12 @@ mod tests {
 
     #[test]
     fn display_control_evens_odd_width() {
-        let mut client = make_display_control(1367, 768, CallbackSink::empty());
+        let mut client = make_display_control(
+            1367,
+            768,
+            CallbackSink::default(),
+            Arc::new(Mutex::new(NativeGfxState::default())),
+        );
         let replies = client
             .process(0, &display_caps_payload(1, 8192, 8192))
             .expect("process caps");

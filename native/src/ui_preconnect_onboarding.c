@@ -4,7 +4,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_ui_onboarding, cLogLevelInfo, cLogFlags_Default, "ui.onboarding", NULL);
+clog_define(g_native_log_ui_onboarding, cLogLevelInfo, "ui.onboarding");
 
 void native_ui_preconnect_build_onboarding(NativePreconnectUi *ui) {
     ui->onboarding_scrim = native_ui_preconnect_make_box(ui->root, 0, 0, UI_CANVAS_WIDTH, UI_CANVAS_HEIGHT);
@@ -19,7 +19,7 @@ void native_ui_preconnect_build_onboarding(NativePreconnectUi *ui) {
     lv_obj_set_pos(ob_title, 370, 200);
     lv_obj_set_style_text_font(ob_title, &lv_font_ibm_plex_sans_semibold_40, 0);
     lv_obj_t *ob_subtitle = native_ui_preconnect_make_label(
-        ui->onboarding_scrim, "GnomeCast turns this TV into a screen and KVM switch for your GNOME desktops.",
+        ui->onboarding_scrim, "lgnome turns this TV into a screen and KVM switch for your GNOME desktops.",
         &ui->muted_style);
     lv_obj_set_pos(ob_subtitle, 370, 258);
     lv_obj_set_width(ob_subtitle, 1180);

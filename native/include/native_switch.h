@@ -1,8 +1,8 @@
-#ifndef GNOMECAST_NATIVE_SWITCH_H
-#define GNOMECAST_NATIVE_SWITCH_H
+#ifndef LGNOME_NATIVE_SWITCH_H
+#define LGNOME_NATIVE_SWITCH_H
 
 /* Slot-switching state machine (see native_switch*.c). SDL builds only. */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #include <stdint.h>
 

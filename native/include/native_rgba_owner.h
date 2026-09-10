@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_NATIVE_RGBA_OWNER_H
-#define GNOMECAST_NATIVE_RGBA_OWNER_H
+#ifndef LGNOME_NATIVE_RGBA_OWNER_H
+#define LGNOME_NATIVE_RGBA_OWNER_H
 
 #include <stdbool.h>
 
@@ -14,7 +14,7 @@ void native_close_rgba_locked(App *app, bool defer_texture);
 void native_clear_hub_return_replacement(App *app);
 void native_close_hub_return_rgba_locked(App *app);
 
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 void native_defer_rgba_texture_destroy(App *app);
 void native_destroy_rgba_renderer_textures(App *app);
 void native_capture_hub_return_rgba_locked(App *app);

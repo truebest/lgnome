@@ -1,14 +1,10 @@
-//! Native C ABI and direct-TCP RDP driver for the webOS native app.
-//!
-//! The native target has no Web/RDCleanPath/browser fallback. It connects directly to
-//! the RDP server over TCP, upgrades that socket to TLS, performs CredSSP, prefers
-//! AVC420/H.264 EGFX for ss4s hardware decode, and also forwards native RemoteFX/bitmap
-//! RGBA updates for servers that cannot provide H.264.
+//! Native RDP worker: TCP/TLS/CredSSP transport and C callbacks.
 
 mod abi;
 mod active;
 mod active_io;
 mod connection;
+mod disconnect;
 mod dvc;
 mod egfx;
 mod ffi;
@@ -23,7 +19,7 @@ mod sink;
 mod transport;
 
 pub use abi::{
-    RdpCallbacks, RdpConfig, RdpLogLevel, RdpState, RDP_AUDIO_CODEC_OPUS,
+    RdpCallbacks, RdpConfig, RdpDisconnectReason, RdpLogLevel, RdpState, RDP_AUDIO_CODEC_OPUS,
     RDP_AUDIO_CODEC_PCM_S16LE, RDP_POINTER_STATE_DEFAULT, RDP_POINTER_STATE_HIDDEN,
 };
 use egfx::NativeGfxState;
@@ -36,7 +32,7 @@ use logging::{
 };
 use media_mailbox::MediaGate;
 use sink::CallbackSink;
-use transport::{is_timeout, ts_request_len, TlsStream};
+use transport::{is_timeout, monotonic_now, ts_request_len, TlsStream};
 
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,6 +43,7 @@ use std::time::Duration;
 
 use ironrdp_connector::connection_activation::ConnectionActivationFactory;
 use ironrdp_connector::{ClientConnector, Sequence as _};
+use ironrdp_core::MonotonicInstant;
 
 // The media mailbox is deliberately separate from input. A short socket timeout is its
 // wake-up bound on rustls' blocking transport; camera/audio producers never wait on TCP.
@@ -69,9 +66,13 @@ struct NativeConfig {
     camera_fps: u16,
 }
 
+const MAX_SESSION_ATTEMPTS: u32 = 3;
+
 #[derive(Debug)]
 struct NativeError {
     state: RdpState,
+    reason: RdpDisconnectReason,
+    retry_handoff: bool,
     message: String,
 }
 
@@ -79,6 +80,8 @@ impl NativeError {
     fn with_state(state: RdpState, message: impl Into<String>) -> Self {
         Self {
             state,
+            reason: RdpDisconnectReason::None,
+            retry_handoff: false,
             message: message.into(),
         }
     }
@@ -107,24 +110,18 @@ struct NativeWorker {
     audio_input: rdpeai::AudioInputBridge,
     gfx: Arc<Mutex<NativeGfxState>>,
     inbuf: Vec<u8>,
-    // Retained from the connect result to drive the Deactivation-Reactivation Sequence
-    // locally: produces a fresh `ConnectionActivationSequence` on each Server Deactivate
-    // All PDU (the x224 processor no longer owns one; see ConnectionResult::activation_factory).
+    // Buffered PDUs retain the time of the read that completed them.
+    last_read_at: Option<MonotonicInstant>,
+    // Retained factory for server-initiated reactivation.
     activation_factory: Option<ConnectionActivationFactory>,
     next_pts90k: u64,
     frame_pts_step: u64,
-    // Input events drained off the channel by poll_stop while the worker is busy (notably
-    // mid-session Deactivate-Reactivate) and not yet dispatched. run_active clears this on
-    // entry so pre-connect events are discarded, but events buffered during reactivation
-    // survive to the next drain_input rather than being lost (a dropped release would stick).
+    // Discarded on initial activation; preserved across reactivation, including key releases.
     pending_input: Vec<InputCommand>,
     // Control commands buffered the same way (suppress-output toggles coalesce to the last
     // one; refresh requests dedupe to one).
     pending_control: Vec<ControlCommand>,
-    // Last suppress-output state the client commanded. Every fresh RDP connection starts
-    // server-side with display updates ALLOWED, so the silent in-worker reconnect (run's
-    // ultimatum retry) must re-assert a commanded suppression or a backgrounded session
-    // would silently resume streaming full-rate video nobody displays.
+    // Reapply background suppression after reconnect; fresh connections allow graphics.
     suppress_display_latched: bool,
 }
 
@@ -156,6 +153,7 @@ impl NativeWorker {
             audio_input,
             gfx: Arc::new(Mutex::new(NativeGfxState::default())),
             inbuf: Vec::new(),
+            last_read_at: None,
             activation_factory: None,
             next_pts90k: 0,
             frame_pts_step: 90_000 / fps,
@@ -166,20 +164,11 @@ impl NativeWorker {
     }
 
     fn run(&mut self) -> Result<(), NativeError> {
-        // gnome-remote-desktop closes the connection with an MCS Disconnect Provider
-        // Ultimatum (preceded by ServerSetErrorInfo(RpcInitiatedDisconnect)) as a NORMAL
-        // part of e.g. handing a session over between its daemons, and expects the
-        // client to reconnect — mstsc/FreeRDP do so automatically. Retry a few times
-        // before surfacing the failure.
-        const MAX_SESSION_ATTEMPTS: u32 = 3;
+        // grd daemon handoffs disconnect normally and require a client reconnect.
         for attempt in 1..=MAX_SESSION_ATTEMPTS {
             match self.run_session() {
                 Ok(()) => return Ok(()),
-                Err(e)
-                    if attempt < MAX_SESSION_ATTEMPTS
-                        && !self.stop.load(Ordering::SeqCst)
-                        && e.message.contains("disconnect provider ultimatum") =>
-                {
+                Err(e) if e.should_retry(attempt, self.stop.load(Ordering::SeqCst)) => {
                     self.callbacks.log(
                         RdpLogLevel::Notice,
                         LOG_TARGET_SESSION,
@@ -187,6 +176,8 @@ impl NativeWorker {
                             "server closed the session (attempt {attempt}/{MAX_SESSION_ATTEMPTS}); reconnecting"
                         ),
                     );
+                    self.callbacks
+                        .emit_state(RdpState::Reconnecting, "reconnecting after server handoff");
                     self.reset_session_state();
                     thread::sleep(Duration::from_millis(1000));
                 }
@@ -199,15 +190,11 @@ impl NativeWorker {
     /// Clears per-session accumulated state so a reconnect starts clean.
     fn reset_session_state(&mut self) {
         self.inbuf.clear();
+        self.last_read_at = None;
         self.activation_factory = None;
         self.next_pts90k = 0;
         self.pending_input.clear();
-        // A suppress/resume queued while the failed session was still handshaking is the
-        // newest commanded state and must survive the retry: fold it into the latch
-        // (run_active re-asserts a latched suppression on the fresh connection; a fresh
-        // connection already starts with display allowed for the resume case). Queued
-        // refreshes belong to the OLD encode session — reconnecting yields a new IDR
-        // anyway — so those simply drop.
+        // Preserve the newest suppression state across retry; discard old-session refreshes.
         for control in self.pending_control.drain(..) {
             if let ControlCommand::SuppressOutput { allow_display } = control {
                 self.suppress_display_latched = !allow_display;
@@ -216,9 +203,7 @@ impl NativeWorker {
         if let Ok(mut shared) = self.gfx.lock() {
             *shared = NativeGfxState::default();
         }
-        // A silent in-worker reconnect bypasses the C session-teardown path that restores
-        // the default cursor, so a pointer the old session left hidden or custom-shaped would
-        // leak into the new one until the server next changes it. Reset it to default+visible.
+        // Worker-only reconnect bypasses C teardown, including its cursor reset.
         self.callbacks.pointer_state(RDP_POINTER_STATE_DEFAULT);
     }
 
@@ -324,6 +309,7 @@ impl NativeWorker {
                 "{label}: peer closed connection"
             ))),
             Ok(n) => {
+                self.last_read_at = Some(monotonic_now());
                 self.inbuf.extend_from_slice(&buf[..n]);
                 Ok(())
             }
@@ -349,11 +335,7 @@ impl NativeWorker {
             .map_err(|e| NativeError::network(format!("{label}: flush: {e}")))
     }
 
-    /// Drains the command channel without blocking: buffers input (coalescing
-    /// consecutive pointer moves) and control commands for the next dispatch,
-    /// and returns true when the worker must stop. Called from every read loop
-    /// so a busy or reconnecting worker never leaves the C side blocked on a
-    /// full channel.
+    /// Buffer commands without blocking; return true on stop.
     fn drain_commands(&mut self) -> bool {
         if self.stop.load(Ordering::SeqCst) {
             return true;
@@ -365,13 +347,7 @@ impl NativeWorker {
                     return true;
                 }
                 Ok(WorkerCommand::Input(input)) => {
-                    // Draining keeps the SDL thread from blocking on a full channel while the
-                    // worker is busy. Buffer the events instead of dropping them: pre-connect
-                    // this buffer is cleared when run_active starts, but during an in-session
-                    // Deactivate-Reactivate ActiveStage still exists and a dropped button/key
-                    // release would stick — the next drain_input replays what is buffered here.
-                    // Consecutive pointer moves coalesce (idempotent) so a fast pointer cannot
-                    // grow the buffer without bound.
+                    // Retain input edges during reactivation; coalesce only consecutive pointer moves.
                     match (self.pending_input.last_mut(), &input) {
                         (
                             Some(InputCommand::PointerMove { x, y }),
@@ -429,7 +405,9 @@ fn worker_main(
         Ok(()) => {}
         Err(err) => {
             if !worker.stop.load(Ordering::SeqCst) {
-                worker.callbacks.emit_state(err.state, err.message);
+                worker
+                    .callbacks
+                    .emit_state_reason(err.state, err.reason, err.message);
             }
         }
     }
@@ -439,29 +417,18 @@ fn worker_main(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ironrdp_connector::ClientConnectorState;
+    use ironrdp_core::{decode, encode_vec};
+    use ironrdp_pdu::mcs::{McsMessage, SendDataIndication};
+    use ironrdp_pdu::rdp::autodetect::{
+        AutoDetectReqPdu, AutoDetectRequest, AutoDetectResponse, AutoDetectRspPdu,
+    };
+    use ironrdp_pdu::x224::X224;
+    use std::collections::VecDeque;
 
-    #[test]
-    fn retry_folds_pending_suppress_into_latch() {
-        let (_tx, rx) = std::sync::mpsc::sync_channel::<WorkerCommand>(4);
-        let callbacks = RdpCallbacks {
-            ctx: core::ptr::null_mut(),
-            on_state: None,
-            on_log_enabled: None,
-            on_log: None,
-            on_desktop_size: None,
-            on_video_au: None,
-            on_bitmap_update: None,
-            on_audio_format: None,
-            on_audio_data: None,
-            on_pointer_bitmap: None,
-            on_pointer_position: None,
-            on_pointer_state: None,
-            on_camera_start: None,
-            on_camera_stop: None,
-            on_camera_sample_request: None,
-            on_audio_input_start: None,
-            on_audio_input_stop: None,
-        };
+    fn test_worker() -> (NativeWorker, std::sync::mpsc::SyncSender<WorkerCommand>) {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<WorkerCommand>(4);
+        let callbacks = RdpCallbacks::default();
         let config = NativeConfig {
             host: "test".to_owned(),
             port: 3389,
@@ -478,7 +445,7 @@ mod tests {
             camera_height: 480,
             camera_fps: 15,
         };
-        let mut worker = NativeWorker::new(
+        let worker = NativeWorker::new(
             config,
             CallbackSink::new(callbacks),
             rx,
@@ -486,6 +453,14 @@ mod tests {
             Arc::new(MediaGate::default()),
             Arc::new(AtomicBool::new(false)),
         );
+        (worker, tx)
+    }
+
+    #[test]
+    fn retry_folds_pending_suppress_into_latch() {
+        let (mut worker, _tx) = test_worker();
+        worker.inbuf.push(0);
+        worker.last_read_at = Some(MonotonicInstant::from_millis(42));
 
         // A suppress queued during the failed session survives the retry as the latch;
         // the stale refresh drops (a fresh connection starts with an IDR anyway).
@@ -494,6 +469,8 @@ mod tests {
         });
         worker.pending_control.push(ControlCommand::RequestRefresh);
         worker.reset_session_state();
+        assert!(worker.inbuf.is_empty());
+        assert_eq!(worker.last_read_at, None);
         assert!(worker.suppress_display_latched);
         assert!(worker.pending_control.is_empty());
 
@@ -504,5 +481,122 @@ mod tests {
         worker.reset_session_state();
         assert!(!worker.suppress_display_latched);
         assert!(worker.pending_control.is_empty());
+    }
+
+    #[derive(Default)]
+    struct AutodetectStream {
+        reads: VecDeque<(Duration, Vec<u8>)>,
+        writes: Vec<Vec<u8>>,
+        write_delay: Duration,
+    }
+
+    impl Read for AutodetectStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let Some((delay, bytes)) = self.reads.pop_front() else {
+                return Ok(0);
+            };
+            thread::sleep(delay);
+            assert!(bytes.len() <= buf.len());
+            buf[..bytes.len()].copy_from_slice(&bytes);
+            Ok(bytes.len())
+        }
+    }
+
+    impl Write for AutodetectStream {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            thread::sleep(self.write_delay);
+            self.writes.push(bytes.to_vec());
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn autodetect_frame(request: AutoDetectRequest) -> Vec<u8> {
+        let user_data = encode_vec(&AutoDetectReqPdu::new(request)).unwrap();
+        encode_vec(&X224(McsMessage::SendDataIndication(SendDataIndication {
+            initiator_id: 1002,
+            channel_id: 1004,
+            user_data: user_data.into(),
+        })))
+        .unwrap()
+    }
+
+    fn run_bandwidth_probe(stream: &mut AutodetectStream) -> (u32, u32) {
+        let (mut worker, _tx) = test_worker();
+        let mut connector = worker.new_connector("127.0.0.1:12345".parse().unwrap());
+        connector.state = ClientConnectorState::ConnectTimeAutoDetection {
+            io_channel_id: 1003,
+            user_channel_id: 1002,
+        };
+        connector.message_channel_id = Some(1004);
+        let err = worker.pump_connector(stream, connector).unwrap_err();
+        assert!(err.message.contains("peer closed connection"), "{err:?}");
+
+        let response = stream.writes.last().expect("bandwidth reply");
+        let X224(McsMessage::SendDataRequest(data)) = decode(response).unwrap() else {
+            panic!("expected MCS SendDataRequest");
+        };
+        assert_eq!(data.channel_id, 1004);
+        let response = decode::<AutoDetectRspPdu>(&data.user_data).unwrap();
+        let AutoDetectResponse::BandwidthMeasureResults {
+            sequence_number,
+            time_delta_ms,
+            byte_count,
+            ..
+        } = response.response
+        else {
+            panic!("expected BandwidthMeasureResults");
+        };
+        assert_eq!(sequence_number, 3);
+        (time_delta_ms, byte_count)
+    }
+
+    #[test]
+    fn connector_bandwidth_counts_payloads_and_times_separate_reads() {
+        let start = autodetect_frame(AutoDetectRequest::bw_start_connect_time(1));
+        let payload = autodetect_frame(AutoDetectRequest::bw_payload(2, vec![0; 1024]));
+        let stop = autodetect_frame(AutoDetectRequest::bw_stop_connect_time(3, vec![0; 512]));
+        let mut stream = AutodetectStream {
+            // Split the payload across reads, with Stop buffered behind its final bytes.
+            reads: VecDeque::from([
+                (Duration::ZERO, [start, payload[..10].to_vec()].concat()),
+                (
+                    Duration::from_millis(20),
+                    [payload[10..].to_vec(), stop].concat(),
+                ),
+            ]),
+            ..Default::default()
+        };
+        let (elapsed_ms, bytes) = run_bandwidth_probe(&mut stream);
+        assert!(
+            elapsed_ms >= 20,
+            "expected the read delay, got {elapsed_ms} ms"
+        );
+        assert_eq!(bytes, (1024 + 8) + (512 + 8));
+    }
+
+    #[test]
+    fn connector_bandwidth_ignores_processing_delay_for_buffered_pdus() {
+        let batch = [
+            autodetect_frame(AutoDetectRequest::bw_start_connect_time(1)),
+            autodetect_frame(AutoDetectRequest::rtt_connect_time(4)),
+            autodetect_frame(AutoDetectRequest::bw_payload(2, vec![0; 1024])),
+            autodetect_frame(AutoDetectRequest::bw_stop_connect_time(3, vec![0; 512])),
+        ]
+        .concat();
+        let mut stream = AutodetectStream {
+            reads: VecDeque::from([(Duration::ZERO, batch)]),
+            // Sending the RTT reply delays processing Stop, but not its arrival.
+            write_delay: Duration::from_millis(20),
+            ..Default::default()
+        };
+        assert_eq!(
+            run_bandwidth_probe(&mut stream),
+            (1, (1024 + 8) + (512 + 8))
+        );
+        assert_eq!(stream.writes.len(), 2);
     }
 }

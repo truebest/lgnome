@@ -1,6 +1,6 @@
 /* Per-tick coordinator for deferred session switches, snapshot backgrounding,
  * worker refresh requests, and the keyframe watchdog. SDL thread only. */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #include "native_switch_internal.h"
 
@@ -12,7 +12,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_switch, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_switch, cLogLevelInfo, "native");
 
 /* Snapshot the ACTIVE slot's decode counter BEFORE issuing any resume/refresh
  * request: the requested keyframe may decode immediately, and a later baseline

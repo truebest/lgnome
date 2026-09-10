@@ -7,7 +7,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_app_config, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_app_config, cLogLevelInfo, "native");
 
 bool copy_config_string(char *dest, size_t cap, const char *value, const char *field) {
     if (!dest || cap == 0) {
@@ -35,6 +35,8 @@ bool native_session_connection_config_changed(const NativeSessionConfig *before,
            strcmp(before->username, after->username) != 0 ||
            strcmp(before->password, after->password) != 0 ||
            strcmp(before->domain, after->domain) != 0 || before->fps != after->fps ||
+           before->desktop_width != after->desktop_width ||
+           before->desktop_height != after->desktop_height ||
            before->camera_redirect != after->camera_redirect ||
            before->audio_input_redirect != after->audio_input_redirect;
 }
@@ -54,24 +56,17 @@ void native_settings_recompute_capture_gates(NativeSettings *settings) {
     }
 }
 
-void native_config_apply_initial_desktop_hint(NativeSettings *settings) {
-    if (!settings) {
-        return;
-    }
-    settings->width = NATIVE_RDP_INITIAL_DESKTOP_WIDTH;
-    settings->height = NATIVE_RDP_INITIAL_DESKTOP_HEIGHT;
-}
-
 bool native_config_validate_runtime(const NativeSettings *settings) {
     bool ok = true;
-    if (settings->width == 0 || settings->height == 0 || settings->wheel_step == 0 ||
+    if (settings->wheel_step == 0 ||
         settings->wheel_scroll_divisor == 0) {
         clog(cLogLevelError, "invalid zero value in RDP config");
         ok = false;
     }
     for (int slot = 0; slot < NATIVE_SETTINGS_MAX_SESSIONS; slot++) {
         const NativeSessionConfig *session = &settings->sessions[slot];
-        if (session->port == 0 || session->fps == 0) {
+        if (session->port == 0 || session->fps == 0 || session->desktop_width == 0 ||
+            session->desktop_height == 0) {
             clog(cLogLevelError, "invalid zero value in %s session config", native_session_slot_name(slot));
             ok = false;
         }
@@ -134,15 +129,17 @@ void native_config_log_effective(const NativeSettings *settings) {
             continue; /* unconfigured extra slot */
         }
         clog(cLogLevelInfo,
-             "effective %s RDP config host=%s port=%u username=%s password=%s domain=%s fps=%u camera=%s microphone=%s",
+             "effective %s RDP config host=%s port=%u username=%s password=%s domain=%s fps=%u "
+             "desktop=%ux%u camera=%s microphone=%s",
              native_session_slot_name(slot), session->host, (unsigned)session->port,
              session->username[0] ? "set" : "missing", session->password[0] ? "set" : "missing",
              session->domain[0] ? "set" : "empty", (unsigned)session->fps,
+             (unsigned)session->desktop_width, (unsigned)session->desktop_height,
              session->camera_redirect ? "on" : "off", session->audio_input_redirect ? "on" : "off");
     }
     clog(cLogLevelInfo,
-         "effective globals desktop=%ux%u wheelStep=%u wheelScrollDivisor=%u audioCodec=%s camera=%s/%ux%u@%u microphone=%s/gain%+d",
-         (unsigned)settings->width, (unsigned)settings->height, (unsigned)settings->wheel_step,
+         "effective globals wheelStep=%u wheelScrollDivisor=%u audioCodec=%s camera=%s/%ux%u@%u microphone=%s/gain%+d",
+         (unsigned)settings->wheel_step,
          (unsigned)settings->wheel_scroll_divisor,
          settings->audio_codec == NATIVE_AUDIO_CODEC_PCM ? "pcm" : "auto",
          settings->camera_enabled ? "on" : "off", (unsigned)settings->camera_width,

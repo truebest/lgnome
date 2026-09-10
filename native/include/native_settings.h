@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_NATIVE_SETTINGS_H
-#define GNOMECAST_NATIVE_SETTINGS_H
+#ifndef LGNOME_NATIVE_SETTINGS_H
+#define LGNOME_NATIVE_SETTINGS_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -31,6 +31,10 @@ typedef struct NativeSessionConfig {
     char domain[NATIVE_SETTINGS_STRING_MAX];
     uint16_t port;
     uint16_t fps;
+    /* Desktop size requested from THIS server ("desktopWidth"/"desktopHeight"). Servers
+     * that mirror a real monitor ignore it; Windows builds its session at this size. */
+    uint16_t desktop_width;
+    uint16_t desktop_height;
     /* Which slots' audio ducks THIS session -12 dB while it is on screen ("duckTriggers"
      * JSON key, bit = slot index, own bit ignored; default: nobody -- ducking is opt-in).
      * Toggled from the mixer overlay's channel color-bar buttons, shown relative to the
@@ -52,9 +56,6 @@ typedef struct NativeSessionConfig {
 
 typedef struct NativeSettings {
     NativeSessionConfig sessions[NATIVE_SETTINGS_MAX_SESSIONS];
-    /* Initial desktop hint; runtime-only (never persisted, forced to 1920x1080 on connect). */
-    uint16_t width;
-    uint16_t height;
     uint16_t wheel_step;
     uint16_t wheel_scroll_divisor;
     uint16_t audio_codec; /* NATIVE_AUDIO_CODEC_* */
@@ -68,12 +69,18 @@ typedef struct NativeSettings {
     int16_t audio_input_gain_db;
 } NativeSettings;
 
+/* Bounds for a profile's requested desktop size. The floor keeps a typo from asking for
+ * a desktop no server will build; the ceiling is the largest panel this runs on. */
+#define NATIVE_SETTINGS_DESKTOP_MIN_WIDTH 640u
+#define NATIVE_SETTINGS_DESKTOP_MIN_HEIGHT 480u
+#define NATIVE_SETTINGS_DESKTOP_MAX_WIDTH 3840u
+#define NATIVE_SETTINGS_DESKTOP_MAX_HEIGHT 2160u
+
 /* Human-facing slot name ("green"/"yellow"); "?" for out-of-range indices. */
 const char *native_session_slot_name(int slot);
 
 void native_settings_defaults(NativeSettings *settings);
-
-/* One-release compatibility notice shared by JSON and CLI parsing. */
-void native_settings_warn_deprecated_audio_prebuffer(void);
+/* Empty profile with valid connection defaults, also used when deleting a slot. */
+void native_session_config_defaults(NativeSessionConfig *session);
 
 #endif

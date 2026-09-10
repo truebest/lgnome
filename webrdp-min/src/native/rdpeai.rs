@@ -9,7 +9,7 @@
 use std::sync::{Arc, Mutex};
 
 use ironrdp_core::impl_as_any;
-use ironrdp_dvc::{DvcMessage, DvcProcessor};
+use ironrdp_dvc::{DvcClientProcessor, DvcMessage, DvcProcessor};
 use ironrdp_pdu::PduResult;
 
 use super::{CallbackSink, RdpLogLevel, LOG_TARGET_AUDIO_INPUT};
@@ -240,6 +240,8 @@ impl DvcProcessor for AudioInputHandler {
     }
 }
 
+impl DvcClientProcessor for AudioInputHandler {}
+
 fn client_formats() -> Vec<u8> {
     const FORMAT_SIZE: u32 = 18;
     let mut response = vec![MSG_FORMATS];
@@ -380,7 +382,7 @@ mod tests {
 
     #[test]
     fn handshake_offers_one_pcm_format() {
-        let bridge = AudioInputBridge::new(CallbackSink::empty());
+        let bridge = AudioInputBridge::new(CallbackSink::default());
         let mut handler = AudioInputHandler::new(bridge);
         let version = handler.process_payload(9, &[1, 2, 0, 0, 0]);
         assert_eq!(encoded(&version[0]), [1, 2, 0, 0, 0]);
@@ -398,7 +400,7 @@ mod tests {
 
     #[test]
     fn handshake_rejects_server_without_exact_pcm_format() {
-        let bridge = AudioInputBridge::new(CallbackSink::empty());
+        let bridge = AudioInputBridge::new(CallbackSink::default());
         let mut handler = AudioInputHandler::new(bridge);
         let mut formats = server_formats();
         formats[9..11].copy_from_slice(&6u16.to_le_bytes()); // WAVE_FORMAT_ALAW
@@ -408,7 +410,7 @@ mod tests {
 
     #[test]
     fn open_and_submit_exact_pcm_packet() {
-        let bridge = AudioInputBridge::new(CallbackSink::empty());
+        let bridge = AudioInputBridge::new(CallbackSink::default());
         let mut handler = AudioInputHandler::new(bridge.clone());
         handler.process_payload(9, &server_formats());
         let replies = handler.process_payload(9, &extensible_open_pdu(441));

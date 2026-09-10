@@ -1,7 +1,7 @@
 /* SDL-thread supervisor for terminal RDP worker events: update the HUB,
  * select a surviving foreground session when possible, and tear down failed
  * slots plus the shared media pipeline in the required order. */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #include "native_loop_internal.h"
 
@@ -20,7 +20,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_session_supervisor, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_session_supervisor, cLogLevelInfo, "native");
 
 void native_session_supervisor_tick(App *app, NativePreconnectUi *ui) {
     /* Drain per-slot terminal events. The active slot decides between an automatic
@@ -32,14 +32,13 @@ void native_session_supervisor_tick(App *app, NativePreconnectUi *ui) {
             continue;
         }
         RdpState terminal_state = (RdpState)atomic_load(&slot->terminal_state);
-        char status[128];
-        if (terminal_state == RDP_STATE_STOPPED) {
-            (void)snprintf(status, sizeof(status), "%s session stopped.", native_session_slot_name(i));
-        } else {
-            (void)snprintf(status, sizeof(status), "%s session failed: %s", native_session_slot_name(i),
-                           rdp_state_name(terminal_state));
-        }
-        native_preconnect_ui_set_slot_state(ui, i, NATIVE_PRECONNECT_SESSION_ERROR, status);
+        RdpDisconnectReason reason = native_session_terminal_reason(
+            terminal_state, (RdpDisconnectReason)atomic_load(&slot->terminal_reason),
+            atomic_load(&slot->was_active) || app->session_runtime_active[i]);
+        NativePreconnectSessionState ui_state = native_session_terminal_ui_state(terminal_state, reason);
+        NativeSessionStatus presentation = native_session_status(ui_state, reason);
+        const char *status = presentation.detail;
+        native_preconnect_ui_set_slot_status(ui, i, ui_state, reason, status);
         if (i == app->hub_connect_target) {
             /* A HUB-originated connect failed before it could own the screen. Keep
              * HUB open and returnable, but stop waiting for this slot to auto-enter. */
@@ -56,11 +55,11 @@ void native_session_supervisor_tick(App *app, NativePreconnectUi *ui) {
             }
             if (survivor >= 0 && app->streaming_visible) {
                 /* The session the user was WATCHING died: fall back to the survivor. */
-                clog(cLogLevelWarning, "%s; auto-switching video to the %s session", status,
-                     native_session_slot_name(survivor));
+                clog(presentation.error ? cLogLevelWarning : cLogLevelInfo,
+                     "%s; auto-switching video to the %s session", status, native_session_slot_name(survivor));
                 native_complete_session_switch(app, survivor);
                 native_stop_slot(app, i);
-                native_preconnect_ui_set_status(ui, status, true);
+                native_preconnect_ui_set_status(ui, status, presentation.error);
             } else if (survivor >= 0) {
                 /* A connect attempt made from this slot's configurator failed while
                  * another session runs backgrounded: stay on the form so the user can
@@ -69,7 +68,7 @@ void native_session_supervisor_tick(App *app, NativePreconnectUi *ui) {
                 native_stop_slot(app, i);
                 app->ui_last_state = -1;
                 native_preconnect_ui_set_connecting(ui, i, false, status);
-                native_preconnect_ui_set_status(ui, status, true);
+                native_preconnect_ui_set_status(ui, status, presentation.error);
             } else {
                 /* Flush + release input while the failed session pointer is still
                  * wired, then tear the slot down (media follows after the pass once
@@ -85,10 +84,11 @@ void native_session_supervisor_tick(App *app, NativePreconnectUi *ui) {
                 app->ui_last_state = -1;
                 native_preconnect_ui_set_visible(ui, true);
                 native_preconnect_ui_set_connecting(ui, i, false, status);
-                native_preconnect_ui_set_status(ui, status, true);
+                native_preconnect_ui_set_status(ui, status, presentation.error);
             }
         } else {
-            clog(cLogLevelWarning, "background %s", status);
+            clog(presentation.error ? cLogLevelWarning : cLogLevelInfo,
+                 "background %s: %s", native_session_slot_name(i), status);
             native_stop_slot(app, i);
         }
         if (!app->streaming_visible && !app->hub_visible) {

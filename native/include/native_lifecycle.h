@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_NATIVE_LIFECYCLE_H
-#define GNOMECAST_NATIVE_LIFECYCLE_H
+#ifndef LGNOME_NATIVE_LIFECYCLE_H
+#define LGNOME_NATIVE_LIFECYCLE_H
 
 /* Process-level bring-up and teardown: webOS environment defaults, the stderr
  * log redirect, the fatal-signal/atexit hooks that release the DirectMedia

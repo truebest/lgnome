@@ -12,19 +12,19 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_audio, cLogLevelInfo, cLogFlags_Default, "audio.pipeline", NULL);
+clog_define(g_native_log_audio, cLogLevelInfo, "audio.pipeline");
 
 _Static_assert(MA_VERSION_MAJOR == 0 && MA_VERSION_MINOR == 11 && MA_VERSION_REVISION == 25,
-               "gnomecast audio pipeline is pinned to miniaudio 0.11.25");
+               "lgnome audio pipeline is pinned to miniaudio 0.11.25");
 _Static_assert(ATOMIC_INT_LOCK_FREE == 2, "the audio SPSC cursors require lock-free 32-bit atomics");
 _Static_assert((NATIVE_AUDIO_PIPELINE_CAPACITY_FRAMES & (NATIVE_AUDIO_PIPELINE_CAPACITY_FRAMES - 1u)) == 0,
                "the SPSC capacity must preserve ring positions across cursor wrap");
 
 #define NATIVE_AUDIO_STATS_LOG_MS 3000u
 
-static uint64_t native_audio_monotonic_ms(void *ctx) {
+static uint32_t native_audio_monotonic_ms(void *ctx) {
     (void)ctx;
-    return native_monotonic_ms64();
+    return native_monotonic_ms();
 }
 
 static void pipeline_impl_cleanup(NativeAudioPipelineImpl *pipeline) {
@@ -160,23 +160,14 @@ int32_t native_audio_pipeline_get_duck_factor_q15(NativeAudioPipeline *pipeline)
     return (int32_t)atomic_load_explicit(&impl->duck_factor_q15, memory_order_relaxed);
 }
 
-/* Runs on the render thread once per graph read, before the source callbacks. Activity
- * is judged on the previous block's post-fader peaks (one block of detection latency),
- * so a background source whose fader is pulled down never triggers a duck. Attack snaps
- * the factor (the per-source block ramp smooths it); release is a timed linear ramp
- * stepped per block. duck_bg_seen keeps a fresh pipeline from ducking on startup while
- * now - duck_last_active_ms is still trivially inside the hold window. */
+/* Render thread: duck activity uses the previous block's post-fader peaks. */
 static void pipeline_duck_update(NativeAudioPipelineImpl *impl) {
-    uint64_t now = native_audio_pipeline_now_ms(impl);
+    uint32_t now = native_audio_pipeline_now_ms(impl);
     int fg = atomic_load_explicit(&impl->duck_foreground_index, memory_order_relaxed);
     unsigned mask = atomic_load_explicit(&impl->duck_trigger_mask, memory_order_relaxed);
     unsigned triggers = fg >= 0 ? (mask & ~(1u << fg)) : 0u;
     if (fg != impl->duck_cfg_foreground || triggers != impl->duck_cfg_triggers) {
-        /* The activity history was collected under the previous routing: drop it, or a
-         * hold armed by the OLD mask would transfer to a foreground whose own triggers
-         * were quiet (e.g. right after a session switch). A trigger that is loud under
-         * the new config re-arms on this very block, so a legitimate duck carries over
-         * seamlessly. */
+        /* Do not transfer a duck hold between routing configurations. */
         impl->duck_cfg_foreground = fg;
         impl->duck_cfg_triggers = triggers;
         impl->duck_bg_seen = false;
@@ -203,14 +194,15 @@ static void pipeline_duck_update(NativeAudioPipelineImpl *impl) {
             impl->duck_bg_seen = true;
             impl->duck_last_active_ms = now;
         }
-        if (impl->duck_bg_seen && now - impl->duck_last_active_ms < NATIVE_AUDIO_DUCK_HOLD_MS) {
-            target = (float)NATIVE_AUDIO_DUCK_GAIN_Q15 / 32768.0f;
+        if (impl->duck_bg_seen) {
+            if (now - impl->duck_last_active_ms < NATIVE_AUDIO_DUCK_HOLD_MS) {
+                target = (float)NATIVE_AUDIO_DUCK_GAIN_Q15 / 32768.0f;
+            } else {
+                impl->duck_bg_seen = false;
+            }
         }
     } else if (impl->duck_factor >= 1.0f) {
-        /* Disabled (no foreground or empty trigger mask) and fully released: detach.
-         * Until then the previously ducked source keeps riding the release ramp so a
-         * disable doesn't snap the gain back — and the hold window is deliberately
-         * skipped so a toggle-off starts releasing on the next block. */
+        /* Detach only after the release ramp completes. */
         impl->duck_applied_index = -1;
         impl->duck_bg_seen = false;
     }
@@ -254,7 +246,7 @@ bool native_audio_pipeline_read_f32(NativeAudioPipeline *pipeline, float *out, s
             peak_right = right;
         }
     }
-    uint64_t now_ms = native_audio_pipeline_now_ms(impl);
+    uint32_t now_ms = native_audio_pipeline_now_ms(impl);
     atomic_store_explicit(&impl->output_peak_left, (unsigned)native_audio_float_peak_to_i32(peak_left),
                           memory_order_relaxed);
     atomic_store_explicit(&impl->output_peak_right, (unsigned)native_audio_float_peak_to_i32(peak_right),
@@ -339,7 +331,7 @@ void native_audio_pipeline_get_output_peaks(NativeAudioPipeline *pipeline, int32
 }
 
 static void pipeline_log_stats(NativeAudioPipelineImpl *pipeline) {
-    uint64_t now_ms = native_audio_pipeline_now_ms(pipeline);
+    uint32_t now_ms = native_audio_pipeline_now_ms(pipeline);
     if (now_ms - pipeline->last_stats_log_ms < NATIVE_AUDIO_STATS_LOG_MS) {
         return;
     }
@@ -349,15 +341,25 @@ static void pipeline_log_stats(NativeAudioPipelineImpl *pipeline) {
         if (!atomic_load_explicit(&source->open, memory_order_relaxed)) {
             continue;
         }
+        unsigned underruns = atomic_load_explicit(&source->underruns, memory_order_relaxed);
+        unsigned hard = atomic_load_explicit(&source->hard_corrections, memory_order_relaxed);
         clog(cLogLevelDebug,
              "source %d queue=%ums target=%ums jitter-p95=%ums src=%dppm underruns=%u hard=%u overflow=%u",
              i, native_audio_source_queue_ms(source),
              atomic_load_explicit(&source->target_delay_ms, memory_order_relaxed),
              atomic_load_explicit(&source->jitter_p95_ms, memory_order_relaxed),
-             atomic_load_explicit(&source->correction_ppm, memory_order_relaxed),
-             atomic_load_explicit(&source->underruns, memory_order_relaxed),
-             atomic_load_explicit(&source->hard_corrections, memory_order_relaxed),
+             atomic_load_explicit(&source->correction_ppm, memory_order_relaxed), underruns, hard,
              atomic_load_explicit(&source->overflows, memory_order_relaxed));
+        /* Both are audible, and both used to be visible only at debug level, which no
+         * field log carries. Reported per window rather than per event. */
+        if (underruns != pipeline->reported_underruns[i] || hard != pipeline->reported_hard_corrections[i]) {
+            clog(cLogLevelWarning, "source %d audible corrections: %u starved, %u trimmed (queue=%ums target=%ums)", i,
+                 underruns - pipeline->reported_underruns[i], hard - pipeline->reported_hard_corrections[i],
+                 native_audio_source_queue_ms(source),
+                 atomic_load_explicit(&source->target_delay_ms, memory_order_relaxed));
+            pipeline->reported_underruns[i] = underruns;
+            pipeline->reported_hard_corrections[i] = hard;
+        }
     }
 }
 

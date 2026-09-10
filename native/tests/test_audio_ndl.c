@@ -8,7 +8,7 @@
 #include "media_ndl_internal.h"
 #include "rdp_ffi.h"
 
-/* Exercises the gnomecast audio adapter over the real backend_ndl state machine with a scripted
+/* Exercises the lgnome audio adapter over the real backend_ndl state machine with a scripted
  * fake NDL API. The media adapter is NOT linked: the test provides its own NativeMedia
  * and native_media_ndl_backend() double. */
 

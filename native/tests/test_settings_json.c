@@ -5,6 +5,8 @@
 #include <unistd.h>
 
 #include "native_config_storage.h"
+#include "native_config.h"
+#include "native_config_launch.h"
 #include "settings_json.h"
 
 static NativeSettings make_defaults(void) {
@@ -21,8 +23,8 @@ static void test_defaults(void) {
         assert(s.sessions[i].name[0] == '\0');
         assert(s.sessions[i].port == 3389);
         assert(s.sessions[i].fps == 60);
+        assert(s.sessions[i].desktop_width == 3840 && s.sessions[i].desktop_height == 2160);
     }
-    assert(s.width == 1920 && s.height == 1080);
     assert(s.wheel_step == 60 && s.wheel_scroll_divisor == 1);
     assert(!s.camera_enabled && s.camera_device_id[0] == '\0');
     assert(s.camera_width == 640 && s.camera_height == 480 &&
@@ -33,6 +35,70 @@ static void test_defaults(void) {
         assert(!s.sessions[i].camera_redirect);
         assert(!s.sessions[i].audio_input_redirect);
     }
+}
+
+/* A profile carries the desktop size it asks the server for, and a document written
+ * before the field keeps the default rather than a zero. */
+static void test_desktop_size_round_trip(void) {
+    NativeSettings s = make_defaults();
+    const char *json = "{ \"sessions\": [ { \"host\": \"a\", \"desktopWidth\": 1920, \"desktopHeight\": 1080 } ] }";
+    assert(native_settings_apply_json(&s, json, "test"));
+    assert(s.sessions[0].desktop_width == 1920 && s.sessions[0].desktop_height == 1080);
+    /* Untouched profiles keep theirs. */
+    assert(s.sessions[1].desktop_width == 3840 && s.sessions[1].desktop_height == 2160);
+
+    const char *legacy = "{ \"sessions\": [ { \"host\": \"b\", \"fps\": 30 } ] }";
+    assert(native_settings_apply_json(&s, legacy, "test"));
+    assert(s.sessions[0].desktop_width == 1920 && s.sessions[0].desktop_height == 1080);
+
+    /* Out of bounds is refused, leaving the previous value in place. */
+    const char *bogus = "{ \"sessions\": [ { \"host\": \"c\", \"desktopWidth\": 99 } ] }";
+    assert(!native_settings_apply_json(&s, bogus, "test"));
+    assert(s.sessions[0].desktop_width == 1920);
+}
+
+static void test_deleted_profile_round_trip(void) {
+    for (int deleted = 0; deleted < NATIVE_SETTINGS_MAX_SESSIONS; deleted++) {
+        NativeSettings s = make_defaults();
+        for (int i = 0; i < NATIVE_SETTINGS_MAX_SESSIONS; i++) {
+            snprintf(s.sessions[i].host, sizeof(s.sessions[i].host), "desktop-%d", i);
+            s.sessions[i].desktop_width = 1920;
+            s.sessions[i].desktop_height = 1080;
+        }
+        /* The same reset used by the HUB delete transaction and UI draft. */
+        native_session_config_defaults(&s.sessions[deleted]);
+        assert(s.sessions[deleted].host[0] == '\0');
+        assert(native_config_validate_runtime(&s));
+        char *json = NULL;
+        size_t len = 0;
+        FILE *file = open_memstream(&json, &len);
+        assert(file && native_settings_write_json(&s, file));
+        assert(fclose(file) == 0 && len > 0);
+        NativeSettings loaded = make_defaults();
+        assert(native_settings_apply_json(&loaded, json, "deleted-profile"));
+        for (int i = 0; i < NATIVE_SETTINGS_MAX_SESSIONS; i++) {
+            assert(!native_session_connection_config_changed(&s.sessions[i], &loaded.sessions[i]));
+            assert(strcmp(s.sessions[i].name, loaded.sessions[i].name) == 0);
+            assert(s.sessions[i].duck_mask == loaded.sessions[i].duck_mask);
+        }
+        free(json);
+    }
+}
+
+static void test_resolution_changes_require_save_and_reconnect(void) {
+    NativeSessionConfig saved;
+    native_session_config_defaults(&saved);
+    NativeSessionConfig edited = saved;
+    assert(!native_session_connection_config_changed(&saved, &edited));
+    edited.desktop_width = 1920;
+    assert(native_session_connection_config_changed(&saved, &edited));
+    assert(!native_session_endpoint_changed(&saved, &edited));
+    edited = saved;
+    edited.desktop_height = 1080;
+    assert(native_session_connection_config_changed(&saved, &edited));
+    edited = saved;
+    strcpy(edited.name, "New label");
+    assert(!native_session_connection_config_changed(&saved, &edited));
 }
 
 static void test_legacy_flat_applies_to_green(void) {
@@ -322,7 +388,7 @@ static void test_has_rdp_key(void) {
     assert(strcmp(s.sessions[NATIVE_SESSION_SLOT_GREEN].name, "Studio PC") == 0);
     assert(!native_settings_json_has_rdp_key("{ \"name\": null }"));
     assert(native_settings_json_has_rdp_key("{ \"wheelStep\": 60 }"));
-    assert(native_settings_json_has_rdp_key("{ \"audioPrebufferMs\": 60 }"));
+    assert(!native_settings_json_has_rdp_key("{ \"audioPrebufferMs\": 60 }"));
 }
 
 static void test_save_load_round_trip(void) {
@@ -356,7 +422,11 @@ static void test_save_load_round_trip(void) {
     s.sessions[0].camera_redirect = true;
     s.sessions[1].audio_input_redirect = true;
 
-    char template_path[] = "/tmp/gnomecast-settings-test-XXXXXX";
+    const char *tmp_dir = getenv("TMPDIR");
+    char template_path[4096];
+    int path_len = snprintf(template_path, sizeof(template_path), "%s/lgnome-settings-test-XXXXXX",
+                            tmp_dir && tmp_dir[0] ? tmp_dir : "/tmp");
+    assert(path_len > 0 && (size_t)path_len < sizeof(template_path));
     int fd = mkstemp(template_path);
     assert(fd >= 0);
     close(fd);
@@ -394,8 +464,66 @@ static void test_save_load_round_trip(void) {
     assert(unlink(template_path) == 0);
 }
 
+static void test_launch_controls(void) {
+    struct {
+        char *json;
+        bool ignore_saved;
+        bool preview;
+    } cases[] = {
+        { "{}", false, false },
+        { "{\"ignoreSavedConfig\": true}", true, false },
+        { "{\"cameraPreview\": true}", false, true },
+        { "{\"params\": \"{\\\"ignoreSavedConfig\\\": true, \\\"cameraPreview\\\": true}\"}", true, true },
+        { "{\"launchParams\": \"{\\\"params\\\": \\\"{\\\\\\\"cameraPreview\\\\\\\": true}\\\"}\"}", false, true },
+        { "{\"ignoreSavedConfig\": false, \"cameraPreview\": \"true\"}", false, false },
+        { "{\"params\": \"broken\"}", false, false },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char *argv[] = { "lgnome", cases[i].json };
+        assert(native_config_launch_ignores_saved_config(2, argv) == cases[i].ignore_saved);
+        assert(native_camera_preview_requested(2, argv) == cases[i].preview);
+    }
+    char *argv[] = { "lgnome", "--camera-preview", "--connect-slot", "yellow" };
+    assert(native_camera_preview_requested(4, argv));
+    assert(!native_config_launch_ignores_saved_config(4, argv));
+    assert(native_connect_slot_requested(4, argv) == NATIVE_SESSION_SLOT_YELLOW);
+}
+
+static void test_removed_options_are_ignored(void) {
+    NativeSettings s = make_defaults();
+    s.sessions[0].desktop_width = 1920;
+    s.sessions[0].desktop_height = 1080;
+    NativeSettings before = s;
+    const char *json = "{ \"width\": false, \"height\": null, \"audioPrebufferMs\": \"obsolete\" }";
+    assert(!native_settings_json_has_rdp_key(json));
+    assert(native_settings_apply_json(&s, json, "legacy"));
+    char *argv[] = { "lgnome", "--width", "bad", "--height", "bad", "--audio-prebuffer-ms", "bad" };
+    assert(native_config_apply_cli(&s, 7, argv));
+    assert(memcmp(&s, &before, sizeof(s)) == 0);
+}
+
+static void test_capture_gates_follow_remaining_profiles(void) {
+    NativeSettings s = make_defaults();
+    s.sessions[0].camera_redirect = true;
+    s.sessions[1].audio_input_redirect = true;
+    native_settings_recompute_capture_gates(&s);
+    assert(s.camera_enabled && s.audio_input_enabled);
+    native_session_config_defaults(&s.sessions[0]);
+    native_settings_recompute_capture_gates(&s);
+    assert(!s.camera_enabled && s.audio_input_enabled);
+    native_session_config_defaults(&s.sessions[1]);
+    native_settings_recompute_capture_gates(&s);
+    assert(!s.camera_enabled && !s.audio_input_enabled);
+}
+
 int main(void) {
+    test_launch_controls();
+    test_removed_options_are_ignored();
+    test_capture_gates_follow_remaining_profiles();
     test_defaults();
+    test_desktop_size_round_trip();
+    test_deleted_profile_round_trip();
+    test_resolution_changes_require_save_and_reconnect();
     test_legacy_flat_applies_to_green();
     test_legacy_absent_keys_keep_values();
     test_non_string_name_is_ignored_for_compatibility();

@@ -1,12 +1,9 @@
-//! Minimal MS-RDPEA audio-output client over the AUDIO_PLAYBACK_DVC dynamic
-//! channel — the transport gnome-remote-desktop uses (ironrdp-rdpsnd's own
-//! client only implements the static "rdpsnd" channel). Audio is strictly
-//! best-effort: every protocol failure logs and swallows instead of returning
-//! Err, because DrdynvcClient propagates processor errors into a terminal
-//! session error and audio must never take down a working video session.
+//! MS-RDPEA over AUDIO_PLAYBACK_DVC. Protocol errors silence audio, not the RDP session.
 
 use ironrdp_core::{impl_as_any, Decode as _, Encode, EncodeResult, ReadCursor, WriteCursor};
-use ironrdp_dvc::{DvcEncode, DvcMessage, DvcProcessor};
+use ironrdp_dvc::{
+    DvcChannelListener, DvcClientProcessor, DvcEncode, DvcMessage, DvcProcessor, DynamicChannelId,
+};
 use ironrdp_pdu::PduResult;
 use ironrdp_rdpsnd::pdu as sndpdu;
 
@@ -16,9 +13,7 @@ use super::{
 
 const AUDIO_DVC_CHANNEL_NAME: &str = "AUDIO_PLAYBACK_DVC";
 
-/// `ClientAudioOutputPdu` implements `SvcEncode` (for the static rdpsnd channel) but not
-/// `DvcEncode`, and both the trait and the type are foreign here, so the orphan rule
-/// requires this local wrapper to send it over the dynamic channel.
+/// Local wrapper adapts the foreign SvcEncode type to DvcEncode.
 struct RdpsndDvcMessage(sndpdu::ClientAudioOutputPdu);
 
 impl Encode for RdpsndDvcMessage {
@@ -37,24 +32,14 @@ impl Encode for RdpsndDvcMessage {
 
 impl DvcEncode for RdpsndDvcMessage {}
 
-/// Minimal MS-RDPEA audio output client over the AUDIO_PLAYBACK_DVC dynamic channel — the
-/// transport gnome-remote-desktop uses (ironrdp-rdpsnd's own client only implements the
-/// static "rdpsnd" channel). Audio is strictly best-effort: every protocol failure logs
-/// and swallows instead of returning Err, because DrdynvcClient propagates processor
-/// errors into a terminal session error and audio must never take down a working video
-/// session. Out-of-order PDUs are handled leniently for the same reason.
 pub(super) struct RdpsndDvcHandler {
     callbacks: CallbackSink,
     /// Latched on an undecodable payload; the channel goes silent instead of erroring.
     stopped: bool,
-    /// The filtered format list sent in the Client Audio Formats PDU, in wire order.
-    /// Wave2's wFormatNo indexes THIS list (the server echoes the client's index back),
-    /// not the server's advertised list.
+    /// Wave2 wFormatNo indexes this client list, not the server's advertised list.
     client_formats: Vec<sndpdu::AudioFormat>,
     /// (codec, sample_rate, channels) last delivered through on_audio_format.
     last_format: Option<(u32, u32, u16)>,
-    /// audioCodec=pcm setting: drop Opus from the client format list so the server has
-    /// to send lossless PCM (grd prefers Opus whenever the client offers it).
     prefer_pcm: bool,
     bad_format_logged: bool,
     legacy_wave_logged: bool,
@@ -75,10 +60,6 @@ impl RdpsndDvcHandler {
         }
     }
 
-    /// Maps a server-advertised format to the C ABI codec id when the TV can play it:
-    /// Opus (NDL hardware decode) and 16-bit stereo PCM only. AAC is deliberately not
-    /// accepted — the ndl-webos5 ss4s module cannot play it, and the server prefers AAC
-    /// over Opus whenever the client claims AAC support.
     fn rdp_audio_codec_for(format: &sndpdu::AudioFormat) -> Option<u32> {
         match format.format {
             sndpdu::WaveFormat::OPUS
@@ -103,20 +84,12 @@ impl RdpsndDvcHandler {
 
     fn handle_audio_format(&mut self, pdu: sndpdu::ServerAudioFormatPdu) -> Vec<DvcMessage> {
         let server_count = pdu.formats.len();
-        // Echo back the server's own AudioFormat structs for the entries we can play, so
-        // auxiliary fields (avg bytes/sec, block align) always match what it advertised.
+        // Preserve the server's format metadata for accepted codecs.
         let mut formats: Vec<sndpdu::AudioFormat> = pdu
             .formats
             .into_iter()
             .filter(|format| Self::rdp_audio_codec_for(format).is_some())
             .collect();
-        // Both Opus and PCM are playable: the C side decodes Opus in-process (libopus)
-        // before mixing, so the bandwidth-friendly codec wins whenever the server offers
-        // it (gnome-remote-desktop picks by its own preference — AAC > Opus > PCM — among
-        // the formats the CLIENT listed, i.e. Opus at ~96kbps instead of ~1.4Mbps PCM).
-        // audioCodec=pcm inverts that: list PCM alone so the stream stays lossless. If
-        // the server offers no PCM at all, keep the full playable list — degraded audio
-        // beats silence.
         if self.prefer_pcm {
             let pcm_only: Vec<sndpdu::AudioFormat> = formats
                 .iter()
@@ -247,11 +220,7 @@ impl DvcProcessor for RdpsndDvcHandler {
         let messages = match pdu {
             sndpdu::ServerAudioOutputPdu::AudioFormat(pdu) => self.handle_audio_format(pdu),
             sndpdu::ServerAudioOutputPdu::Training(pdu) => {
-                // The confirm must echo the Training PDU's wPackSize verbatim:
-                // gnome-remote-desktop validates it (1024) and ignores mismatched
-                // confirms, timing the whole audio protocol out after 10s. IronRDP's
-                // decoder consumed the 8 bytes of prolog+header out of wPackSize when
-                // sizing `data`, so add them back for a non-empty payload.
+                // Echo wPackSize, restoring the 8-byte header removed by IronRDP decoding.
                 let pack_size = if pdu.data.is_empty() {
                     0
                 } else {
@@ -330,6 +299,27 @@ impl DvcProcessor for RdpsndDvcHandler {
     }
 }
 
+impl DvcClientProcessor for RdpsndDvcHandler {}
+
+/// Windows re-creates the audio DVC; each create needs a fresh processor.
+pub(super) struct RdpsndDvcFactory {
+    pub(super) callbacks: CallbackSink,
+    pub(super) prefer_pcm: bool,
+}
+
+impl DvcChannelListener for RdpsndDvcFactory {
+    fn channel_name(&self) -> &str {
+        AUDIO_DVC_CHANNEL_NAME
+    }
+
+    fn create(&mut self, _channel_id: DynamicChannelId) -> Option<Box<dyn DvcClientProcessor>> {
+        Some(Box::new(RdpsndDvcHandler::new(
+            self.callbacks,
+            self.prefer_pcm,
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::RdpCallbacks;
@@ -373,22 +363,9 @@ mod tests {
     fn audio_test_handler(capture: &Mutex<AudioCapture>) -> RdpsndDvcHandler {
         let callbacks = RdpCallbacks {
             ctx: (capture as *const Mutex<AudioCapture>).cast_mut().cast(),
-            on_state: None,
-            on_log_enabled: None,
-            on_log: None,
-            on_desktop_size: None,
-            on_video_au: None,
-            on_bitmap_update: None,
             on_audio_format: Some(capture_audio_format),
             on_audio_data: Some(capture_audio_data),
-            on_pointer_bitmap: None,
-            on_pointer_position: None,
-            on_pointer_state: None,
-            on_camera_start: None,
-            on_camera_stop: None,
-            on_camera_sample_request: None,
-            on_audio_input_start: None,
-            on_audio_input_stop: None,
+            ..RdpCallbacks::default()
         };
         RdpsndDvcHandler::new(CallbackSink::new(callbacks), false)
     }
@@ -579,10 +556,7 @@ mod tests {
         let capture = Mutex::new(AudioCapture::default());
         let mut handler = audio_test_handler(&capture);
 
-        // gnome-remote-desktop sends Training with wPackSize=1024 (and validates that the
-        // confirm echoes exactly 1024, ignoring it otherwise until a 10s protocol
-        // timeout). IronRDP's decoder subtracts the 8 header bytes when sizing `data`,
-        // so the confirm must add them back.
+        // Training confirmation must echo the original wPackSize (1024), not decoded data length.
         let payload = encode_server_pdu(sndpdu::ServerAudioOutputPdu::Training(
             sndpdu::TrainingPdu {
                 timestamp: 0,

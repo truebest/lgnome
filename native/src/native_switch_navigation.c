@@ -1,6 +1,6 @@
 /* HUB/configurator and remote-control navigation for session switching.
  * SDL thread only; stream recovery and handoff live in sibling modules. */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #include "native_switch_internal.h"
 
@@ -16,7 +16,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_switch_navigation, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_switch_navigation, cLogLevelInfo, "native");
 
 /* Reveal the four-card HUB without stopping the active RDP session. Translucent LVGL
  * chrome is composited over the still-running video plane, while input is released so

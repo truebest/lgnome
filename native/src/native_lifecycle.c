@@ -16,7 +16,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 #include <SDL.h>
 #endif
 
@@ -24,7 +24,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_lifecycle, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_lifecycle, cLogLevelInfo, "native");
 
 void native_prepare_webos_environment(void) {
     if (!getenv("EGL_PLATFORM") && setenv("EGL_PLATFORM", "wayland", 0) != 0) {
@@ -40,9 +40,9 @@ void native_prepare_webos_environment(void) {
 }
 
 void native_prepare_webos_logging(void) {
-    const char *path = getenv("HELLOLG_NATIVE_LOG_PATH");
+    const char *path = getenv("LGNOME_NATIVE_LOG_PATH");
     if (!path || !path[0]) {
-        path = "/tmp/gnomecast-native.log";
+        path = "/tmp/lgnome-native.log";
     }
     if (freopen(path, "w", stderr)) {
         setvbuf(stderr, NULL, _IOLBF, 0);
@@ -112,7 +112,7 @@ void native_install_termination_hooks(void) {
     }
 }
 
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 static bool g_sdl_runtime_initialized = false;
 
 int native_prepare_sdl_runtime(void) {

@@ -1,7 +1,7 @@
-#ifndef GNOMECAST_MEDIA_NDL_INTERNAL_H
-#define GNOMECAST_MEDIA_NDL_INTERNAL_H
+#ifndef LGNOME_MEDIA_NDL_INTERNAL_H
+#define LGNOME_MEDIA_NDL_INTERNAL_H
 
-/* Private bridge shared only by the gnomecast NDL adapters. It owns the
+/* Private bridge shared only by the lgnome NDL adapters. It owns the
  * application's track choreography on top of the atomic DirectMedia API. */
 
 #include <backend_ndl/backend_ndl.h>
@@ -16,7 +16,7 @@ BackendNdlResult native_media_ndl_configure_audio(NativeMedia *media,
 BackendNdlResult native_media_ndl_clear_video(NativeMedia *media);
 BackendNdlResult native_media_ndl_clear_audio(NativeMedia *media);
 
-#ifdef HELLOLG_NDL_ADAPTER_TESTING
+#ifdef LGNOME_NDL_ADAPTER_TESTING
 BackendNdlLogLevel native_media_ndl_test_min_level(void);
 #endif
 

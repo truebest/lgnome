@@ -2,7 +2,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_ui_screen, cLogLevelInfo, cLogFlags_Default, "ui.screen", NULL);
+clog_define(g_native_log_ui_screen, cLogLevelInfo, "ui.screen");
 
 typedef struct NativeUiScreenVtable {
     lv_obj_t *(*root)(NativePreconnectUi *ui);
@@ -76,6 +76,7 @@ static void screen_focus_setup(NativePreconnectUi *ui) {
     lv_group_add_obj(ui->group, ui->domain_input);
     lv_group_add_obj(ui->group, ui->password_input);
     lv_group_add_obj(ui->group, ui->fps_dropdown);
+    lv_group_add_obj(ui->group, ui->desktop_dropdown);
     lv_group_add_obj(ui->group, ui->audio_codec_dropdown);
     lv_group_add_obj(ui->group, ui->profile_camera_checkbox);
     lv_group_add_obj(ui->group, ui->profile_audio_input_checkbox);
@@ -232,59 +233,52 @@ static void ui_scroll_focused_into_view(NativePreconnectUi *ui) {
     }
 }
 
+void native_ui_preconnect_back(NativePreconnectUi *ui) {
+    if (!ui || ui->hub_closing) {
+        return;
+    }
+    lv_obj_t *dropdowns[] = {
+        ui->fps_dropdown, ui->desktop_dropdown, ui->audio_codec_dropdown,
+        ui->camera_input_dropdown, ui->camera_resolution_dropdown, ui->camera_fps_dropdown,
+        ui->audio_input_dropdown, ui->audio_input_gain_dropdown,
+    };
+    for (size_t i = 0; i < sizeof(dropdowns) / sizeof(dropdowns[0]); i++) {
+        if (dropdowns[i] && lv_dropdown_is_open(dropdowns[i])) {
+            lv_dropdown_close(dropdowns[i]);
+            return;
+        }
+    }
+    if (ui->onboarding_visible) {
+        ui_show_onboarding(ui, false);
+    } else if (ui->capture_settings_visible) {
+        ui_cancel_capture_settings(ui);
+    } else if (ui->setup_visible) {
+        if (ui->connecting) {
+            ui_show_setup(ui, false);
+        } else {
+            ui_cancel_setup(ui);
+        }
+    } else {
+        native_preconnect_ui_cancel_pending_navigation(ui);
+        ui->hub_close_requested = true;
+        ui->hub_closing = true;
+    }
+}
+
 void native_ui_preconnect_form_key_event(lv_event_t *event) {
     NativePreconnectUi *ui = (NativePreconnectUi *)lv_event_get_user_data(event);
     if (!ui || !ui->group) {
         return;
     }
     uint32_t key = lv_event_get_key(event);
-    /* An OPEN dropdown owns UP/DOWN for option selection; only navigate the form with
-     * them while every dropdown is closed. */
     lv_obj_t *target = lv_event_get_target(event);
-    if ((target == ui->fps_dropdown && lv_dropdown_is_open(ui->fps_dropdown)) ||
-        (target == ui->audio_codec_dropdown &&
-         lv_dropdown_is_open(ui->audio_codec_dropdown)) ||
-        (target == ui->camera_input_dropdown &&
-         lv_dropdown_is_open(ui->camera_input_dropdown)) ||
-        (target == ui->camera_resolution_dropdown &&
-         lv_dropdown_is_open(ui->camera_resolution_dropdown)) ||
-        (target == ui->camera_fps_dropdown &&
-         lv_dropdown_is_open(ui->camera_fps_dropdown)) ||
-        (target == ui->audio_input_dropdown &&
-         lv_dropdown_is_open(ui->audio_input_dropdown)) ||
-        (target == ui->audio_input_gain_dropdown &&
-         lv_dropdown_is_open(ui->audio_input_gain_dropdown))) {
-        if (key == LV_KEY_ESC) {
-            if (ui->key_indev) {
-                lv_indev_wait_release(ui->key_indev);
-            }
-        }
+    if (target && lv_obj_check_type(target, &lv_dropdown_class) && lv_dropdown_is_open(target)) {
         return;
     }
-
-    if (key == LV_KEY_ESC) {
-        if (ui->setup_visible || ui->capture_settings_visible ||
-            ui->onboarding_visible) {
-            if (ui->onboarding_visible) {
-                ui_show_onboarding(ui, false);
-            } else if (ui->capture_settings_visible) {
-                ui_capture_cancel_clicked(event);
-            } else {
-                ui_cancel_clicked(event);
-            }
-            if (ui->key_indev) {
-                lv_indev_wait_release(ui->key_indev);
-            }
-        } else {
-            native_preconnect_ui_cancel_pending_navigation(ui);
-            ui->hub_close_requested = true;
-            ui->hub_closing = true;
-        }
-        lv_event_stop_processing(event);
-    } else if (ui->hub_closing || ui->connecting ||
-               ui->capture_save_pending) {
+    if (ui->hub_closing || ui->connecting || ui->capture_save_pending) {
         return;
-    } else if (ui_hub_navigate(ui, target, key)) {
+    }
+    if (ui_hub_navigate(ui, target, key)) {
         lv_event_stop_processing(event);
     } else if (key == LV_KEY_DOWN) {
         lv_group_focus_next(ui->group);

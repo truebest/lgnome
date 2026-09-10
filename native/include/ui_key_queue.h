@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_UI_KEY_QUEUE_H
-#define GNOMECAST_UI_KEY_QUEUE_H
+#ifndef LGNOME_UI_KEY_QUEUE_H
+#define LGNOME_UI_KEY_QUEUE_H
 
 #include <stdbool.h>
 #include <stdint.h>

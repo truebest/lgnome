@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_UI_PROFILE_NAME_H
-#define GNOMECAST_UI_PROFILE_NAME_H
+#ifndef LGNOME_UI_PROFILE_NAME_H
+#define LGNOME_UI_PROFILE_NAME_H
 
 #include <stdbool.h>
 #include <stddef.h>

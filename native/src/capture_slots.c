@@ -10,7 +10,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_capture_slots, cLogLevelInfo, cLogFlags_Default, "capture.redirect", NULL);
+clog_define(g_native_log_capture_slots, cLogLevelInfo, "capture.redirect");
 
 void capture_camera_fail_credit_locked(NativeCaptureRedirectImpl *impl, int slot, uint64_t generation) {
     if (!impl || !capture_slot_index_valid(slot)) {

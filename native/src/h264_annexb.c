@@ -4,7 +4,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_h264, cLogLevelInfo, cLogFlags_Default, "video.h264", NULL);
+clog_define(g_native_log_h264, cLogLevelInfo, "video.h264");
 
 static uint32_t read_be32(const uint8_t *p) {
     return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];

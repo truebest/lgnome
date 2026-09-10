@@ -10,12 +10,13 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_ui_build, cLogLevelInfo, cLogFlags_Default, "ui.build", NULL);
+clog_define(g_native_log_ui_build, cLogLevelInfo, "ui.build");
 
 static const char *const UI_BUILD_SLOT_NAMES[NATIVE_SETTINGS_MAX_SESSIONS] = {"Red", "Green", "Yellow", "Blue"};
 
 static void ui_build(NativePreconnectUi *ui, const char *host, uint16_t port, const char *username,
-                     const char *password, const char *domain, uint16_t fps, uint16_t audio_codec) {
+                     const char *password, const char *domain, uint16_t fps, uint16_t desktop_width,
+                     uint16_t desktop_height, uint16_t audio_codec) {
     lv_obj_t *screen = lv_scr_act();
     lv_obj_set_style_bg_opa(screen, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(screen, 0, 0);
@@ -303,17 +304,24 @@ static void ui_build(NativePreconnectUi *ui, const char *host, uint16_t port, co
         ui->setup_panel, "Stored privately on this TV when you save.", &ui->status_style);
     lv_obj_set_pos(password_help, 48, 624);
 
-    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 48, 668, 266, "FRAME RATE");
-    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 330, 668, 302, "AUDIO QUALITY");
-    ui->fps_dropdown = native_ui_preconnect_make_dropdown(ui, ui->setup_panel, 266);
+    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 48, 668, 170, "FRAME RATE");
+    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 234, 668, 190, "DESKTOP SIZE");
+    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 440, 668, 192, "AUDIO QUALITY");
+    ui->fps_dropdown = native_ui_preconnect_make_dropdown(ui, ui->setup_panel, 170);
     lv_obj_set_pos(ui->fps_dropdown, 48, 692);
     size_t selected_fps = ui_select_fps_index(ui, fps);
     ui_set_fps_options(ui);
     ui_set_selected_fps(ui, selected_fps);
     lv_obj_add_event_cb(ui->fps_dropdown, ui_fps_changed, LV_EVENT_VALUE_CHANGED, ui);
     lv_obj_add_event_cb(ui->fps_dropdown, native_ui_preconnect_form_key_event, UI_FORM_KEY_EVENT, ui);
-    ui->audio_codec_dropdown = native_ui_preconnect_make_dropdown(ui, ui->setup_panel, 302);
-    lv_obj_set_pos(ui->audio_codec_dropdown, 330, 692);
+    ui->desktop_dropdown = native_ui_preconnect_make_dropdown(ui, ui->setup_panel, 190);
+    lv_obj_set_pos(ui->desktop_dropdown, 234, 692);
+    ui_set_desktop_options(ui);
+    ui_set_selected_desktop(ui, ui_desktop_option_index(desktop_width, desktop_height));
+    lv_obj_add_event_cb(ui->desktop_dropdown, ui_desktop_changed, LV_EVENT_VALUE_CHANGED, ui);
+    lv_obj_add_event_cb(ui->desktop_dropdown, native_ui_preconnect_form_key_event, UI_FORM_KEY_EVENT, ui);
+    ui->audio_codec_dropdown = native_ui_preconnect_make_dropdown(ui, ui->setup_panel, 192);
+    lv_obj_set_pos(ui->audio_codec_dropdown, 440, 692);
     lv_dropdown_set_options_static(ui->audio_codec_dropdown, "Auto (Opus)\nLossless PCM");
     lv_dropdown_set_selected(ui->audio_codec_dropdown, audio_codec == NATIVE_AUDIO_CODEC_PCM ? 1 : 0);
     lv_obj_add_event_cb(ui->audio_codec_dropdown, native_ui_preconnect_input_changed, LV_EVENT_VALUE_CHANGED, ui);
@@ -450,7 +458,8 @@ static void ui_build(NativePreconnectUi *ui, const char *host, uint16_t port, co
 }
 
 void native_ui_preconnect_build(NativePreconnectUi *ui, const char *host, uint16_t port, const char *username,
-                                const char *password, const char *domain, uint16_t fps, uint16_t audio_codec) {
-    ui_build(ui, host, port, username, password, domain, fps, audio_codec);
+                                const char *password, const char *domain, uint16_t fps, uint16_t desktop_width,
+                                uint16_t desktop_height, uint16_t audio_codec) {
+    ui_build(ui, host, port, username, password, domain, fps, desktop_width, desktop_height, audio_codec);
     clog(cLogLevelTrace, "pre-connect screens built");
 }

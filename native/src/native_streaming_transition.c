@@ -1,7 +1,7 @@
 /* SDL-thread transition from HUB/setup into a live desktop: derive active-slot
  * input state, resume suppressed output when necessary, hide the UI, grab input,
  * and restore the server cursor before streaming becomes visible. */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #include "native_loop_internal.h"
 
@@ -24,7 +24,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_streaming_transition, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_streaming_transition, cLogLevelInfo, "native");
 
 /* Derives input arming, coordinate mapping, and the NumLock sync from the
  * ACTIVE slot's state, on the SDL thread only: worker callbacks must not write
