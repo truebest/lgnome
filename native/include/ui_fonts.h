@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_UI_FONTS_H
-#define GNOMECAST_UI_FONTS_H
+#ifndef LGNOME_UI_FONTS_H
+#define LGNOME_UI_FONTS_H
 
 #include "lvgl.h"
 

@@ -48,13 +48,9 @@ fn current_callback_sink() -> Option<CallbackSink> {
 /// Most verbose level any callback sink has ever reported deliverable, as a rank
 /// (0 = none, 1 = error … 5 = trace). Levels above the ceiling are pruned at the
 /// callsite instead of paying a per-event FFI check. Raise-only: the C level
-/// configuration is fixed at launch (GNOMECAST_LOG), so a scope-entry probe is
+/// configuration is fixed at launch (LGNOME_LOG), so a scope-entry probe is
 /// exact, and a sink below the ceiling still rejects its own events in `enabled`.
 static MAX_SINK_LEVEL_RANK: AtomicU8 = AtomicU8::new(0);
-
-/// Probe target for `on_log_enabled`; the C side must answer target-independently
-/// (true if any target could want the level) for the ceiling to be sound.
-const LEVEL_PROBE_TARGET: &str = "webrdp";
 
 fn rdp_level_rank(level: RdpLogLevel) -> u8 {
     match level {
@@ -89,7 +85,7 @@ fn probe_sink_level_rank(sink: &CallbackSink) -> u8 {
     ];
     PROBE_LEVELS
         .into_iter()
-        .filter(|&level| sink.log_enabled(level, LEVEL_PROBE_TARGET))
+        .filter(|&level| sink.log_enabled(level))
         .map(rdp_level_rank)
         .max()
         .unwrap_or(0)
@@ -195,7 +191,7 @@ where
             return false;
         }
         current_callback_sink()
-            .map(|sink| sink.log_enabled(level, metadata.target()))
+            .map(|sink| sink.log_enabled(level))
             .unwrap_or(false)
     }
 
@@ -234,7 +230,7 @@ mod tests {
 
     struct LogCapture {
         enabled: bool,
-        checks: Vec<(RdpLogLevel, String)>,
+        checks: Vec<RdpLogLevel>,
         logs: Vec<CapturedLog>,
     }
 
@@ -248,17 +244,10 @@ mod tests {
         }
     }
 
-    extern "C" fn capture_log_enabled(
-        ctx: *mut core::ffi::c_void,
-        level: RdpLogLevel,
-        target: *const c_char,
-    ) -> bool {
+    extern "C" fn capture_log_enabled(ctx: *mut core::ffi::c_void, level: RdpLogLevel) -> bool {
         let capture = unsafe { &*(ctx.cast::<Mutex<LogCapture>>()) };
-        let target = unsafe { CStr::from_ptr(target) }
-            .to_string_lossy()
-            .into_owned();
         let mut capture = capture.lock().unwrap();
-        capture.checks.push((level, target));
+        capture.checks.push(level);
         capture.enabled
     }
 
@@ -283,7 +272,7 @@ mod tests {
     }
 
     fn log_test_sink(capture: *const Mutex<LogCapture>) -> CallbackSink {
-        let mut callbacks = CallbackSink::empty().callbacks;
+        let mut callbacks = CallbackSink::default().callbacks;
         callbacks.ctx = capture.cast_mut().cast();
         callbacks.on_log_enabled = Some(capture_log_enabled);
         callbacks.on_log = Some(capture_log);
@@ -293,20 +282,13 @@ mod tests {
     #[derive(Default)]
     struct LevelProbeCapture {
         max_rank: u8,
-        checks: Vec<(RdpLogLevel, String)>,
+        checks: Vec<RdpLogLevel>,
     }
 
-    extern "C" fn capture_level_probe(
-        ctx: *mut core::ffi::c_void,
-        level: RdpLogLevel,
-        target: *const c_char,
-    ) -> bool {
+    extern "C" fn capture_level_probe(ctx: *mut core::ffi::c_void, level: RdpLogLevel) -> bool {
         let capture = unsafe { &*(ctx.cast::<Mutex<LevelProbeCapture>>()) };
-        let target = unsafe { CStr::from_ptr(target) }
-            .to_string_lossy()
-            .into_owned();
         let mut capture = capture.lock().unwrap();
-        capture.checks.push((level, target));
+        capture.checks.push(level);
         rdp_level_rank(level) <= capture.max_rank
     }
 
@@ -319,7 +301,7 @@ mod tests {
     }
 
     fn level_probe_sink(capture: *const Mutex<LevelProbeCapture>) -> CallbackSink {
-        let mut callbacks = CallbackSink::empty().callbacks;
+        let mut callbacks = CallbackSink::default().callbacks;
         callbacks.ctx = capture.cast_mut().cast();
         callbacks.on_log_enabled = Some(capture_level_probe);
         callbacks.on_log = Some(ignore_log);
@@ -377,6 +359,19 @@ mod tests {
     }
 
     #[test]
+    fn missing_logging_callbacks_are_optional() {
+        let capture = Mutex::new(LogCapture::default());
+        let mut sink = log_test_sink(&capture);
+        sink.callbacks.on_log_enabled = None;
+        assert!(sink.log_enabled(RdpLogLevel::Trace));
+        sink.log(RdpLogLevel::Info, "test", format_args!("unfiltered"));
+        assert_eq!(capture.lock().unwrap().logs.len(), 1);
+        sink.callbacks.on_log = None;
+        assert!(!sink.log_enabled(RdpLogLevel::Error));
+        assert!(!CallbackSink::default().log_enabled(RdpLogLevel::Error));
+    }
+
+    #[test]
     fn level_ceiling_rank_mapping_and_sink_probe_cover_every_filter() {
         use tracing::level_filters::LevelFilter;
 
@@ -401,34 +396,17 @@ mod tests {
             );
 
             let capture = capture.lock().unwrap();
-            assert_eq!(capture.checks.len(), 5);
-            assert!(capture
-                .checks
-                .iter()
-                .all(|(_, target)| target == LEVEL_PROBE_TARGET));
+            assert_eq!(
+                capture.checks,
+                [
+                    RdpLogLevel::Trace,
+                    RdpLogLevel::Debug,
+                    RdpLogLevel::Info,
+                    RdpLogLevel::Warning,
+                    RdpLogLevel::Error
+                ]
+            );
         }
-    }
-
-    #[test]
-    fn log_enabled_target_buffer_boundaries_are_nul_terminated() {
-        let capture = Mutex::new(LogCapture::default());
-        let sink = log_test_sink(&capture);
-        let stack_target = "s".repeat(CallbackSink::LOG_TARGET_STACK_CAPACITY - 1);
-        let heap_target = "h".repeat(CallbackSink::LOG_TARGET_STACK_CAPACITY);
-        let embedded_nul_target = "left\0right";
-
-        assert!(CallbackSink::log_target_uses_stack(&stack_target));
-        assert!(!CallbackSink::log_target_uses_stack(&heap_target));
-        assert!(!CallbackSink::log_target_uses_stack(embedded_nul_target));
-        assert!(sink.log_enabled(RdpLogLevel::Info, &stack_target));
-        assert!(sink.log_enabled(RdpLogLevel::Info, &heap_target));
-        assert!(sink.log_enabled(RdpLogLevel::Info, embedded_nul_target));
-
-        let capture = capture.lock().unwrap();
-        assert_eq!(capture.checks.len(), 3);
-        assert_eq!(capture.checks[0].1, stack_target);
-        assert_eq!(capture.checks[1].1, heap_target);
-        assert_eq!(capture.checks[2].1, "leftright");
     }
 
     #[test]
@@ -527,10 +505,15 @@ mod tests {
         );
         // Entering the scope probed each bridged level exactly once.
         let capture = capture.lock().unwrap();
-        assert_eq!(capture.checks.len(), 5);
-        assert!(capture
-            .checks
-            .iter()
-            .all(|(_, target)| target == LEVEL_PROBE_TARGET));
+        assert_eq!(
+            capture.checks,
+            [
+                RdpLogLevel::Trace,
+                RdpLogLevel::Debug,
+                RdpLogLevel::Info,
+                RdpLogLevel::Warning,
+                RdpLogLevel::Error
+            ]
+        );
     }
 }

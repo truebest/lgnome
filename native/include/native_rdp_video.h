@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_NATIVE_RDP_VIDEO_H
-#define GNOMECAST_NATIVE_RDP_VIDEO_H
+#ifndef LGNOME_NATIVE_RDP_VIDEO_H
+#define LGNOME_NATIVE_RDP_VIDEO_H
 
 #include <stddef.h>
 #include <stdint.h>

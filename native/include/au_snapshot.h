@@ -1,32 +1,13 @@
-#ifndef GNOMECAST_AU_SNAPSHOT_H
-#define GNOMECAST_AU_SNAPSHOT_H
+#ifndef LGNOME_AU_SNAPSHOT_H
+#define LGNOME_AU_SNAPSHOT_H
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-/* Compressed-AU snapshot of one RDP session's video stream, used to re-enter a server's
- * H.264 delta chain without a reconnect. gnome-remote-desktop emits exactly one IDR per
- * connection (no keyframe on suppress resume, Refresh Rect rejected), so once the shared
- * hardware decoder moves to another session, a backgrounded slot's stream becomes
- * undecodable and switching back costs a full on-screen reconnect. Instead the slot is
- * reconnected while it is INVISIBLE (backgrounded): the fresh connection's IDR — plus
- * the few deltas that race the suppress request — is cached here as the raw compressed
- * bytes that came off the wire, and the server is then suppressed. Nothing further is
- * transmitted after the cached AUs, so the server's first delta after resume references
- * exactly the state a replay of this snapshot rebuilds in the decoder.
- *
- * Nothing is decoded or transcoded locally; the snapshot is a byte-for-byte replay
- * source. A decoder-seed AU (SPS + PPS before IDR) restarts the snapshot, deltas before
- * the first seed are ignored, and malformed input or overflow — e.g. a server that
- * keeps streaming despite suppress — voids the whole snapshot, because a partial delta
- * chain is undecodable.
- *
- * Thread model: the caller serializes all access (in the native app: app->video_lock).
- */
+/* Compressed seed/delta cache for decoder replay. Caller serializes access with video_lock.
+ * See docs/native-runbook.md, Multi-RDP Sessions, for backgrounding and replay policy. */
 
-/* One 4K IDR is ~1-5MB; the cap covers it plus the raced-delta tail with margin.
- * The buffer is allocated whole at arm time (virtual; pages commit as AUs land). */
 #define NATIVE_AU_SNAPSHOT_MAX_BYTES (8u * 1024u * 1024u)
 #define NATIVE_AU_SNAPSHOT_MAX_AUS 512u
 

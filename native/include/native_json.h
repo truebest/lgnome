@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_NATIVE_JSON_H
-#define GNOMECAST_NATIVE_JSON_H
+#ifndef LGNOME_NATIVE_JSON_H
+#define LGNOME_NATIVE_JSON_H
 
 #include <stdbool.h>
 #include <stddef.h>

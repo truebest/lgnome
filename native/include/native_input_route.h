@@ -1,9 +1,9 @@
-#ifndef GNOMECAST_NATIVE_INPUT_ROUTE_H
-#define GNOMECAST_NATIVE_INPUT_ROUTE_H
+#ifndef LGNOME_NATIVE_INPUT_ROUTE_H
+#define LGNOME_NATIVE_INPUT_ROUTE_H
 
 /* Streaming-input routing: the evdev grab lifecycle and the SDL/evdev drains
  * (drains still in main.c pending extraction). SDL builds only. */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #include <SDL.h>
 #include <stdbool.h>
@@ -30,6 +30,7 @@ int native_filter_webos_system_keys(void *userdata, SDL_Event *event);
 void native_cursor_reassert_for_activity(App *app);
 
 /* Grabbed-evdev drains and the loop pacing that waits on their wake fd. */
+void native_drain_evdev_input(App *app, SDL_Window *window);
 void native_drain_evdev_mouse(App *app, SDL_Window *window);
 void native_drain_evdev_keyboard(App *app);
 void native_wait_for_loop_tick(App *app, uint32_t delay_ms);

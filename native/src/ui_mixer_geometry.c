@@ -6,10 +6,6 @@
 
 #include "ui_mixer_geometry.h"
 
-#include "clog.h"
-
-clog_define(g_native_log_mixer_geometry, cLogLevelInfo, cLogFlags_Default, "ui.mixer", NULL);
-
 /* Both faders travel the same track; only the value domain differs (dB vs percent). */
 int ui_mixer_master_pct_clamped(int pct) {
     if (pct < 0) {
@@ -162,9 +158,4 @@ int native_ui_mixer_fader_pct_at(int win_h, int y) {
         fy = UI_MIXER_FADER_H;
     }
     return 100 - (fy * 100 + UI_MIXER_FADER_H / 2) / UI_MIXER_FADER_H;
-}
-
-void native_ui_mixer_geometry_log_panel(int win_w, int win_h) {
-    clog(cLogLevelDebug, "mixer panel at %dx%d for window %dx%d", ui_mixer_panel_x(win_w),
-         ui_mixer_panel_y(win_h), win_w, win_h);
 }

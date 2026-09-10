@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_UI_VU_METER_H
-#define GNOMECAST_UI_VU_METER_H
+#ifndef LGNOME_UI_VU_METER_H
+#define LGNOME_UI_VU_METER_H
 
 /* The shared vertical VU bar used by the HUB card meters and the mixer
  * overlay: a dark rail, a clip window pinned to the scale bottom, and a
@@ -8,7 +8,7 @@
  * NATIVE_MIXER_METER_DECAY_DB_S release, floored at the meter floor, mapped
  * over the fader dB range. Peak-hold/clip marks are the mixer's own layer on
  * top. Preconnect-UI builds only. */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #include <stdint.h>
 

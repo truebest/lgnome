@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.19)
-project(gnomecast_native C)
+project(lgnome_native C)
 include(CTest)
 include(GNUInstallDirs)
 include(CheckSymbolExists)
@@ -7,55 +7,52 @@ include(CheckSymbolExists)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
-option(HELLOLG_LINK_RDP_FFI "Link the Rust RDP FFI static library" OFF)
-option(HELLOLG_WITH_NDL "Build the NDL DirectMedia hardware media backend (webOS)" OFF)
+option(LGNOME_LINK_RDP_FFI "Link the Rust RDP FFI static library" OFF)
+option(LGNOME_WITH_NDL "Build the NDL DirectMedia hardware media backend (webOS)" OFF)
 
 # The DirectMedia state machine is a standalone subproject. Only the three
-# NativeMedia/NativeVideo/NativeAudio adapters remain owned by gnomecast.
+# NativeMedia/NativeVideo/NativeAudio adapters remain owned by lgnome.
 set(BACKEND_NDL_BUILD_TESTS ${BUILD_TESTING})
 set(BACKEND_NDL_INSTALL OFF)
 add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../third_party/backend_ndl"
                  "${CMAKE_CURRENT_BINARY_DIR}/backend_ndl")
 
-
 check_symbol_exists(clock_gettime "time.h" CLOGX_HAVE_CLOCK_GETTIME)
-check_symbol_exists(backtrace "execinfo.h" CLOGX_HAVE_EXECINFO)
 
 add_library(category-log STATIC src/category_log.c)
 target_include_directories(category-log PUBLIC include)
 target_compile_definitions(category-log PRIVATE
   $<$<BOOL:${CLOGX_HAVE_CLOCK_GETTIME}>:CLOGX_HAVE_CLOCK_GETTIME=1>
-  $<$<BOOL:${CLOGX_HAVE_EXECINFO}>:CLOGX_HAVE_EXECINFO=1>
 )
 
-set(HELLOLG_LVGL_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/lvgl" CACHE PATH "Path to the pinned LVGL checkout")
-set(HELLOLG_MINIAUDIO_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/miniaudio" CACHE PATH "Path to pinned miniaudio sources")
+set(LGNOME_LVGL_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/lvgl" CACHE PATH "Path to the pinned LVGL checkout")
+set(LGNOME_MINIAUDIO_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/miniaudio" CACHE PATH "Path to pinned miniaudio sources")
 
-get_filename_component(HELLOLG_C_COMPILER_NAME "${CMAKE_C_COMPILER}" NAME)
-set(HELLOLG_TARGET_WEBOS OFF)
-if(HELLOLG_C_COMPILER_NAME MATCHES "arm-webos-linux-gnueabi-.*" OR CMAKE_C_COMPILER_TARGET MATCHES "(i[3-6]86)-webos-linux-gnu")
-  set(HELLOLG_TARGET_WEBOS ON)
+get_filename_component(LGNOME_C_COMPILER_NAME "${CMAKE_C_COMPILER}" NAME)
+set(LGNOME_TARGET_WEBOS OFF)
+if(LGNOME_C_COMPILER_NAME MATCHES "arm-webos-linux-gnueabi-.*" OR CMAKE_C_COMPILER_TARGET MATCHES "(i[3-6]86)-webos-linux-gnu")
+  set(LGNOME_TARGET_WEBOS ON)
 endif()
 
 # Default ON only for product (webOS) builds: ExternalOPUS downloads the libopus source
 # tarball at build time, which would break the documented offline host smoke build.
-# Host test runs opt in with -DHELLOLG_WITH_OPUS=ON to cover the audio-opus ctest.
-option(HELLOLG_WITH_OPUS "Decode rdpsnd Opus streams in-process for the audio pipeline" ${HELLOLG_TARGET_WEBOS})
+# Host test runs opt in with -DLGNOME_WITH_OPUS=ON to cover the audio-opus ctest.
+option(LGNOME_WITH_OPUS "Decode rdpsnd Opus streams in-process for the audio pipeline" ${LGNOME_TARGET_WEBOS})
 
-if(HELLOLG_TARGET_WEBOS)
-  if(NOT HELLOLG_LINK_RDP_FFI)
-    message(FATAL_ERROR "webOS product builds require HELLOLG_LINK_RDP_FFI=ON")
+if(LGNOME_TARGET_WEBOS)
+  if(NOT LGNOME_LINK_RDP_FFI)
+    message(FATAL_ERROR "webOS product builds require LGNOME_LINK_RDP_FFI=ON")
   endif()
   # System-volume bridge (mixer MASTER fader) talks to the Luna bus via the NATIVE
   # luna-service2 client. A luna-send-pub subprocess is NOT an option: fork()ing this
   # process while the NDL/OMX pipeline is (re)loading raced its in-process decoder
   # state (black screens observed live), and a pipe cannot deliver subscribe events.
-  if(NOT HELLOLG_WITH_NDL)
-    message(FATAL_ERROR "webOS product builds require HELLOLG_WITH_NDL=ON for H.264 hardware decode")
+  if(NOT LGNOME_WITH_NDL)
+    message(FATAL_ERROR "webOS product builds require LGNOME_WITH_NDL=ON for H.264 hardware decode")
   endif()
 endif()
 
-add_executable(gnomecast-native
+add_executable(lgnome-native
   src/main.c
   src/rdp_log.c
   src/au_snapshot.c
@@ -119,27 +116,27 @@ add_executable(gnomecast-native
 
 find_package(Threads REQUIRED)
 
-add_library(gnomecast-ndl-adapter STATIC
+add_library(lgnome-ndl-adapter STATIC
   src/ndl_adapter/media_ndl.c
   src/ndl_adapter/video_ndl.c
   src/ndl_adapter/audio_ndl.c
 )
-target_include_directories(gnomecast-ndl-adapter
+target_include_directories(lgnome-ndl-adapter
   PUBLIC include
   PRIVATE src/ndl_adapter
 )
-target_compile_definitions(gnomecast-ndl-adapter PRIVATE
-  $<$<BOOL:${HELLOLG_WITH_NDL}>:HELLOLG_WITH_NDL=1>
+target_compile_definitions(lgnome-ndl-adapter PRIVATE
+  $<$<BOOL:${LGNOME_WITH_NDL}>:LGNOME_WITH_NDL=1>
 )
-target_link_libraries(gnomecast-ndl-adapter PRIVATE backend_ndl::backend_ndl category-log)
+target_link_libraries(lgnome-ndl-adapter PRIVATE backend_ndl::backend_ndl category-log)
 
-if(NOT EXISTS "${HELLOLG_MINIAUDIO_SOURCE_DIR}/miniaudio.c" OR
-   NOT EXISTS "${HELLOLG_MINIAUDIO_SOURCE_DIR}/miniaudio.h")
-  message(FATAL_ERROR "Pinned miniaudio sources are missing from ${HELLOLG_MINIAUDIO_SOURCE_DIR}")
+if(NOT EXISTS "${LGNOME_MINIAUDIO_SOURCE_DIR}/miniaudio.c" OR
+   NOT EXISTS "${LGNOME_MINIAUDIO_SOURCE_DIR}/miniaudio.h")
+  message(FATAL_ERROR "Pinned miniaudio sources are missing from ${LGNOME_MINIAUDIO_SOURCE_DIR}")
 endif()
-add_library(hellolg-miniaudio STATIC "${HELLOLG_MINIAUDIO_SOURCE_DIR}/miniaudio.c")
-target_include_directories(hellolg-miniaudio SYSTEM PUBLIC "${HELLOLG_MINIAUDIO_SOURCE_DIR}")
-target_compile_definitions(hellolg-miniaudio PRIVATE
+add_library(lgnome-miniaudio STATIC "${LGNOME_MINIAUDIO_SOURCE_DIR}/miniaudio.c")
+target_include_directories(lgnome-miniaudio SYSTEM PUBLIC "${LGNOME_MINIAUDIO_SOURCE_DIR}")
+target_compile_definitions(lgnome-miniaudio PRIVATE
   # ma_engine owns the headless mixer graph and ma_sound voices. Keep both the engine and
   # node graph enabled even though device I/O and file/resource loading stay disabled.
   MA_NO_DEVICE_IO
@@ -150,43 +147,43 @@ target_compile_definitions(hellolg-miniaudio PRIVATE
   MA_NO_THREADING
   MA_NO_RUNTIME_LINKING
 )
-if(HELLOLG_TARGET_WEBOS)
+if(LGNOME_TARGET_WEBOS)
   # miniaudio's node clocks use 64-bit atomics; armv7 GCC lowers those through libatomic.
-  target_link_libraries(hellolg-miniaudio PUBLIC atomic)
+  target_link_libraries(lgnome-miniaudio PUBLIC atomic)
 endif()
 
-target_include_directories(gnomecast-native PRIVATE include)
-target_compile_definitions(gnomecast-native PRIVATE
-  $<$<BOOL:${HELLOLG_TARGET_WEBOS}>:HELLOLG_TARGET_WEBOS=1>
-  $<$<BOOL:${HELLOLG_WITH_NDL}>:HELLOLG_WITH_NDL=1>
+target_include_directories(lgnome-native PRIVATE include)
+target_compile_definitions(lgnome-native PRIVATE
+  $<$<BOOL:${LGNOME_TARGET_WEBOS}>:LGNOME_TARGET_WEBOS=1>
+  $<$<BOOL:${LGNOME_WITH_NDL}>:LGNOME_WITH_NDL=1>
 )
 
 # libm: the volume overlay's meter math (log10f) lives in SDL builds, but linking m
 # unconditionally is harmless and keeps the host build in sync.
-target_link_libraries(gnomecast-native PRIVATE
-  hellolg-miniaudio
-  gnomecast-ndl-adapter
+target_link_libraries(lgnome-native PRIVATE
+  lgnome-miniaudio
+  lgnome-ndl-adapter
   category-log
   Threads::Threads
   ${CMAKE_DL_LIBS}
   m
 )
 
-if(HELLOLG_TARGET_WEBOS)
+if(LGNOME_TARGET_WEBOS)
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(GLIB2 REQUIRED IMPORTED_TARGET glib-2.0)
-  target_link_libraries(gnomecast-native PRIVATE PkgConfig::GLIB2 luna-service2)
+  target_link_libraries(lgnome-native PRIVATE PkgConfig::GLIB2 luna-service2)
 endif()
 
-if(HELLOLG_WITH_OPUS)
+if(LGNOME_WITH_OPUS)
   # Builds libopus 1.4 from source under the active toolchain (recipe in native/cmake).
   list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
   include(ExternalOPUS)
-  target_compile_definitions(gnomecast-native PRIVATE HELLOLG_WITH_OPUS=1)
-  target_include_directories(gnomecast-native SYSTEM PRIVATE ${OPUS_INCLUDE_DIRS})
-  target_link_libraries(gnomecast-native PRIVATE ${OPUS_LIBRARIES})
+  target_compile_definitions(lgnome-native PRIVATE LGNOME_WITH_OPUS=1)
+  target_include_directories(lgnome-native SYSTEM PRIVATE ${OPUS_INCLUDE_DIRS})
+  target_link_libraries(lgnome-native PRIVATE ${OPUS_LIBRARIES})
   ExternalProject_Get_Property(ext_opus INSTALL_DIR)
-  set_property(TARGET gnomecast-native APPEND PROPERTY BUILD_RPATH "${INSTALL_DIR}/lib")
+  set_property(TARGET lgnome-native APPEND PROPERTY BUILD_RPATH "${INSTALL_DIR}/lib")
   # Ship our own copy: webOS carries a system libopus.so.0, but do not depend on it.
   install(DIRECTORY "${INSTALL_DIR}/lib/" DESTINATION ${CMAKE_INSTALL_LIBDIR}
     FILES_MATCHING PATTERN "libopus.so*")
@@ -195,67 +192,59 @@ if(HELLOLG_WITH_OPUS)
   ExternalProject_Get_Property(ext_opus SOURCE_DIR)
   install(FILES "${SOURCE_DIR}/COPYING" DESTINATION licenses RENAME opus-BSD-3.txt)
   # The packaged libopus lives next to the binary; keep it findable on the TV.
-  set_property(TARGET gnomecast-native APPEND PROPERTY INSTALL_RPATH "\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
+  set_property(TARGET lgnome-native APPEND PROPERTY INSTALL_RPATH "\$ORIGIN/../${CMAKE_INSTALL_LIBDIR}")
 endif()
 
-if(HELLOLG_LINK_RDP_FFI)
+if(LGNOME_LINK_RDP_FFI)
   if(NOT DEFINED RDP_FFI_LIB)
-    message(FATAL_ERROR "HELLOLG_LINK_RDP_FFI=ON requires -DRDP_FFI_LIB=/path/to/libwebrdp_min.a")
+    message(FATAL_ERROR "LGNOME_LINK_RDP_FFI=ON requires -DRDP_FFI_LIB=/path/to/libwebrdp_min.a")
   endif()
   if(NOT EXISTS "${RDP_FFI_LIB}")
     message(FATAL_ERROR "RDP_FFI_LIB does not exist: ${RDP_FFI_LIB}")
   endif()
-  target_link_libraries(gnomecast-native PRIVATE "${RDP_FFI_LIB}" Threads::Threads m dl)
+  target_link_libraries(lgnome-native PRIVATE "${RDP_FFI_LIB}" Threads::Threads m dl)
 else()
-  target_sources(gnomecast-native PRIVATE src/rdp_ffi_stub.c)
+  target_sources(lgnome-native PRIVATE src/rdp_ffi_stub.c)
 endif()
 
-if(HELLOLG_TARGET_WEBOS)
+if(LGNOME_TARGET_WEBOS)
   find_package(SDL2 REQUIRED)
   if(TARGET SDL2::SDL2)
-    target_link_libraries(gnomecast-native PRIVATE SDL2::SDL2)
+    target_link_libraries(lgnome-native PRIVATE SDL2::SDL2)
   else()
-    target_include_directories(gnomecast-native PRIVATE ${SDL2_INCLUDE_DIRS})
-    target_link_libraries(gnomecast-native PRIVATE ${SDL2_LIBRARIES})
+    target_include_directories(lgnome-native PRIVATE ${SDL2_INCLUDE_DIRS})
+    target_link_libraries(lgnome-native PRIVATE ${SDL2_LIBRARIES})
   endif()
 
-  find_package(PkgConfig REQUIRED)
-  pkg_check_modules(LIBEVDEV REQUIRED IMPORTED_TARGET libevdev)
-  if(HELLOLG_TARGET_WEBOS)
-    find_library(HELLOLG_LIBEVDEV_STATIC_LIBRARY NAMES libevdev.a PATHS ${LIBEVDEV_LIBRARY_DIRS} NO_DEFAULT_PATH)
-    if(NOT HELLOLG_LIBEVDEV_STATIC_LIBRARY)
-      message(FATAL_ERROR "webOS SDL builds require static libevdev.a in the target sysroot")
-    endif()
-    target_include_directories(gnomecast-native PRIVATE ${LIBEVDEV_INCLUDE_DIRS})
-    target_link_libraries(gnomecast-native PRIVATE "${HELLOLG_LIBEVDEV_STATIC_LIBRARY}" rt)
-  elseif(TARGET PkgConfig::LIBEVDEV)
-    target_link_libraries(gnomecast-native PRIVATE PkgConfig::LIBEVDEV)
-  else()
-    target_include_directories(gnomecast-native PRIVATE ${LIBEVDEV_INCLUDE_DIRS})
-    target_link_libraries(gnomecast-native PRIVATE ${LIBEVDEV_LIBRARIES})
+  pkg_check_modules(LIBEVDEV REQUIRED libevdev)
+  find_library(LGNOME_LIBEVDEV_STATIC_LIBRARY NAMES libevdev.a PATHS ${LIBEVDEV_LIBRARY_DIRS} NO_DEFAULT_PATH)
+  if(NOT LGNOME_LIBEVDEV_STATIC_LIBRARY)
+    message(FATAL_ERROR "webOS SDL builds require static libevdev.a in the target sysroot")
   endif()
+  target_include_directories(lgnome-native PRIVATE ${LIBEVDEV_INCLUDE_DIRS})
+  target_link_libraries(lgnome-native PRIVATE "${LGNOME_LIBEVDEV_STATIC_LIBRARY}" rt)
   message(STATUS "Using libevdev for native mouse/keyboard readers")
 
   include(CheckIncludeFile)
-  check_include_file("linux/input.h" HELLOLG_HAVE_LINUX_INPUT_H)
-  if(NOT HELLOLG_HAVE_LINUX_INPUT_H)
+  check_include_file("linux/input.h" LGNOME_HAVE_LINUX_INPUT_H)
+  if(NOT LGNOME_HAVE_LINUX_INPUT_H)
     message(FATAL_ERROR "linux/input.h not found: libevdev input readers require Linux input event codes")
   endif()
 
-  target_sources(gnomecast-native PRIVATE src/input_evdev.c)
+  target_sources(lgnome-native PRIVATE src/input_evdev.c src/input_event_queue.c)
 endif()
 
-if(HELLOLG_TARGET_WEBOS)
-  if(NOT EXISTS "${HELLOLG_LVGL_SOURCE_DIR}/CMakeLists.txt")
-    message(FATAL_ERROR "webOS product builds require initialized LVGL at ${HELLOLG_LVGL_SOURCE_DIR}; run git submodule update --init third_party/lvgl")
+if(LGNOME_TARGET_WEBOS)
+  if(NOT EXISTS "${LGNOME_LVGL_SOURCE_DIR}/CMakeLists.txt")
+    message(FATAL_ERROR "webOS product builds require initialized LVGL at ${LGNOME_LVGL_SOURCE_DIR}; run git submodule update --init third_party/lvgl")
   endif()
 
-  set(LV_CONF_PATH "${CMAKE_CURRENT_SOURCE_DIR}/include/lv_conf.h" CACHE STRING "gnomecast LVGL config" FORCE)
+  set(LV_CONF_PATH "${CMAKE_CURRENT_SOURCE_DIR}/include/lv_conf.h" CACHE STRING "lgnome LVGL config" FORCE)
   set(LV_CONF_INCLUDE_SIMPLE ON CACHE BOOL "Use simple lv_conf.h include" FORCE)
   set(LV_LVGL_H_INCLUDE_SIMPLE ON CACHE BOOL "Use simple lvgl.h include" FORCE)
   set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build LVGL static for native package" FORCE)
-  add_subdirectory("${HELLOLG_LVGL_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/third_party/lvgl" EXCLUDE_FROM_ALL)
-  target_sources(gnomecast-native PRIVATE
+  add_subdirectory("${LGNOME_LVGL_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/third_party/lvgl" EXCLUDE_FROM_ALL)
+  target_sources(lgnome-native PRIVATE
     src/ui_preconnect.c
     src/ui_preconnect_build.c
     src/ui_preconnect_capture.c
@@ -284,8 +273,8 @@ if(HELLOLG_TARGET_WEBOS)
     src/fonts/lv_font_ibm_plex_mono_regular_16.c
     src/fonts/lv_font_jetbrains_mono_semibold_28.c
   )
-  target_include_directories(gnomecast-native PRIVATE "${HELLOLG_LVGL_SOURCE_DIR}/src")
-  target_link_libraries(gnomecast-native PRIVATE lvgl)
+  target_include_directories(lgnome-native PRIVATE "${LGNOME_LVGL_SOURCE_DIR}/src")
+  target_link_libraries(lgnome-native PRIVATE lvgl)
   if(TARGET SDL2::SDL2)
     target_link_libraries(lvgl PUBLIC SDL2::SDL2)
   else()
@@ -294,7 +283,7 @@ if(HELLOLG_TARGET_WEBOS)
   endif()
 endif()
 
-install(TARGETS gnomecast-native RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS lgnome-native RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES deploy/webos/appinfo.json DESTINATION .)
 install(FILES deploy/webos/icon.png DESTINATION .)
 install(FILES deploy/webos/splash.png DESTINATION .)
@@ -322,29 +311,30 @@ endif()
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/IronRDP/PROVENANCE.md")
   install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/IronRDP/PROVENANCE.md" DESTINATION licenses RENAME IronRDP_PROVENANCE.md)
 endif()
-if(EXISTS "${HELLOLG_LVGL_SOURCE_DIR}/LICENCE.txt")
-  install(FILES "${HELLOLG_LVGL_SOURCE_DIR}/LICENCE.txt" DESTINATION licenses RENAME lvgl-MIT.txt)
+if(EXISTS "${LGNOME_LVGL_SOURCE_DIR}/LICENCE.txt")
+  install(FILES "${LGNOME_LVGL_SOURCE_DIR}/LICENCE.txt" DESTINATION licenses RENAME lvgl-MIT.txt)
 endif()
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libevdev-COPYING")
   install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libevdev-COPYING" DESTINATION licenses RENAME libevdev-COPYING.txt)
 endif()
-if(EXISTS "${HELLOLG_MINIAUDIO_SOURCE_DIR}/LICENSE")
-  install(FILES "${HELLOLG_MINIAUDIO_SOURCE_DIR}/LICENSE" DESTINATION licenses RENAME miniaudio-MIT-0.txt)
+if(EXISTS "${LGNOME_MINIAUDIO_SOURCE_DIR}/LICENSE")
+  install(FILES "${LGNOME_MINIAUDIO_SOURCE_DIR}/LICENSE" DESTINATION licenses RENAME miniaudio-MIT-0.txt)
 endif()
-set(HELLOLG_NATIVE_STAGE_DIR "${CMAKE_BINARY_DIR}/webos-stage" CACHE PATH "Staging directory for native webOS packaging")
+set(LGNOME_NATIVE_STAGE_DIR "${CMAKE_BINARY_DIR}/webos-stage" CACHE PATH "Staging directory for native webOS packaging")
 add_custom_target(webos-stage-native
-  COMMAND "${CMAKE_COMMAND}" --install "${CMAKE_BINARY_DIR}" --prefix "${HELLOLG_NATIVE_STAGE_DIR}"
-  DEPENDS gnomecast-native
+  COMMAND "${CMAKE_COMMAND}" --install "${CMAKE_BINARY_DIR}" --prefix "${LGNOME_NATIVE_STAGE_DIR}"
+  DEPENDS lgnome-native
   COMMENT "Stage native-only webOS package contents"
 )
 add_custom_target(webos-package-native
-  COMMAND "${CMAKE_COMMAND}" -E env NATIVE_WEBOS_BUILD_DIR="${CMAKE_BINARY_DIR}" NATIVE_WEBOS_SKIP_BUILD=1 NATIVE_WEBOS_STAGING_DIR="${HELLOLG_NATIVE_STAGE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../tools/build-native-webos.sh"
+  COMMAND "${CMAKE_COMMAND}" -E env NATIVE_WEBOS_BUILD_DIR="${CMAKE_BINARY_DIR}" NATIVE_WEBOS_SKIP_BUILD=1 NATIVE_WEBOS_STAGING_DIR="${LGNOME_NATIVE_STAGE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../tools/build-native-webos.sh"
   DEPENDS webos-stage-native
   COMMENT "Package native webOS app with ares-package"
 )
+set(LGNOME_NATIVE_IPK "" CACHE FILEPATH "Explicit IPK to install with webos-install-native")
 add_custom_target(webos-install-native
-  COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/../tools/deploy-native-webos.sh" --no-launch
-  DEPENDS webos-package-native
+  COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/../tools/deploy-native-webos.sh" --ipk "${LGNOME_NATIVE_IPK}" --no-launch
+  VERBATIM
   COMMENT "Install native webOS package with ares-install"
 )
 add_custom_target(webos-launch-native
@@ -364,7 +354,6 @@ if(BUILD_TESTING)
   target_compile_definitions(test-category-log PRIVATE
     CLOGX_TESTING=1
     $<$<BOOL:${CLOGX_HAVE_CLOCK_GETTIME}>:CLOGX_HAVE_CLOCK_GETTIME=1>
-    $<$<BOOL:${CLOGX_HAVE_EXECINFO}>:CLOGX_HAVE_EXECINFO=1>
   )
   target_link_libraries(test-category-log PRIVATE Threads::Threads)
   add_test(NAME category-log COMMAND test-category-log)
@@ -387,8 +376,11 @@ if(BUILD_TESTING)
 
   add_executable(test-rdp-log
     tests/test_rdp_log.c
+    src/category_log.c
     src/rdp_log.c
   )
+  target_compile_definitions(test-rdp-log PRIVATE CLOGX_TESTING=1
+    $<$<BOOL:${CLOGX_HAVE_CLOCK_GETTIME}>:CLOGX_HAVE_CLOCK_GETTIME=1>)
   target_include_directories(test-rdp-log PRIVATE include)
   add_test(NAME rdp-log COMMAND test-rdp-log)
 
@@ -403,7 +395,7 @@ if(BUILD_TESTING)
     tests/test_video_rgba_sdl.c
     src/video_rgba_sdl.c
   )
-  target_compile_definitions(test-video-rgba-sdl PRIVATE HELLOLG_TARGET_WEBOS=1)
+  target_compile_definitions(test-video-rgba-sdl PRIVATE LGNOME_TARGET_WEBOS=1)
   target_include_directories(test-video-rgba-sdl PRIVATE tests/support/fake_sdl include)
   add_test(NAME video-rgba-sdl COMMAND test-video-rgba-sdl)
 
@@ -438,12 +430,24 @@ if(BUILD_TESTING)
     )
   endif()
 
+  add_executable(test-input-event-queue tests/test_input_event_queue.c src/input_event_queue.c)
+  target_include_directories(test-input-event-queue PRIVATE include)
+  target_link_libraries(test-input-event-queue PRIVATE category-log)
+  add_test(NAME input-event-queue COMMAND test-input-event-queue)
+
   add_executable(test-input-sdl
     tests/test_input_sdl.c
+    src/input_event_queue.c
     src/input_sdl.c
   )
   target_include_directories(test-input-sdl PRIVATE include)
   add_test(NAME input-sdl COMMAND test-input-sdl)
+
+  add_executable(test-cursor-restore tests/test_cursor_restore.c src/cursor_sdl.c)
+  target_include_directories(test-cursor-restore PRIVATE tests/support/fake_cursor_sdl include)
+  target_compile_definitions(test-cursor-restore PRIVATE LGNOME_TARGET_WEBOS=1)
+  target_link_libraries(test-cursor-restore PRIVATE category-log Threads::Threads)
+  add_test(NAME cursor-restore COMMAND test-cursor-restore)
 
   add_executable(test-cursor-sdl
     tests/test_cursor_sdl.c
@@ -462,6 +466,8 @@ if(BUILD_TESTING)
 
   add_executable(test-settings-json
     tests/test_settings_json.c
+    src/native_config_launch.c
+    src/native_config.c
     src/native_config_storage.c
     src/native_settings.c
     src/settings_json.c
@@ -470,6 +476,26 @@ if(BUILD_TESTING)
   )
   target_include_directories(test-settings-json PRIVATE include)
   add_test(NAME settings-json COMMAND test-settings-json)
+  find_package(Python3 COMPONENTS Interpreter REQUIRED)
+  add_test(NAME deploy-webos COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../tools/test-deploy-native-webos.py")
+
+  add_executable(test-native-rdp-video
+    tests/test_native_rdp_video.c
+    src/native_rdp_video.c
+    src/native_rdp_state.c
+    src/native_rgba_owner.c
+    src/video_rgba_sdl.c
+    src/h264_annexb.c
+    src/au_snapshot.c
+    src/native_settings.c
+  )
+  target_include_directories(test-native-rdp-video PRIVATE include src)
+  target_link_libraries(test-native-rdp-video PRIVATE category-log Threads::Threads)
+  add_test(NAME native-rdp-video COMMAND test-native-rdp-video)
+
+  add_executable(test-native-time tests/test_native_time.c)
+  target_include_directories(test-native-time PRIVATE include)
+  add_test(NAME native-time COMMAND test-native-time)
 
   add_executable(test-au-snapshot
     tests/test_au_snapshot.c
@@ -484,7 +510,7 @@ if(BUILD_TESTING)
     src/ndl_adapter/video_ndl.c
     src/h264_annexb.c
   )
-  target_compile_definitions(test-video-ndl PRIVATE HELLOLG_WITH_NDL=1)
+  target_compile_definitions(test-video-ndl PRIVATE LGNOME_WITH_NDL=1)
   target_include_directories(test-video-ndl PRIVATE include src/ndl_adapter)
   target_link_libraries(test-video-ndl PRIVATE backend_ndl::test_support category-log)
   add_test(NAME video-ndl COMMAND test-video-ndl)
@@ -493,7 +519,7 @@ if(BUILD_TESTING)
     tests/test_audio_ndl.c
     src/ndl_adapter/audio_ndl.c
   )
-  target_compile_definitions(test-audio-ndl PRIVATE HELLOLG_WITH_NDL=1)
+  target_compile_definitions(test-audio-ndl PRIVATE LGNOME_WITH_NDL=1)
   target_include_directories(test-audio-ndl PRIVATE include src/ndl_adapter)
   target_link_libraries(test-audio-ndl PRIVATE backend_ndl::test_support category-log)
   add_test(NAME audio-ndl COMMAND test-audio-ndl)
@@ -503,8 +529,8 @@ if(BUILD_TESTING)
     src/ndl_adapter/media_ndl.c
   )
   target_compile_definitions(test-media-ndl-log-level PRIVATE
-    HELLOLG_WITH_NDL=1
-    HELLOLG_NDL_ADAPTER_TESTING=1
+    LGNOME_WITH_NDL=1
+    LGNOME_NDL_ADAPTER_TESTING=1
   )
   target_include_directories(test-media-ndl-log-level PRIVATE include src/ndl_adapter)
   target_link_libraries(test-media-ndl-log-level PRIVATE backend_ndl::test_support category-log)
@@ -540,7 +566,7 @@ if(BUILD_TESTING)
     src/camera_v4l2.c
   )
   target_include_directories(test-camera-v4l2 PRIVATE include src)
-  target_compile_definitions(test-camera-v4l2 PRIVATE HELLOLG_CAMERA_V4L2_TESTING=1)
+  target_compile_definitions(test-camera-v4l2 PRIVATE LGNOME_CAMERA_V4L2_TESTING=1)
   add_test(NAME camera-v4l2 COMMAND test-camera-v4l2)
 
   add_executable(test-native-rdp-state
@@ -572,7 +598,7 @@ if(BUILD_TESTING)
     src/audio_input_alsa.c
   )
   target_include_directories(test-audio-input-alsa PRIVATE include)
-  target_compile_definitions(test-audio-input-alsa PRIVATE HELLOLG_AUDIO_INPUT_ALSA_TESTING=1)
+  target_compile_definitions(test-audio-input-alsa PRIVATE LGNOME_AUDIO_INPUT_ALSA_TESTING=1)
   target_link_libraries(test-audio-input-alsa PRIVATE ${CMAKE_DL_LIBS})
   add_test(NAME audio-input-alsa COMMAND test-audio-input-alsa)
 
@@ -588,7 +614,7 @@ if(BUILD_TESTING)
     src/h264_annexb.c
   )
   target_include_directories(test-capture-redirect PRIVATE include)
-  target_compile_definitions(test-capture-redirect PRIVATE HELLOLG_CAPTURE_REDIRECT_TESTING=1)
+  target_compile_definitions(test-capture-redirect PRIVATE LGNOME_CAPTURE_REDIRECT_TESTING=1)
   target_link_libraries(test-capture-redirect PRIVATE Threads::Threads m)
   add_test(NAME capture-redirect COMMAND test-capture-redirect)
   add_test(NAME capture-redirect-init-failure COMMAND test-capture-redirect --init-failure)
@@ -600,8 +626,8 @@ if(BUILD_TESTING)
     src/audio_jitter.c
   )
   target_include_directories(test-audio-pipeline PRIVATE include)
-  target_compile_definitions(test-audio-pipeline PRIVATE HELLOLG_AUDIO_PIPELINE_TESTING=1)
-  target_link_libraries(test-audio-pipeline PRIVATE hellolg-miniaudio Threads::Threads m)
+  target_compile_definitions(test-audio-pipeline PRIVATE LGNOME_AUDIO_PIPELINE_TESTING=1)
+  target_link_libraries(test-audio-pipeline PRIVATE lgnome-miniaudio Threads::Threads m)
   add_test(NAME audio-pipeline COMMAND test-audio-pipeline)
 
   add_executable(test-audio-jitter
@@ -611,12 +637,12 @@ if(BUILD_TESTING)
   target_include_directories(test-audio-jitter PRIVATE include)
   add_test(NAME audio-jitter COMMAND test-audio-jitter)
 
-  if(HELLOLG_WITH_OPUS)
+  if(LGNOME_WITH_OPUS)
     add_executable(test-audio-opus
       tests/test_audio_opus.c
       src/audio_opus.c
     )
-    target_compile_definitions(test-audio-opus PRIVATE HELLOLG_WITH_OPUS=1)
+    target_compile_definitions(test-audio-opus PRIVATE LGNOME_WITH_OPUS=1)
     target_include_directories(test-audio-opus PRIVATE include)
     target_include_directories(test-audio-opus SYSTEM PRIVATE ${OPUS_INCLUDE_DIRS})
     target_link_libraries(test-audio-opus PRIVATE ${OPUS_LIBRARIES} m)
@@ -625,7 +651,7 @@ if(BUILD_TESTING)
   endif()
 
   foreach(native_test_target IN ITEMS
-      test-rdp-ffi-layout test-rdp-log test-h264-annexb test-video-rgba-sdl test-input-sdl
+      test-rdp-ffi-layout test-h264-annexb test-video-rgba-sdl test-input-sdl
       test-cursor-sdl test-config-paths test-settings-json test-au-snapshot
       test-ui-mixer-geometry test-luna-volume test-webos-platform test-camera-v4l2
       test-native-rdp-state

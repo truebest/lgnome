@@ -4,7 +4,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_ui_display, cLogLevelInfo, cLogFlags_Default, "ui.display", NULL);
+clog_define(g_native_log_ui_display, cLogLevelInfo, "ui.display");
 
 void native_ui_preconnect_display_flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *src) {
     (void)src;
@@ -77,7 +77,8 @@ void native_ui_preconnect_pointer_read(lv_indev_drv_t *drv, lv_indev_data_t *dat
 }
 
 static bool key_from_sdl(const SDL_KeyboardEvent *event, uint32_t *key) {
-    if (event->keysym.scancode == 482 /* SDL_WEBOS_SCANCODE_BACK */) {
+    if (event->keysym.scancode == 482 /* SDL_WEBOS_SCANCODE_BACK */ ||
+        event->keysym.scancode == SDL_SCANCODE_ESCAPE) {
         *key = LV_KEY_ESC;
         return true;
     }
@@ -211,6 +212,7 @@ void native_ui_preconnect_reset_input_state(NativePreconnectUi *ui) {
     native_ui_key_queue_clear(&ui->key_drv.queue);
     ui->key_drv.key = 0;
     ui->key_drv.state = LV_INDEV_STATE_RELEASED;
+    ui->key_drv.back_pressed = false;
     ui->pointer_pressed = false;
     if (ui->key_indev) {
         lv_indev_reset(ui->key_indev, NULL);
@@ -272,7 +274,8 @@ static bool event_batch_has_textinput(const SDL_Event *events, int count) {
     return false;
 }
 
-static void drain_sdl_key_events(NativePreconnectKeyDriver *state) {
+static void drain_sdl_key_events(NativePreconnectUi *ui) {
+    NativePreconnectKeyDriver *state = &ui->key_drv;
     SDL_Event events[64];
     for (;;) {
         int count = SDL_PeepEvents(events, (int)(sizeof(events) / sizeof(events[0])), SDL_GETEVENT, SDL_KEYDOWN,
@@ -286,14 +289,26 @@ static void drain_sdl_key_events(NativePreconnectKeyDriver *state) {
             uint32_t key = 0;
             switch (events[i].type) {
             case SDL_TEXTINPUT:
-                enqueue_text(state, events[i].text.text);
+                if (!ui->connecting && !ui->hub_closing && !state->back_pressed) {
+                    enqueue_text(state, events[i].text.text);
+                }
                 break;
             case SDL_KEYDOWN:
             case SDL_KEYUP:
                 if (key_from_sdl(&events[i].key, &key)) {
-                    enqueue_key(state, key,
-                                events[i].type == SDL_KEYDOWN ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED);
-                } else if (events[i].type == SDL_KEYDOWN && !text_input_pending &&
+                    if (key == LV_KEY_ESC) {
+                        bool down = events[i].type == SDL_KEYDOWN;
+                        if (down && !events[i].key.repeat && !state->back_pressed) {
+                            native_ui_preconnect_back(ui);
+                            native_ui_preconnect_reset_input_state(ui);
+                        }
+                        state->back_pressed = down;
+                    } else if (!ui->connecting && !ui->hub_closing && !state->back_pressed) {
+                        enqueue_key(state, key, events[i].type == SDL_KEYDOWN
+                                                    ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED);
+                    }
+                } else if (!ui->connecting && !ui->hub_closing && !state->back_pressed &&
+                           events[i].type == SDL_KEYDOWN && !text_input_pending &&
                            text_key_from_sdl(&events[i].key, &key)) {
                     enqueue_tap(state, key);
                 }
@@ -309,8 +324,8 @@ void native_ui_preconnect_key_read(lv_indev_drv_t *drv, lv_indev_data_t *data) {
     NativePreconnectUi *ui = (NativePreconnectUi *)drv->user_data;
     NativePreconnectKeyDriver *state = (NativePreconnectKeyDriver *)drv;
 
-    if (ui->connecting) {
-        SDL_FlushEvents(SDL_KEYDOWN, SDL_TEXTINPUT);
+    drain_sdl_key_events(ui);
+    if (ui->connecting || ui->hub_closing) {
         native_ui_key_queue_clear(&state->queue);
         state->state = LV_INDEV_STATE_RELEASED;
         data->key = state->key;
@@ -319,7 +334,6 @@ void native_ui_preconnect_key_read(lv_indev_drv_t *drv, lv_indev_data_t *data) {
         return;
     }
 
-    drain_sdl_key_events(state);
     if (state->queue.overflowed) {
         clog(cLogLevelWarning, "pre-connect key queue overflow; dropping burst and resetting key input");
         native_ui_key_queue_clear(&state->queue);

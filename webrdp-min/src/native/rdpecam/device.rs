@@ -1,7 +1,9 @@
 //! RDPECAM device-channel adapter and instance retirement.
 
 use ironrdp_core::impl_as_any;
-use ironrdp_dvc::{DvcChannelListener, DvcMessage, DvcProcessor, DynamicChannelId};
+use ironrdp_dvc::{
+    DvcChannelListener, DvcClientProcessor, DvcMessage, DvcProcessor, DynamicChannelId,
+};
 use ironrdp_pdu::PduResult;
 
 use super::super::RdpLogLevel;
@@ -26,7 +28,7 @@ impl DvcChannelListener for CameraDeviceFactory {
         DEVICE_CHANNEL_NAME
     }
 
-    fn create(&mut self, _channel_id: DynamicChannelId) -> Option<Box<dyn DvcProcessor>> {
+    fn create(&mut self, _channel_id: DynamicChannelId) -> Option<Box<dyn DvcClientProcessor>> {
         let token = self.bridge.allocate_device_token()?;
         Some(Box::new(CameraDevice::new(self.bridge.clone(), token)))
     }
@@ -134,3 +136,5 @@ impl DvcProcessor for CameraDevice {
         }
     }
 }
+
+impl DvcClientProcessor for CameraDevice {}

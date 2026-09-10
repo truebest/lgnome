@@ -1,4 +1,4 @@
-//! Native Rust RDP core for the gnomecast webOS app.
+//! Native Rust RDP core for the lgnome webOS app.
 //!
 //! The crate exposes a C ABI static library for the native C shell. It keeps the
 //! direct TCP/TLS/CredSSP transport, AVC420/H.264 passthrough for ss4s, and native

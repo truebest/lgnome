@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_CURSOR_SDL_H
-#define GNOMECAST_CURSOR_SDL_H
+#ifndef LGNOME_CURSOR_SDL_H
+#define LGNOME_CURSOR_SDL_H
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -7,17 +7,17 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 #include <SDL.h>
 #if defined(__has_include)
 #if __has_include(<SDL_webOS.h>)
 #include <SDL_webOS.h>
-#define HELLOLG_HAVE_SDL_WEBOS_CURSOR 1
+#define LGNOME_HAVE_SDL_WEBOS_CURSOR 1
 #endif
 #endif
 #endif
-#ifndef HELLOLG_HAVE_SDL_WEBOS_CURSOR
-#define HELLOLG_HAVE_SDL_WEBOS_CURSOR 0
+#ifndef LGNOME_HAVE_SDL_WEBOS_CURSOR
+#define LGNOME_HAVE_SDL_WEBOS_CURSOR 0
 #endif
 
 /* Server-driven mouse cursor. Shapes and visibility arrive as RDP pointer updates on the
@@ -59,7 +59,7 @@ typedef struct NativeCursor {
     /* Bumped on every submit; lets the SDL thread skip the mutex when idle. */
     atomic_uint generation;
     unsigned applied_generation;
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
     SDL_Cursor *cursor; /* SDL thread only */
     /* SDL thread only: what the current SDL cursor was built from/for, so apply can
      * rebuild when the desktop-to-window mapping changes under an unchanged shape. */
@@ -97,7 +97,7 @@ void native_cursor_scaled_geometry(uint16_t shape_w, uint16_t shape_h, uint16_t 
                                    uint16_t window_w, uint16_t window_h, uint16_t *out_w,
                                    uint16_t *out_h, uint16_t *out_hot_x, uint16_t *out_hot_y);
 
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 /* SDL thread: apply pending shape/state; cheap no-op while generation is unchanged. */
 void native_cursor_apply(NativeCursor *cursor, uint16_t desktop_w, uint16_t desktop_h,
                          uint16_t window_w, uint16_t window_h);

@@ -1,4 +1,4 @@
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #include "ui_vu_meter.h"
 
@@ -6,7 +6,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_vu_meter, cLogLevelInfo, cLogFlags_Default, "ui.mixer", NULL);
+clog_define(g_native_log_vu_meter, cLogLevelInfo, "ui.mixer");
 
 float native_ui_vu_meter_db_from_peak(int32_t peak) {
     return peak > 0 ? 20.0f * log10f((float)peak / 32768.0f) : NATIVE_MIXER_METER_FLOOR_DB;

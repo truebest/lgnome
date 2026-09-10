@@ -1,7 +1,5 @@
-/* Publish every session slot's live connection, desktop, clock, and mixed-audio
- * metadata to the HUB. Terminal ERROR presentation remains owned by the session
- * supervisor and is deliberately not overwritten here. */
-#ifdef HELLOLG_TARGET_WEBOS
+/* Publish runtime metadata; the session supervisor owns terminal status. */
+#ifdef LGNOME_TARGET_WEBOS
 
 #include "native_loop_internal.h"
 
@@ -16,33 +14,29 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_hub_runtime, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_hub_runtime, cLogLevelInfo, "native");
 
 void native_hub_runtime_publish(App *app, NativePreconnectUi *ui) {
-    /* Keep every card live, including sessions that are connected in the background.
-     * Terminal failures drained before this phase own the ERROR state. */
-    uint64_t runtime_now = native_monotonic_ms64();
+    uint32_t runtime_now = native_monotonic_s();
     for (int i = 0; i < NATIVE_SETTINGS_MAX_SESSIONS; i++) {
         NativeSessionSlot *slot = &app->sessions[i];
         bool failed = atomic_load(&slot->session_failed);
         int slot_state = atomic_load(&slot->current_state);
         bool session_exists = slot->rdp && !failed;
         if (!session_exists) {
-            app->session_started_ms[i] = 0;
+            app->session_started_s[i] = 0;
             app->session_runtime_active[i] = false;
             native_preconnect_ui_set_slot_runtime(ui, i, 0, 0, 0, false, 0, 0, 0, 0, 0);
         } else if (slot_state == (int)RDP_STATE_ACTIVE || app->session_runtime_active[i]) {
             /* Start only once the user's connection reaches ACTIVE. Hidden snapshot
-             * and watchdog reconnects retain the latch and original start stamp. */
+             * and watchdog reconnects retain the original start time. */
             if (!app->session_runtime_active[i]) {
-                app->session_started_ms[i] = runtime_now;
+                app->session_started_s[i] = runtime_now;
                 app->session_runtime_active[i] = true;
                 clog(cLogLevelDebug, "%s session reached ACTIVE; starting HUB runtime clock",
                      native_session_slot_name(i));
             }
-            uint64_t session_minutes64 = (runtime_now - app->session_started_ms[i]) / 60000u;
-            uint32_t session_minutes =
-                session_minutes64 > UINT32_MAX ? UINT32_MAX : (uint32_t)session_minutes64;
+            uint32_t session_minutes = (runtime_now - app->session_started_s[i]) / 60u;
             NativeAudioSourceStats audio_stats;
             bool audio_stream_open =
                 native_audio_pipeline_get_source_stats(&app->audio_pipeline, i, &audio_stats) && audio_stats.open;
@@ -66,11 +60,13 @@ void native_hub_runtime_publish(App *app, NativePreconnectUi *ui) {
         if (!slot->rdp || failed) {
             continue;
         }
-        native_preconnect_ui_set_slot_state(
-            ui, i,
-            slot_state == (int)RDP_STATE_ACTIVE ? NATIVE_PRECONNECT_SESSION_CONNECTED
-                                                : NATIVE_PRECONNECT_SESSION_CONNECTING,
-            slot_state == (int)RDP_STATE_ACTIVE ? NULL : rdp_state_name((RdpState)slot_state));
+        NativePreconnectSessionState ui_state = NATIVE_PRECONNECT_SESSION_CONNECTING;
+        if (slot_state == (int)RDP_STATE_ACTIVE) {
+            ui_state = NATIVE_PRECONNECT_SESSION_CONNECTED;
+        } else if (atomic_load(&slot->reconnecting)) {
+            ui_state = NATIVE_PRECONNECT_SESSION_RECONNECTING;
+        }
+        native_preconnect_ui_set_slot_state(ui, i, ui_state, NULL);
     }
 }
 

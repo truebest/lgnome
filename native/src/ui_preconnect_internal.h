@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_UI_PRECONNECT_INTERNAL_H
-#define GNOMECAST_UI_PRECONNECT_INTERNAL_H
+#ifndef LGNOME_UI_PRECONNECT_INTERNAL_H
+#define LGNOME_UI_PRECONNECT_INTERNAL_H
 
 #include "ui_preconnect.h"
 #include "ui_preconnect_screen.h"
@@ -52,6 +52,7 @@ typedef struct NativePreconnectKeyDriver {
     lv_indev_drv_t base;
     lv_indev_state_t state;
     uint32_t key;
+    bool back_pressed;
     NativeUiKeyQueue queue;
 } NativePreconnectKeyDriver;
 
@@ -115,6 +116,7 @@ struct NativePreconnectUi {
     lv_obj_t *domain_input;
     lv_obj_t *password_input;
     lv_obj_t *fps_dropdown;
+    lv_obj_t *desktop_dropdown;
     lv_obj_t *audio_codec_dropdown;
     lv_obj_t *profile_camera_checkbox;
     lv_obj_t *profile_audio_input_checkbox;
@@ -200,11 +202,14 @@ struct NativePreconnectUi {
     bool current_audio_input_gain_option;
     uint16_t current_fps;
     uint16_t selected_fps;
+    uint16_t selected_desktop_width;
+    uint16_t selected_desktop_height;
     NativeSessionConfig slot_values[NATIVE_SETTINGS_MAX_SESSIONS];
     NativeSessionConfig committed_values[NATIVE_SETTINGS_MAX_SESSIONS];
     char slot_port_text[NATIVE_SETTINGS_MAX_SESSIONS][UI_PORT_MAX];
     bool slot_port_valid[NATIVE_SETTINGS_MAX_SESSIONS];
     NativePreconnectSessionState slot_states[NATIVE_SETTINGS_MAX_SESSIONS];
+    RdpDisconnectReason slot_reasons[NATIVE_SETTINGS_MAX_SESSIONS];
     char slot_details[NATIVE_SETTINGS_MAX_SESSIONS][UI_DETAIL_MAX];
     uint16_t slot_desktop_width[NATIVE_SETTINGS_MAX_SESSIONS];
     uint16_t slot_desktop_height[NATIVE_SETTINGS_MAX_SESSIONS];
@@ -219,6 +224,7 @@ struct NativePreconnectUi {
     int saved_slot;
     int deleted_slot;
     NativePreconnectSessionState requested_previous_state;
+    RdpDisconnectReason requested_previous_reason;
     char requested_previous_detail[UI_DETAIL_MAX];
     char requested_host[UI_HOST_MAX];
     char requested_username[UI_USERNAME_MAX];
@@ -263,6 +269,7 @@ void native_ui_preconnect_theme_init(NativePreconnectUi *ui);
 void native_ui_preconnect_theme_reset(NativePreconnectUi *ui);
 void native_ui_preconnect_input_changed(lv_event_t *event);
 void native_ui_preconnect_form_key_event(lv_event_t *event);
+void native_ui_preconnect_back(NativePreconnectUi *ui);
 lv_obj_t *native_ui_preconnect_make_label(lv_obj_t *parent, const char *text, lv_style_t *style);
 lv_obj_t *native_ui_preconnect_make_dropdown(NativePreconnectUi *ui, lv_obj_t *parent, lv_coord_t width);
 lv_obj_t *native_ui_preconnect_make_box(lv_obj_t *parent, int x, int y, int width, int height);
@@ -279,7 +286,6 @@ lv_obj_t *native_ui_preconnect_make_field_label(NativePreconnectUi *ui, lv_obj_t
 lv_obj_t *native_ui_preconnect_make_input(NativePreconnectUi *ui, lv_obj_t *parent, int x, int y, int width,
                                           const char *text, const char *placeholder, size_t max_length,
                                           const char *accepted, bool password);
-void native_ui_preconnect_widgets_ready(void);
 void native_ui_preconnect_make_brand_cube(lv_obj_t *parent, int x, int y, int size, float half_edge,
                                           NativeUiCube *cube);
 void native_ui_preconnect_make_wordmark(NativePreconnectUi *ui, lv_obj_t *parent, int x, int y, const lv_font_t *font,
@@ -290,6 +296,18 @@ size_t ui_fps_option_count(void);
 bool ui_find_fps_option(uint16_t fps, size_t *index);
 size_t ui_select_fps_index(NativePreconnectUi *ui, uint16_t fps);
 void ui_set_selected_fps(NativePreconnectUi *ui, size_t index);
+
+typedef struct UiDesktopSize {
+    uint16_t width;
+    uint16_t height;
+} UiDesktopSize;
+
+size_t ui_desktop_option_count(void);
+UiDesktopSize ui_desktop_option(size_t index);
+size_t ui_desktop_option_index(uint16_t width, uint16_t height);
+void ui_set_desktop_options(NativePreconnectUi *ui);
+void ui_set_selected_desktop(NativePreconnectUi *ui, size_t index);
+void ui_desktop_changed(lv_event_t *event);
 void ui_set_fps_options(NativePreconnectUi *ui);
 bool ui_form_valid(NativePreconnectUi *ui);
 void ui_set_hidden(lv_obj_t *obj, bool hidden);
@@ -320,11 +338,9 @@ void ui_store_capture_settings_form(NativePreconnectUi *ui);
 bool ui_profile_dirty(const NativePreconnectUi *ui, int slot);
 bool ui_slot_configured(const NativeSessionConfig *values);
 const char *ui_slot_display_name(const NativePreconnectUi *ui, int slot, char *fallback, size_t fallback_cap);
-const char *ui_badge_text(NativePreconnectSessionState state);
 void ui_discard_form_changes(NativePreconnectUi *ui);
 void ui_load_slot_into_form(NativePreconnectUi *ui, int slot);
 bool ui_hub_navigate(NativePreconnectUi *ui, lv_obj_t *target, uint32_t key);
-void native_ui_preconnect_forms_ready(void);
 void ui_profile_name_insert(lv_event_t *event);
 void ui_fps_changed(lv_event_t *event);
 void ui_profile_capture_changed(lv_event_t *event);
@@ -333,12 +349,14 @@ void ui_hub_key_event(lv_event_t *event);
 void ui_connect_clicked(lv_event_t *event);
 void ui_save_clicked(lv_event_t *event);
 void ui_cancel_clicked(lv_event_t *event);
+void ui_cancel_setup(NativePreconnectUi *ui);
 void ui_delete_clicked(lv_event_t *event);
 void ui_setup_scrim_clicked(lv_event_t *event);
 void ui_capture_scrim_clicked(lv_event_t *event);
 void ui_capture_settings_clicked(lv_event_t *event);
 void ui_capture_save_clicked(lv_event_t *event);
 void ui_capture_cancel_clicked(lv_event_t *event);
+void ui_cancel_capture_settings(NativePreconnectUi *ui);
 void ui_edit_clicked(lv_event_t *event);
 void ui_hero_action_clicked(lv_event_t *event);
 void ui_help_clicked(lv_event_t *event);
@@ -350,7 +368,8 @@ void ui_show_setup(NativePreconnectUi *ui, bool visible);
 void ui_show_capture_settings(NativePreconnectUi *ui, bool visible);
 void ui_show_onboarding(NativePreconnectUi *ui, bool visible);
 void native_ui_preconnect_build(NativePreconnectUi *ui, const char *host, uint16_t port, const char *username,
-                                const char *password, const char *domain, uint16_t fps, uint16_t audio_codec);
+                                const char *password, const char *domain, uint16_t fps, uint16_t desktop_width,
+                                uint16_t desktop_height, uint16_t audio_codec);
 void native_ui_preconnect_build_onboarding(NativePreconnectUi *ui);
 void native_ui_preconnect_screen_init(NativePreconnectUi *ui, NativeUiScreenId initial);
 void native_ui_preconnect_screen_refocus(NativePreconnectUi *ui);

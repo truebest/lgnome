@@ -1,8 +1,8 @@
-#ifndef GNOMECAST_NATIVE_MIXER_OVERLAY_H
-#define GNOMECAST_NATIVE_MIXER_OVERLAY_H
+#ifndef LGNOME_NATIVE_MIXER_OVERLAY_H
+#define LGNOME_NATIVE_MIXER_OVERLAY_H
 
 /* Volume-mixer overlay state machine (see native_mixer_overlay.c). SDL only. */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #include <SDL.h>
 #include <stdbool.h>

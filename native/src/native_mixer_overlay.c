@@ -3,7 +3,7 @@
  * ui_mixer.h/.c; this file owns which overlay is up, the selection, the
  * gain/duck/mute/solo edits, key routing from both input paths, and the
  * LS2 volume poll that keeps the MASTER fader honest. */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #include "native_mixer_overlay.h"
 
@@ -18,7 +18,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_mixer_overlay, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_mixer_overlay, cLogLevelInfo, "native");
 
 /* ---- Volume-mixer overlay (SDL thread only) ----
  * A semi-transparent panel over the live stream with one vertical slider per session
@@ -306,7 +306,7 @@ void native_mixer_overlay_evdev_key(App *app, uint16_t code, bool down) {
  * split as the color keys): arrows/enter arrive as ordinary SDL keys, Back as a webOS
  * scancode. */
 void native_mixer_overlay_sdl_key(App *app, const SDL_KeyboardEvent *event) {
-#if HELLOLG_HAVE_SDL_WEBOS_CURSOR
+#if LGNOME_HAVE_SDL_WEBOS_CURSOR
     if (event->keysym.scancode == SDL_WEBOS_SCANCODE_BACK || event->keysym.scancode == 482) {
         native_mixer_overlay_hide(app);
         return;

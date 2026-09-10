@@ -8,7 +8,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_ui_brand, cLogLevelInfo, cLogFlags_Default, "ui.brand", NULL);
+clog_define(g_native_log_ui_brand, cLogLevelInfo, "ui.brand");
 
 typedef struct UiCubeVec3 {
     float x;
@@ -137,7 +137,7 @@ void native_ui_preconnect_make_brand_cube(lv_obj_t *parent, int x, int y, int si
 
 void native_ui_preconnect_make_wordmark(NativePreconnectUi *ui, lv_obj_t *parent, int x, int y, const lv_font_t *font,
                                         lv_opa_t underscore_opa) {
-    lv_obj_t *word = native_ui_preconnect_make_label(parent, "gnomecast", &ui->title_style);
+    lv_obj_t *word = native_ui_preconnect_make_label(parent, "lgnome", &ui->title_style);
     lv_obj_set_pos(word, x, y);
     lv_obj_set_style_text_font(word, font, 0);
     lv_obj_set_style_text_letter_space(word, -1, 0);

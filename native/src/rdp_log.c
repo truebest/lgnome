@@ -2,7 +2,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_rdp, cLogLevelInfo, cLogFlags_Default, "rdp.rust", NULL);
+clog_define(g_native_log_rdp, cLogLevelInfo, "rdp.rust");
 
 static cLogLevel native_rdp_log_level(RdpLogLevel level) {
     switch (level) {

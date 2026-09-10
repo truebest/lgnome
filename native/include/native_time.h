@@ -1,32 +1,34 @@
-#ifndef GNOMECAST_NATIVE_TIME_H
-#define GNOMECAST_NATIVE_TIME_H
+#ifndef LGNOME_NATIVE_TIME_H
+#define LGNOME_NATIVE_TIME_H
 
 #include <stdbool.h>
 #include <stdint.h>
 #include <time.h>
 
-/* Shared monotonic-clock and sleep helpers. Header-only so SDL-free workers,
- * the SDL main loop, and host tests all use the same clock without a link
- * dependency. CLOCK_MONOTONIC is assumed available (Linux-only tree); a failed
- * clock_gettime reads as 0 rather than aborting, matching the previous
- * per-file copies. */
-
-static inline uint64_t native_monotonic_ms64(void) {
+/* Milliseconds for short intervals; compare stamps by unsigned subtraction. */
+static inline uint32_t native_monotonic_ms(void) {
     struct timespec now;
     if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
         return 0;
     }
-    return (uint64_t)now.tv_sec * 1000u + (uint64_t)now.tv_nsec / 1000000u;
+    return (uint32_t)now.tv_sec * 1000u + (uint32_t)now.tv_nsec / 1000000u;
 }
 
-/* Narrow wrapper for short intervals only: subtraction of two values is
- * intentionally wrap-safe, absolute values are not meaningful. */
-static inline uint32_t native_monotonic_ms(void) {
-    return (uint32_t)native_monotonic_ms64();
+/* Deadlines must be less than INT32_MAX milliseconds away. */
+static inline bool native_deadline_reached_ms(uint32_t now_ms, uint32_t deadline_ms) {
+    return (uint32_t)(now_ms - deadline_ms) <= INT32_MAX;
 }
 
-/* Sleeps the full duration: EINTR resumes with the remaining time. Callers
- * that must wake early should poll an fd/eventfd instead of sleeping. */
+/* Seconds for session duration: a 32-bit range covers about 136 years. */
+static inline uint32_t native_monotonic_s(void) {
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        return 0;
+    }
+    return (uint32_t)now.tv_sec;
+}
+
+/* Resume the remaining sleep after EINTR. */
 static inline void native_sleep_ms(unsigned milliseconds) {
     struct timespec delay = {
         .tv_sec = (time_t)(milliseconds / 1000u),

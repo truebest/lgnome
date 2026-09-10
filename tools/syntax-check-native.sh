@@ -8,7 +8,7 @@
 #
 # Extra flags pass through, and CC can be overridden — e.g. a fast SDL-code
 # check with the cross compiler:
-#   CC=arm-webos-linux-gnueabi-gcc ./tools/syntax-check-native.sh -DHELLOLG_TARGET_WEBOS=1 ...
+#   CC=arm-webos-linux-gnueabi-gcc ./tools/syntax-check-native.sh -DLGNOME_TARGET_WEBOS=1 ...
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -24,11 +24,8 @@ files=()
 for f in "$repo_root"/native/src/*.c "$repo_root"/native/src/ndl_adapter/*.c \
          "$repo_root"/third_party/backend_ndl/src/*.c; do
   base="$(basename "$f")"
-  if [[ "$base" == ui_preconnect*.c ]]; then
-    continue
-  fi
   for skip in "${excluded[@]}"; do
-    if [[ "$base" == "$skip" ]]; then
+    if [[ "$base" == $skip ]]; then
       continue 2
     fi
   done

@@ -17,7 +17,7 @@
 #include "clog.h"
 #include "native_time.h"
 
-clog_define(g_native_log_capture_audio_worker, cLogLevelInfo, cLogFlags_Default, "capture.redirect", NULL);
+clog_define(g_native_log_capture_audio_worker, cLogLevelInfo, "capture.redirect");
 
 #define AUDIO_DEVICE_RETRY_MS 1000u
 #define AUDIO_READ_FRAMES 480u
@@ -156,7 +156,7 @@ void *capture_audio_worker_main(void *context) {
     int16_t silence[AUDIO_READ_FRAMES * 2u] = {0};
     uint32_t input_rate = 48000u;
     uint16_t input_channels = 1u;
-    uint64_t next_open_attempt_ms = 0;
+    uint32_t next_open_attempt_ms = native_monotonic_ms();
     unsigned previous_consumer_count = 0;
 
     for (int i = 0; i < NATIVE_CAPTURE_REDIRECT_MAX_SLOTS; i++) {
@@ -178,7 +178,7 @@ void *capture_audio_worker_main(void *context) {
             capture = NULL;
             input_rate = 48000u;
             input_channels = 1u;
-            next_open_attempt_ms = 0;
+            next_open_attempt_ms = native_monotonic_ms();
             for (int i = 0; i < NATIVE_CAPTURE_REDIRECT_MAX_SLOTS; i++) {
                 audio_stream_reset(&streams[i]);
             }
@@ -186,8 +186,8 @@ void *capture_audio_worker_main(void *context) {
             continue;
         }
 
-        uint64_t now_ms = native_monotonic_ms64();
-        if (!capture && now_ms >= next_open_attempt_ms) {
+        uint32_t now_ms = native_monotonic_ms();
+        if (!capture && native_deadline_reached_ms(now_ms, next_open_attempt_ms)) {
             capture = native_audio_input_capture_open(impl->audio_device_id, 48000u, 1u);
             if (!capture) {
                 capture = native_audio_input_capture_open(impl->audio_device_id, 48000u, 2u);
@@ -213,7 +213,7 @@ void *capture_audio_worker_main(void *context) {
                 capture = NULL;
                 input_rate = 48000u;
                 input_channels = 1u;
-                next_open_attempt_ms = native_monotonic_ms64() + AUDIO_DEVICE_RETRY_MS;
+                next_open_attempt_ms = native_monotonic_ms() + AUDIO_DEVICE_RETRY_MS;
             } else if (frames > 0) {
                 for (int i = 0; i < NATIVE_CAPTURE_REDIRECT_MAX_SLOTS; i++) {
                     if (streams[i].active) {

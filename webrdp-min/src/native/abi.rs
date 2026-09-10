@@ -21,6 +21,32 @@ pub enum RdpState {
     NetworkError = 7,
     ProtocolError = 8,
     Stopped = 9,
+    Disconnected = 10,
+    Reconnecting = 11,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RdpDisconnectReason {
+    None = 0,
+    PeerDisconnected = 1,
+    UserDisconnect = 2,
+    UserLogoff = 3,
+    AdminDisconnect = 4,
+    AdminLogoff = 5,
+    SessionReplaced = 6,
+    IdleTimeout = 7,
+    SessionTimeout = 8,
+    ServerShutdown = 9,
+    ServerReboot = 10,
+    ServerError = 11,
+    AccessDenied = 12,
+    LicenseError = 13,
+    BrokerError = 14,
+    ConnectionFailed = 15,
+    ConnectionLost = 16,
+    ProtocolError = 17,
+    GraphicsError = 18,
 }
 
 /// Values shared with the `RdpLogLevel` enum in `native/include/rdp_ffi.h`.
@@ -58,12 +84,12 @@ pub struct RdpConfig {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct RdpCallbacks {
     pub ctx: *mut core::ffi::c_void,
-    pub on_state: Option<extern "C" fn(*mut core::ffi::c_void, RdpState, *const c_char)>,
-    pub on_log_enabled:
-        Option<extern "C" fn(*mut core::ffi::c_void, RdpLogLevel, *const c_char) -> bool>,
+    pub on_state:
+        Option<extern "C" fn(*mut core::ffi::c_void, RdpState, RdpDisconnectReason, *const c_char)>,
+    pub on_log_enabled: Option<extern "C" fn(*mut core::ffi::c_void, RdpLogLevel) -> bool>,
     pub on_log:
         Option<extern "C" fn(*mut core::ffi::c_void, RdpLogLevel, *const c_char, *const c_char)>,
     pub on_desktop_size: Option<extern "C" fn(*mut core::ffi::c_void, u16, u16)>,
@@ -117,7 +143,33 @@ mod tests {
         assert_eq!(RdpState::NetworkError as u32, 7);
         assert_eq!(RdpState::ProtocolError as u32, 8);
         assert_eq!(RdpState::Stopped as u32, 9);
+        assert_eq!(RdpState::Disconnected as u32, 10);
+        assert_eq!(RdpState::Reconnecting as u32, 11);
         assert_eq!(size_of::<RdpState>(), size_of::<u32>());
+    }
+
+    #[test]
+    fn disconnect_reason_values_match_header() {
+        assert_eq!(size_of::<RdpDisconnectReason>(), size_of::<u32>());
+        assert_eq!(RdpDisconnectReason::None as u32, 0);
+        assert_eq!(RdpDisconnectReason::PeerDisconnected as u32, 1);
+        assert_eq!(RdpDisconnectReason::UserDisconnect as u32, 2);
+        assert_eq!(RdpDisconnectReason::UserLogoff as u32, 3);
+        assert_eq!(RdpDisconnectReason::AdminDisconnect as u32, 4);
+        assert_eq!(RdpDisconnectReason::AdminLogoff as u32, 5);
+        assert_eq!(RdpDisconnectReason::SessionReplaced as u32, 6);
+        assert_eq!(RdpDisconnectReason::IdleTimeout as u32, 7);
+        assert_eq!(RdpDisconnectReason::SessionTimeout as u32, 8);
+        assert_eq!(RdpDisconnectReason::ServerShutdown as u32, 9);
+        assert_eq!(RdpDisconnectReason::ServerReboot as u32, 10);
+        assert_eq!(RdpDisconnectReason::ServerError as u32, 11);
+        assert_eq!(RdpDisconnectReason::AccessDenied as u32, 12);
+        assert_eq!(RdpDisconnectReason::LicenseError as u32, 13);
+        assert_eq!(RdpDisconnectReason::BrokerError as u32, 14);
+        assert_eq!(RdpDisconnectReason::ConnectionFailed as u32, 15);
+        assert_eq!(RdpDisconnectReason::ConnectionLost as u32, 16);
+        assert_eq!(RdpDisconnectReason::ProtocolError as u32, 17);
+        assert_eq!(RdpDisconnectReason::GraphicsError as u32, 18);
     }
 
     #[test]

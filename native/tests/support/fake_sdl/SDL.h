@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_TEST_FAKE_SDL_H
-#define GNOMECAST_TEST_FAKE_SDL_H
+#ifndef LGNOME_TEST_FAKE_SDL_H
+#define LGNOME_TEST_FAKE_SDL_H
 
 #include <stdint.h>
 

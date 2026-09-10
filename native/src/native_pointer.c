@@ -3,7 +3,7 @@
  * evdev reader integrates into, OS-pointer clamp/warp draining, the cursor
  * reassert tick, wheel scaling, and held button/key tracking with the flush
  * that prevents stuck inputs across focus changes. SDL builds only. */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #include "native_pointer.h"
 
@@ -14,7 +14,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_pointer, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_pointer, cLogLevelInfo, "native");
 
 static uint16_t clamp_sdl_dimension(int value) {
     if (value <= 0) {
@@ -99,9 +99,6 @@ bool native_update_render_size(App *app, SDL_Renderer *renderer) {
         atomic_store(&app->render_width, clamped_width);
         atomic_store(&app->render_height, clamped_height);
         clog(cLogLevelDebug, "SDL renderer output=%dx%d", render_width, render_height);
-        pthread_mutex_lock(&app->video_lock);
-        native_media_set_viewport(app->media, clamped_width, clamped_height);
-        pthread_mutex_unlock(&app->video_lock);
     }
     return true;
 }

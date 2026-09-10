@@ -1,10 +1,10 @@
-#ifndef GNOMECAST_VIDEO_RGBA_SDL_H
-#define GNOMECAST_VIDEO_RGBA_SDL_H
+#ifndef LGNOME_VIDEO_RGBA_SDL_H
+#define LGNOME_VIDEO_RGBA_SDL_H
 
 #include <stddef.h>
 #include <stdint.h>
 
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 #include <SDL.h>
 #endif
 
@@ -33,13 +33,11 @@ uint16_t native_rgba_surface_width(const NativeRgbaSurface *surface);
 uint16_t native_rgba_surface_height(const NativeRgbaSurface *surface);
 int native_rgba_surface_has_frame(const NativeRgbaSurface *surface);
 
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 /* Draws the cached frame into the renderer's window backbuffer without presenting it.
  * Callers can composite translucent UI in the same backbuffer, then present once. */
 NativeRgbaResult native_rgba_surface_render(NativeRgbaSurface *surface, SDL_Renderer *renderer,
                                             uint16_t viewport_width, uint16_t viewport_height);
-NativeRgbaResult native_rgba_surface_present(NativeRgbaSurface *surface, SDL_Renderer *renderer, uint16_t viewport_width,
-                                             uint16_t viewport_height);
 /* Detaches and returns the surface's SDL texture (if any) without calling any SDL API,
  * clearing the surface's texture fields. Lets a caller on a thread that doesn't own the
  * renderer hand the texture off to the owning thread for destruction, instead of letting

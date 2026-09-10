@@ -6,7 +6,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_audio_input_pcm, cLogLevelInfo, cLogFlags_Default, "audio.input.pcm", NULL);
+clog_define(g_native_log_audio_input_pcm, cLogLevelInfo, "audio.input.pcm");
 
 typedef struct NativeAudioInputPcmImpl {
     uint32_t input_rate;

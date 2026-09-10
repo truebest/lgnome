@@ -1,5 +1,5 @@
-#ifndef HELLOLG_H264_ANNEXB_H
-#define HELLOLG_H264_ANNEXB_H
+#ifndef LGNOME_H264_ANNEXB_H
+#define LGNOME_H264_ANNEXB_H
 
 #include <stdbool.h>
 #include <stddef.h>

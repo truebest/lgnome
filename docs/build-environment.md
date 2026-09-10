@@ -14,9 +14,9 @@ After initializing the repository dependencies as described below, build the env
 locally and run the product build from the repository root:
 
 ```sh
-docker build -t gnomecast-webos-build .
+docker build -t lgnome-webos-build .
 docker run --rm -v "$PWD:/workspace" -w /workspace \
-  gnomecast-webos-build bash -lc './tools/build-native-webos.sh'
+  lgnome-webos-build bash -lc './tools/build-native-webos.sh'
 ```
 
 The Dockerfile installs the webOS buildroot toolchain, target SDL2 support, a static

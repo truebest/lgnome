@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_AUDIO_PIPELINE_INTERNAL_H
-#define GNOMECAST_AUDIO_PIPELINE_INTERNAL_H
+#ifndef LGNOME_AUDIO_PIPELINE_INTERNAL_H
+#define LGNOME_AUDIO_PIPELINE_INTERNAL_H
 
 #include "audio_jitter.h"
 #include "audio_pipeline.h"
@@ -33,7 +33,7 @@
 #define MA_NO_RUNTIME_LINKING
 #endif
 #if defined(MA_NO_ENGINE) || defined(MA_NO_NODE_GRAPH)
-#error "gnomecast audio requires the miniaudio engine and node graph"
+#error "lgnome audio requires the miniaudio engine and node graph"
 #endif
 #include "miniaudio.h"
 
@@ -110,11 +110,8 @@ struct NativeAudioPipelineImpl {
     atomic_uint output_peak_right;
     atomic_uint output_peak_when_ms;
 
-    /* Duck controller. The SDL thread names the foreground source (-1 = disabled) and
-     * the set of sources allowed to trigger the duck (per-foreground trigger mask); the
-     * render thread evaluates activity once per block and owns the envelope. The applied
-     * factor is republished as an atomic only for UI/metering. The index/mask pair is
-     * two relaxed atomics: a one-block skew between them is inaudible. */
+    /* SDL thread sets routing; render thread owns the envelope.
+     * Relaxed index/mask atomics may differ for one block. */
     atomic_int duck_foreground_index;
     atomic_uint duck_trigger_mask;
     atomic_uint duck_factor_q15;
@@ -128,8 +125,8 @@ struct NativeAudioPipelineImpl {
     int duck_applied_index;
     float duck_factor;
     bool duck_bg_seen;
-    uint64_t duck_last_active_ms;
-    uint64_t duck_last_update_ms;
+    uint32_t duck_last_active_ms;
+    uint32_t duck_last_update_ms;
 
     float conversion_buffer[NATIVE_AUDIO_PIPELINE_BLOCK_FRAMES * NATIVE_AUDIO_PIPELINE_CHANNELS];
     int16_t pump_buffer[NATIVE_AUDIO_PIPELINE_BLOCK_FRAMES * NATIVE_AUDIO_PIPELINE_CHANNELS];
@@ -141,15 +138,18 @@ struct NativeAudioPipelineImpl {
     atomic_bool pump_stop;
     void (*feed)(void *ctx, const int16_t *samples, size_t frames);
     void *feed_ctx;
-    uint64_t last_stats_log_ms;
+    uint32_t last_stats_log_ms;
+    /* Per-source glitch counters as of the last report, so only new ones are logged. */
+    unsigned reported_underruns[NATIVE_AUDIO_PIPELINE_MAX_SOURCES];
+    unsigned reported_hard_corrections[NATIVE_AUDIO_PIPELINE_MAX_SOURCES];
 
-#ifdef HELLOLG_AUDIO_PIPELINE_TESTING
+#ifdef LGNOME_AUDIO_PIPELINE_TESTING
     NativeAudioPipelineTestHook before_ring_read;
     void *before_ring_read_ctx;
 #endif
 };
 
-static inline uint64_t native_audio_pipeline_now_ms(const NativeAudioPipelineImpl *pipeline) {
+static inline uint32_t native_audio_pipeline_now_ms(const NativeAudioPipelineImpl *pipeline) {
     return pipeline->clock(pipeline->clock_ctx);
 }
 

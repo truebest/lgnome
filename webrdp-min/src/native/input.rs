@@ -62,14 +62,14 @@ pub(super) enum InputCommand {
 }
 
 impl InputCommand {
-    pub(super) fn into_events(self) -> Vec<FastPathInputEvent> {
+    pub(super) fn into_event(self) -> FastPathInputEvent {
         match self {
-            InputCommand::PointerMove { x, y } => vec![FastPathInputEvent::MouseEvent(MousePdu {
+            InputCommand::PointerMove { x, y } => FastPathInputEvent::MouseEvent(MousePdu {
                 flags: PointerFlags::MOVE,
                 number_of_wheel_rotation_units: 0,
                 x_position: x,
                 y_position: y,
-            })],
+            }),
             InputCommand::PointerButton { x, y, button, down } => {
                 let mut flags = match button {
                     1 => PointerFlags::LEFT_BUTTON,
@@ -80,20 +80,20 @@ impl InputCommand {
                 if down {
                     flags |= PointerFlags::DOWN;
                 }
-                vec![FastPathInputEvent::MouseEvent(MousePdu {
+                FastPathInputEvent::MouseEvent(MousePdu {
                     flags,
                     number_of_wheel_rotation_units: 0,
                     x_position: x,
                     y_position: y,
-                })]
+                })
             }
             InputCommand::PointerWheel { x, y, delta } => {
-                vec![FastPathInputEvent::MouseEvent(MousePdu {
+                FastPathInputEvent::MouseEvent(MousePdu {
                     flags: PointerFlags::VERTICAL_WHEEL,
                     number_of_wheel_rotation_units: delta,
                     x_position: x,
                     y_position: y,
-                })]
+                })
             }
             InputCommand::Key {
                 scancode,
@@ -107,18 +107,18 @@ impl InputCommand {
                 if extended {
                     flags |= KeyboardFlags::EXTENDED;
                 }
-                vec![FastPathInputEvent::KeyboardEvent(flags, scancode)]
+                FastPathInputEvent::KeyboardEvent(flags, scancode)
             }
             InputCommand::Unicode { codepoint, down } => {
                 let mut flags = KeyboardFlags::empty();
                 if !down {
                     flags |= KeyboardFlags::RELEASE;
                 }
-                vec![FastPathInputEvent::UnicodeKeyboardEvent(flags, codepoint)]
+                FastPathInputEvent::UnicodeKeyboardEvent(flags, codepoint)
             }
-            InputCommand::SyncLocks { flags } => vec![FastPathInputEvent::SyncEvent(
-                SynchronizeFlags::from_bits_truncate(flags),
-            )],
+            InputCommand::SyncLocks { flags } => {
+                FastPathInputEvent::SyncEvent(SynchronizeFlags::from_bits_truncate(flags))
+            }
         }
     }
 }
@@ -136,15 +136,14 @@ mod tests {
         ];
 
         for (button, expected_button_flag) in cases {
-            let events = InputCommand::PointerButton {
+            let event = InputCommand::PointerButton {
                 x: 10,
                 y: 20,
                 button,
                 down: true,
             }
-            .into_events();
-            assert_eq!(events.len(), 1);
-            match &events[0] {
+            .into_event();
+            match &event {
                 FastPathInputEvent::MouseEvent(pdu) => {
                     assert_eq!(pdu.flags, expected_button_flag | PointerFlags::DOWN);
                     assert_eq!(pdu.number_of_wheel_rotation_units, 0);
@@ -158,12 +157,11 @@ mod tests {
 
     #[test]
     fn sync_locks_command_encodes_toggle_flags() {
-        let events = InputCommand::SyncLocks {
+        let event = InputCommand::SyncLocks {
             flags: (SynchronizeFlags::NUM_LOCK | SynchronizeFlags::CAPS_LOCK).bits(),
         }
-        .into_events();
-        assert_eq!(events.len(), 1);
-        match &events[0] {
+        .into_event();
+        match &event {
             FastPathInputEvent::SyncEvent(flags) => {
                 assert_eq!(
                     *flags,

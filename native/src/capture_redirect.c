@@ -19,14 +19,14 @@
 #include "capture_redirect_internal.h"
 #include "clog.h"
 
-clog_define(g_native_log_capture_redirect, cLogLevelInfo, cLogFlags_Default, "capture.redirect", NULL);
+clog_define(g_native_log_capture_redirect, cLogLevelInfo, "capture.redirect");
 
 #define CAPTURE_TEST_FAIL_ALLOC (1u << 0)
 #define CAPTURE_TEST_FAIL_MUTEX (1u << 1)
 #define CAPTURE_TEST_FAIL_CAMERA_THREAD (1u << 2)
 #define CAPTURE_TEST_FAIL_AUDIO_THREAD (1u << 3)
 
-#ifdef HELLOLG_CAPTURE_REDIRECT_TESTING
+#ifdef LGNOME_CAPTURE_REDIRECT_TESTING
 static atomic_uint g_capture_test_failures;
 
 void native_capture_redirect_test_set_failures(unsigned failures) {
@@ -39,7 +39,7 @@ static bool capture_test_failure_enabled(unsigned failure) {
 #endif
 
 static NativeCaptureRedirectImpl *capture_alloc_impl(void) {
-#ifdef HELLOLG_CAPTURE_REDIRECT_TESTING
+#ifdef LGNOME_CAPTURE_REDIRECT_TESTING
     if (capture_test_failure_enabled(CAPTURE_TEST_FAIL_ALLOC)) {
         return NULL;
     }
@@ -48,7 +48,7 @@ static NativeCaptureRedirectImpl *capture_alloc_impl(void) {
 }
 
 static int capture_mutex_init(pthread_mutex_t *lock) {
-#ifdef HELLOLG_CAPTURE_REDIRECT_TESTING
+#ifdef LGNOME_CAPTURE_REDIRECT_TESTING
     if (capture_test_failure_enabled(CAPTURE_TEST_FAIL_MUTEX)) {
         return EAGAIN;
     }
@@ -58,7 +58,7 @@ static int capture_mutex_init(pthread_mutex_t *lock) {
 
 static int capture_thread_create(pthread_t *thread, void *(*entry)(void *), void *context,
                                  unsigned test_failure) {
-#ifdef HELLOLG_CAPTURE_REDIRECT_TESTING
+#ifdef LGNOME_CAPTURE_REDIRECT_TESTING
     if (capture_test_failure_enabled(test_failure)) {
         return EAGAIN;
     }

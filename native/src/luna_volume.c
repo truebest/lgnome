@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 #include <glib.h>
 #include <luna-service2/lunaservice.h>
 #include <pthread.h>
@@ -18,7 +18,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_luna, cLogLevelInfo, cLogFlags_Default, "luna.volume", NULL);
+clog_define(g_native_log_luna, cLogLevelInfo, "luna.volume");
 
 bool native_luna_volume_parse(const char *json, int *volume, bool *muted) {
     if (!json) {
@@ -61,7 +61,7 @@ unsigned native_luna_volume_reply_seq(const NativeLunaVolume *lv) {
     return lv ? atomic_load(&lv->reply_seq) : 0u;
 }
 
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 typedef struct NativeLunaVolumeImpl {
     NativeLunaVolume *owner;
@@ -257,22 +257,7 @@ static void *luna_volume_thread(void *arg) {
         impl->handle = NULL;
     }
 
-    /* NO volume-change subscription — every path was probed live on the target
-     * firmware and none delivers events to a dev-mode app, so callers poll getVolume
-     * instead (cheap
-     * in-process one-shots that also wake the dozing service). The dead ends, with
-     * their exact refusals, so nobody re-walks them:
-     *   - com.webos.audio/getVolume subscribe: accepted ("subscribed":true) but the
-     *     service is DYNAMIC — the hub launches it per request and it idles out, taking
-     *     the subscription with it ("com.webos.audio is not running"); zero change
-     *     events arrived even while it was alive.
-     *   - com.webos.service.audio/master/getVolume subscribe (the change-notifying one
-     *     in the webOS OSE docs): "Message status unknown" for this client.
-     *   - com.webos.service.apiadapter/audio/getVolume (backs the external SSAP
-     *     clients, which DO receive change events): "Not permitted to send" — that
-     *     route is for paired external controllers only.
-     *   - Registering a NAMED client to widen the ACLs: "Invalid permissions" — the
-     *     jail allows anonymous registration only. */
+    /* Poll getVolume: tested dev-mode subscription endpoints do not deliver updates. */
 
     atomic_store(&impl->loop_ready, true);
     g_main_loop_run(impl->loop);
@@ -377,7 +362,7 @@ void native_luna_volume_set(NativeLunaVolume *lv, int pct) {
     }
 }
 
-#else /* !HELLOLG_TARGET_WEBOS: host builds — no Luna bus, the fader just stays dimmed */
+#else /* !LGNOME_TARGET_WEBOS: host builds — no Luna bus, the fader just stays dimmed */
 
 bool native_luna_volume_start(NativeLunaVolume *lv) {
     if (!lv) {
@@ -404,4 +389,4 @@ void native_luna_volume_set(NativeLunaVolume *lv, int pct) {
     (void)pct;
 }
 
-#endif /* HELLOLG_TARGET_WEBOS */
+#endif /* LGNOME_TARGET_WEBOS */

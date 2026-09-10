@@ -8,11 +8,12 @@
 
 #include "native_app.h"
 #include "native_rdp_state.h"
+#include "ui_session_status.h"
 
 static const RdpState k_all_states[] = {
     RDP_STATE_IDLE,     RDP_STATE_CONNECTING,    RDP_STATE_TLS,           RDP_STATE_CREDSSP,
     RDP_STATE_ACTIVE,   RDP_STATE_NO_AVC420,     RDP_STATE_DECODER_ERROR, RDP_STATE_NETWORK_ERROR,
-    RDP_STATE_PROTOCOL_ERROR, RDP_STATE_STOPPED,
+    RDP_STATE_PROTOCOL_ERROR, RDP_STATE_STOPPED, RDP_STATE_DISCONNECTED, RDP_STATE_RECONNECTING,
 };
 
 static App *app_create(bool interactive_ui) {
@@ -197,6 +198,87 @@ static void test_redaction(void) {
     app_destroy(app);
 }
 
+static void test_terminal_reason_survives_worker_stop(void) {
+    App *app = app_create(true);
+    NativeSessionSlot *slot = &app->sessions[0];
+    native_slot_record_state(slot, RDP_STATE_ACTIVE, RDP_DISCONNECT_NONE);
+    native_slot_record_state(slot, RDP_STATE_DISCONNECTED, RDP_DISCONNECT_SERVER_REBOOT);
+    native_slot_record_state(slot, RDP_STATE_STOPPED, RDP_DISCONNECT_NONE);
+    native_slot_report_terminal(slot, RDP_STATE_NETWORK_ERROR, 12);
+    assert(atomic_load(&slot->terminal_state) == RDP_STATE_DISCONNECTED);
+    assert(atomic_load(&slot->terminal_reason) == RDP_DISCONNECT_SERVER_REBOOT);
+    assert(atomic_load(&slot->session_failed));
+    assert(atomic_load(&app->running));
+    assert(atomic_load(&app->exit_code) == 0);
+    assert(!atomic_load(&app->sessions[1].session_failed));
+
+    NativeSessionSlot *other = &app->sessions[1];
+    native_slot_record_state(other, RDP_STATE_CONNECTING, RDP_DISCONNECT_NONE);
+    native_slot_record_state(other, RDP_STATE_RECONNECTING, RDP_DISCONNECT_NONE);
+    native_slot_record_state(other, RDP_STATE_TLS, RDP_DISCONNECT_NONE);
+    assert(atomic_load(&other->reconnecting));
+    native_slot_record_state(other, RDP_STATE_ACTIVE, RDP_DISCONNECT_NONE);
+    assert(!atomic_load(&other->reconnecting));
+    native_slot_record_state(other, RDP_STATE_NETWORK_ERROR, RDP_DISCONNECT_NONE);
+    native_slot_record_state(other, RDP_STATE_STOPPED, RDP_DISCONNECT_NONE);
+    assert(atomic_load(&other->terminal_reason) == RDP_DISCONNECT_CONNECTION_LOST);
+    assert(atomic_load(&slot->terminal_reason) == RDP_DISCONNECT_SERVER_REBOOT);
+
+    native_slot_record_state(&app->sessions[2], RDP_STATE_NETWORK_ERROR, RDP_DISCONNECT_NONE);
+    assert(atomic_load(&app->sessions[2].terminal_reason) == RDP_DISCONNECT_CONNECTION_FAILED);
+    native_slot_record_state(&app->sessions[3], RDP_STATE_DISCONNECTED, RDP_DISCONNECT_USER_LOGOFF);
+    native_slot_record_state(&app->sessions[3], RDP_STATE_NETWORK_ERROR, RDP_DISCONNECT_NONE);
+    assert(atomic_load(&app->sessions[3].terminal_reason) == RDP_DISCONNECT_USER_LOGOFF);
+    app_destroy(app);
+}
+
+static void test_carousel_terminal_presentation(void) {
+    static const struct {
+        RdpState state;
+        RdpDisconnectReason reason;
+        const char *badge;
+        const char *action;
+        uint32_t color;
+    } cases[] = {
+        {RDP_STATE_DISCONNECTED, RDP_DISCONNECT_SERVER_REBOOT, "REBOOT", "Connect", 0x8a909b},
+        {RDP_STATE_DISCONNECTED, RDP_DISCONNECT_SERVER_SHUTDOWN, "SHUTDOWN", "Connect", 0x8a909b},
+        {RDP_STATE_DISCONNECTED, RDP_DISCONNECT_USER_LOGOFF, "SIGNED OUT", "Connect", 0x8a909b},
+        {RDP_STATE_DISCONNECTED, RDP_DISCONNECT_ADMIN_LOGOFF, "SIGNED OUT", "Connect", 0x8a909b},
+        {RDP_STATE_DISCONNECTED, RDP_DISCONNECT_ADMIN_DISCONNECT, "CLOSED", "Connect", 0x8a909b},
+        {RDP_STATE_DISCONNECTED, RDP_DISCONNECT_USER_DISCONNECT, "CLOSED", "Connect", 0x8a909b},
+        {RDP_STATE_DISCONNECTED, RDP_DISCONNECT_PEER_DISCONNECTED, "CLOSED", "Connect", 0x8a909b},
+        {RDP_STATE_DISCONNECTED, RDP_DISCONNECT_IDLE_TIMEOUT, "TIMED OUT", "Connect", 0xe8c15a},
+        {RDP_STATE_DISCONNECTED, RDP_DISCONNECT_SESSION_TIMEOUT, "TIMED OUT", "Connect", 0xe8c15a},
+        {RDP_STATE_DISCONNECTED, RDP_DISCONNECT_SESSION_REPLACED, "REPLACED", "Connect", 0xe8c15a},
+        {RDP_STATE_NETWORK_ERROR, RDP_DISCONNECT_CONNECTION_LOST, "LOST", "Retry", 0xe8c15a},
+        {RDP_STATE_NETWORK_ERROR, RDP_DISCONNECT_CONNECTION_FAILED, "FAILED", "Retry", 0xe8c15a},
+        {RDP_STATE_PROTOCOL_ERROR, RDP_DISCONNECT_PROTOCOL_ERROR, "ERROR", "Retry", 0xe35d55},
+        {RDP_STATE_PROTOCOL_ERROR, RDP_DISCONNECT_SERVER_ERROR, "ERROR", "Retry", 0xe35d55},
+        {RDP_STATE_PROTOCOL_ERROR, RDP_DISCONNECT_LICENSE_ERROR, "ERROR", "Retry", 0xe35d55},
+        {RDP_STATE_PROTOCOL_ERROR, RDP_DISCONNECT_BROKER_ERROR, "ERROR", "Retry", 0xe35d55},
+        {RDP_STATE_PROTOCOL_ERROR, RDP_DISCONNECT_ACCESS_DENIED, "ERROR", "Retry", 0xe35d55},
+        {RDP_STATE_DECODER_ERROR, RDP_DISCONNECT_GRAPHICS_ERROR, "ERROR", "Retry", 0xe35d55},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        NativePreconnectSessionState state = native_session_terminal_ui_state(cases[i].state, cases[i].reason);
+        NativeSessionStatus status = native_session_status(state, cases[i].reason);
+        assert(strcmp(status.badge, cases[i].badge) == 0);
+        assert(strcmp(status.action, cases[i].action) == 0);
+        assert(status.color == cases[i].color);
+        assert(status.error == (cases[i].color == 0xe35d55));
+        assert(strlen(status.badge) <= 10);
+        assert(strlen(status.detail) > 0 && strlen(status.detail) < 120);
+        assert(native_ui_session_terminal(state));
+        assert(!native_ui_session_connecting(state));
+    }
+    NativeSessionStatus status = native_session_status(NATIVE_PRECONNECT_SESSION_RECONNECTING, RDP_DISCONNECT_NONE);
+    assert(strcmp(status.badge, "RETRYING") == 0);
+    assert(native_ui_session_connecting(NATIVE_PRECONNECT_SESSION_RECONNECTING));
+    status = native_session_status(NATIVE_PRECONNECT_SESSION_CONNECTED, RDP_DISCONNECT_SERVER_REBOOT);
+    assert(strcmp(status.badge, "CONNECTED") == 0);
+    assert(status.detail[0] == '\0');
+}
+
 int main(void) {
     test_state_names();
     test_state_classification();
@@ -204,5 +286,7 @@ int main(void) {
     test_background_slot_never_exits();
     test_active_slot_follows_ui_mode();
     test_redaction();
+    test_terminal_reason_survives_worker_stop();
+    test_carousel_terminal_presentation();
     return 0;
 }

@@ -35,33 +35,10 @@ typedef enum ClogxLevel {
     CLOGX_LEVEL_OFF = CLOGX_LEVEL_VALUE_OFF
 } ClogxLevel;
 
-typedef uint32_t ClogxFlags;
-
-enum {
-    CLOGX_FLAG_NONE = 0u,
-    /* Print wall time and monotonic time since the logger's first use. */
-    CLOGX_FLAG_PRINT_TIME = 1u << 0,
-    CLOGX_FLAG_PRINT_LEVEL = 1u << 1,
-    /* Print the category name as the message prefix. */
-    CLOGX_FLAG_PRINT_CATEGORY = 1u << 2,
-    /* Always print file, line, and function metadata for this category. */
-    CLOGX_FLAG_PRINT_SOURCE = 1u << 3,
-    /* Print source automatically for trace/debug and diagnostic events. */
-    CLOGX_FLAG_AUTO_SOURCE = 1u << 4,
-    CLOGX_FLAGS_DEFAULT = CLOGX_FLAG_PRINT_TIME | CLOGX_FLAG_PRINT_LEVEL |
-                          CLOGX_FLAG_PRINT_CATEGORY | CLOGX_FLAG_AUTO_SOURCE
-};
-
-#define CLOGX_FLAG_DEFAULT CLOGX_FLAGS_DEFAULT
-#define CLOGX_FLAG_PRINT_PREFIX CLOGX_FLAG_PRINT_CATEGORY
-
 typedef struct ClogxCategory {
     /* Public for static initialization; treat every field as logger-owned after definition. */
     const char *name;
     ClogxLevel default_level;
-    ClogxFlags flags;
-    /* Reserved for category-specific immutable configuration; the core does not dereference it. */
-    const void *config;
     atomic_int effective_level;
     atomic_bool registered;
     struct ClogxCategory *next;
@@ -69,17 +46,11 @@ typedef struct ClogxCategory {
 
 /* Categories and their name strings must have process lifetime (normally file scope):
  * first use permanently registers the object for live reconfiguration. */
-#define CLOGX_CATEGORY_INITIALIZER_FULL(name_, default_level_, flags_, config_)                              \
-    { (name_), (default_level_), (flags_), (config_), (default_level_), false, NULL }
-#define CLOGX_CATEGORY_INITIALIZER(name_, default_level_)                                                    \
-    CLOGX_CATEGORY_INITIALIZER_FULL((name_), (default_level_), CLOGX_FLAGS_DEFAULT, NULL)
-#define CLOGX_CATEGORY_DEFINE(symbol_, name_, default_level_)                                                \
-    ClogxCategory symbol_ = CLOGX_CATEGORY_INITIALIZER((name_), (default_level_))
-#define CLOGX_CATEGORY_DECLARE(symbol_) extern ClogxCategory symbol_
+#define CLOGX_CATEGORY_INITIALIZER(name_, default_level_) \
+    { (name_), (default_level_), (default_level_), false, NULL }
 
 typedef struct ClogxEvent {
     ClogxLevel level;
-    ClogxFlags flags;
     const char *category;
     const char *message;
     const char *file;
@@ -93,12 +64,6 @@ typedef struct ClogxEvent {
 /* monotonic_time_ns uses a steady platform clock when one is available. The ISO C
  * fallback is nondecreasing and sleep-aware, but wall-clock adjustments can move it
  * forward; configure-time feature detection should enable the steady clock normally. */
-
-/* The callback is synchronous and may run concurrently on several logging threads. Event
- * strings remain valid only until the callback returns. A sink must not log recursively
- * or replace/reset itself. Replacing a sink waits for old callbacks to drain, so its old
- * context may be released after clogx_set_sink/clogx_reset_sink returns. */
-typedef void (*ClogxSink)(const ClogxEvent *event, void *context);
 
 enum {
     CLOGX_CONFIG_OK = 0,
@@ -114,10 +79,8 @@ bool clogx_enabled_at_or_above(ClogxCategory *category, ClogxLevel level, int co
  * A selector also matches dot-separated descendants; later rules win. Empty resets all
  * categories to their compiled defaults. */
 int clogx_configure(const char *spec);
-/* Apply GNOMECAST_LOG, or reset to defaults when it is absent. */
+/* Apply LGNOME_LOG, or reset to defaults when it is absent. */
 int clogx_configure_env(void);
-void clogx_set_sink(ClogxSink sink, void *context);
-void clogx_reset_sink(void);
 
 void clogx_vlogf(ClogxCategory *category, ClogxLevel level, const char *file, int line,
                   const char *function, const char *format, va_list args)
@@ -132,52 +95,6 @@ void clogx_logf(ClogxCategory *category, ClogxLevel level, const char *file, int
 /* Override with a preprocessor value, for example
  * -DCLOGX_COMPILED_MIN_LEVEL=CLOGX_LEVEL_VALUE_INFO. Enum identifiers cannot be used in
  * preprocessor comparisons. Fixed-level macros below that floor compile to no-ops. */
-
-#define CLOGX_LOG(category_, level_, ...)                                                                    \
-    do {                                                                                                     \
-        ClogxCategory *clogx_category__ = (category_);                                                       \
-        ClogxLevel clogx_level__ = (level_);                                                                 \
-        if ((int)clogx_level__ >= (int)CLOGX_COMPILED_MIN_LEVEL &&                                          \
-            clogx_enabled(clogx_category__, clogx_level__)) {                                               \
-            clogx_logf(clogx_category__, clogx_level__, __FILE__, __LINE__, __func__, __VA_ARGS__);         \
-        }                                                                                                    \
-    } while (0)
-
-#if CLOGX_COMPILED_MIN_LEVEL <= CLOGX_LEVEL_VALUE_TRACE
-#define CLOGX_TRACE(category_, ...) CLOGX_LOG((category_), CLOGX_LEVEL_TRACE, __VA_ARGS__)
-#else
-#define CLOGX_TRACE(category_, ...) ((void)0)
-#endif
-#if CLOGX_COMPILED_MIN_LEVEL <= CLOGX_LEVEL_VALUE_DEBUG
-#define CLOGX_DEBUG(category_, ...) CLOGX_LOG((category_), CLOGX_LEVEL_DEBUG, __VA_ARGS__)
-#else
-#define CLOGX_DEBUG(category_, ...) ((void)0)
-#endif
-#if CLOGX_COMPILED_MIN_LEVEL <= CLOGX_LEVEL_VALUE_INFO
-#define CLOGX_INFO(category_, ...) CLOGX_LOG((category_), CLOGX_LEVEL_INFO, __VA_ARGS__)
-#else
-#define CLOGX_INFO(category_, ...) ((void)0)
-#endif
-#if CLOGX_COMPILED_MIN_LEVEL <= CLOGX_LEVEL_VALUE_NOTICE
-#define CLOGX_NOTICE(category_, ...) CLOGX_LOG((category_), CLOGX_LEVEL_NOTICE, __VA_ARGS__)
-#else
-#define CLOGX_NOTICE(category_, ...) ((void)0)
-#endif
-#if CLOGX_COMPILED_MIN_LEVEL <= CLOGX_LEVEL_VALUE_WARN
-#define CLOGX_WARN(category_, ...) CLOGX_LOG((category_), CLOGX_LEVEL_WARN, __VA_ARGS__)
-#else
-#define CLOGX_WARN(category_, ...) ((void)0)
-#endif
-#if CLOGX_COMPILED_MIN_LEVEL <= CLOGX_LEVEL_VALUE_ERROR
-#define CLOGX_ERROR(category_, ...) CLOGX_LOG((category_), CLOGX_LEVEL_ERROR, __VA_ARGS__)
-#else
-#define CLOGX_ERROR(category_, ...) ((void)0)
-#endif
-#if CLOGX_COMPILED_MIN_LEVEL <= CLOGX_LEVEL_VALUE_FATAL
-#define CLOGX_FATAL(category_, ...) CLOGX_LOG((category_), CLOGX_LEVEL_FATAL, __VA_ARGS__)
-#else
-#define CLOGX_FATAL(category_, ...) ((void)0)
-#endif
 
 typedef struct ClogxRateLimit {
     atomic_flag lock;
@@ -194,55 +111,13 @@ void clogx_logf_suppressed(ClogxCategory *category, ClogxLevel level, const char
                            const char *function, uint32_t suppressed, const char *format, ...)
     CLOGX_PRINTF_FORMAT(7, 8);
 
-/* Each macro expansion owns an independent, thread-safe call-site limiter. */
-#define CLOGX_LOG_LIMITED(category_, level_, burst_, interval_ms_, ...)                                      \
-    do {                                                                                                     \
-        static ClogxRateLimit clogx_rate_limit__ = CLOGX_RATE_LIMIT_INITIALIZER;                            \
-        ClogxCategory *clogx_category__ = (category_);                                                       \
-        ClogxLevel clogx_level__ = (level_);                                                                 \
-        uint32_t clogx_suppressed__ = 0;                                                                     \
-        if ((int)clogx_level__ >= (int)CLOGX_COMPILED_MIN_LEVEL &&                                          \
-            clogx_enabled(clogx_category__, clogx_level__) &&                                               \
-            clogx_rate_limit_allow(&clogx_rate_limit__, (burst_), (interval_ms_),                            \
-                                   &clogx_suppressed__)) {                                                   \
-            clogx_logf_suppressed(clogx_category__, clogx_level__, __FILE__, __LINE__, __func__,            \
-                                  clogx_suppressed__, __VA_ARGS__);                                         \
-        }                                                                                                    \
-    } while (0)
-
-void clogx_assert_fail(ClogxCategory *category, const char *expression, const char *file, int line,
-                       const char *function, const char *format, ...)
-    CLOGX_PRINTF_FORMAT(6, 7);
-_Noreturn void clogx_panicf(ClogxCategory *category, const char *file, int line,
-                            const char *function, const char *format, ...)
-    CLOGX_PRINTF_FORMAT(5, 6);
-
-#ifndef NDEBUG
-#define CLOGX_ASSERT(category_, expression_)                                                                 \
-    do {                                                                                                     \
-        if (!(expression_)) {                                                                                \
-            clogx_assert_fail((category_), #expression_, __FILE__, __LINE__, __func__, NULL);               \
-        }                                                                                                    \
-    } while (0)
-#define CLOGX_ASSERT_MSG(category_, expression_, ...)                                                        \
-    do {                                                                                                     \
-        if (!(expression_)) {                                                                                \
-            clogx_assert_fail((category_), #expression_, __FILE__, __LINE__, __func__, __VA_ARGS__);        \
-        }                                                                                                    \
-    } while (0)
-#else
-#define CLOGX_ASSERT(category_, expression_) ((void)0)
-#define CLOGX_ASSERT_MSG(category_, expression_, ...) ((void)0)
-#endif
-
-#define CLOGX_PANIC(category_, ...)                                                                          \
-    clogx_panicf((category_), __FILE__, __LINE__, __func__, __VA_ARGS__)
-
 #ifdef CLOGX_TESTING
 typedef uint64_t (*ClogxTestClock)(void);
 void clogx_test_set_clocks(ClogxTestClock wall_clock, ClogxTestClock monotonic_clock);
 size_t clogx_test_format_event(const ClogxEvent *event, char *output, size_t capacity);
-bool clogx_test_break_enabled(ClogxLevel trigger_level);
+/* Install or reset only while no logging threads are running. */
+typedef void (*ClogxTestSink)(const ClogxEvent *event, void *context);
+void clogx_test_set_sink(ClogxTestSink sink, void *context);
 #endif
 
 #endif

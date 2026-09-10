@@ -14,7 +14,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_config, cLogLevelInfo, cLogFlags_Default, "config.settings", NULL);
+clog_define(g_native_log_config, cLogLevelInfo, "config.settings");
 
 static bool apply_json_string(const char *json, const char *key, char *dest, size_t cap, const char *source) {
     int result = native_json_read_string(json, key, dest, cap);
@@ -96,6 +96,10 @@ static bool apply_session_json(NativeSessionConfig *session, const char *json, c
            apply_json_string(json, "domain", session->domain, sizeof(session->domain), source) &&
            apply_json_u16(json, "port", 1, UINT16_MAX, &session->port, source) &&
            apply_json_u16(json, "fps", 1, 240, &session->fps, source) &&
+           apply_json_u16(json, "desktopWidth", NATIVE_SETTINGS_DESKTOP_MIN_WIDTH,
+                          NATIVE_SETTINGS_DESKTOP_MAX_WIDTH, &session->desktop_width, source) &&
+           apply_json_u16(json, "desktopHeight", NATIVE_SETTINGS_DESKTOP_MIN_HEIGHT,
+                          NATIVE_SETTINGS_DESKTOP_MAX_HEIGHT, &session->desktop_height, source) &&
            apply_json_u16(json, "duckTriggers", 0,
                           NATIVE_SETTINGS_DUCK_MASK_ALL, &session->duck_mask,
                           source) &&
@@ -126,15 +130,6 @@ static bool apply_audio_codec_json(NativeSettings *settings, const char *json, c
 }
 
 static bool apply_global_json(NativeSettings *settings, const char *json, const char *source) {
-    uint16_t ignored_prebuffer = 0;
-    int deprecated = native_json_read_u16(json, "audioPrebufferMs", 0, 1000, &ignored_prebuffer);
-    if (deprecated < 0) {
-        clog(cLogLevelError, "invalid value for deprecated config field audioPrebufferMs in %s", source);
-        return false;
-    }
-    if (deprecated > 0) {
-        native_settings_warn_deprecated_audio_prebuffer();
-    }
     bool ok =
         apply_json_u16(json, "wheelStep", 1, 120, &settings->wheel_step, source) &&
         apply_json_u16(json, "wheelScrollDivisor", 1, 120,
@@ -294,9 +289,10 @@ static bool apply_sessions_array(NativeSettings *settings, const char *json, con
 
 bool native_settings_json_has_rdp_key(const char *json) {
     static const char *keys[] = {"sessions",          "host",       "username",   "password",
-                                 "domain",            "port",       "width",      "height",
-                                 "fps",               "wheelStep",  "wheelScrollDivisor",
-                                 "audioPrebufferMs", "audioCodec", "duckTriggers",
+                                 "domain",            "port",
+                                 "fps",               "desktopWidth", "desktopHeight",
+                                 "wheelStep",  "wheelScrollDivisor",
+                                 "audioCodec", "duckTriggers",
                                  "cameraEnabled", "cameraDeviceId", "cameraWidth",
                                  "cameraHeight", "cameraFps", "cameraRedirect",
                                  "audioInputEnabled", "audioInputDeviceId",
@@ -335,8 +331,6 @@ bool native_settings_apply_json(NativeSettings *settings, const char *json, cons
         /* Legacy flat object: single session -> green slot. */
         NativeSessionConfig *green = &updated.sessions[NATIVE_SESSION_SLOT_GREEN];
         if (!(apply_session_json(green, json, source) &&
-              apply_json_u16(json, "width", 1, UINT16_MAX, &updated.width, source) &&
-              apply_json_u16(json, "height", 1, UINT16_MAX, &updated.height, source) &&
               apply_global_json(&updated, json, source))) {
             return false;
         }
@@ -413,9 +407,11 @@ static bool write_session_json(const NativeSessionConfig *session, int slot, FIL
            write_json_string(file, session->password) && fprintf(file, ", \"domain\": ") >= 0 &&
            write_json_string(file, session->domain) &&
            fprintf(file,
-                   ", \"fps\": %u, \"duckTriggers\": %u, "
+                   ", \"fps\": %u, \"desktopWidth\": %u, \"desktopHeight\": %u, "
+                   "\"duckTriggers\": %u, "
                    "\"cameraRedirect\": %s, \"audioInputRedirect\": %s }",
-                   (unsigned)session->fps, (unsigned)session->duck_mask,
+                   (unsigned)session->fps, (unsigned)session->desktop_width,
+                   (unsigned)session->desktop_height, (unsigned)session->duck_mask,
                    session->camera_redirect ? "true" : "false",
                    session->audio_input_redirect ? "true" : "false") >= 0;
 }

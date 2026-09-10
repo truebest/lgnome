@@ -13,7 +13,7 @@ use ironrdp_pdu::rdp::headers::ShareDataPdu;
 use ironrdp_pdu::rdp::refresh_rectangle::RefreshRectanglePdu;
 use ironrdp_pdu::rdp::suppress_output::SuppressOutputPdu;
 use ironrdp_session::image::DecodedImage;
-use ironrdp_session::{fast_path, ActiveStage, ActiveStageOutput};
+use ironrdp_session::{ActiveStage, ActiveStageOutput};
 use ironrdp_svc::ChannelFlags;
 
 use super::input::{ControlCommand, InputCommand, WorkerCommand};
@@ -32,9 +32,9 @@ impl NativeWorker {
         image: &mut DecodedImage,
         input: InputCommand,
     ) -> Result<(), NativeError> {
-        let events = input.into_events();
+        let event = input.into_event();
         let outputs = active
-            .process_fastpath_input(image, &events)
+            .process_fastpath_input(image, &[event])
             .map_err(|e| NativeError::protocol(format!("fast-path input: {e}")))?;
         for output in outputs {
             if let ActiveStageOutput::ResponseFrame(frame) = output {
@@ -89,17 +89,11 @@ impl NativeWorker {
         tls: &mut TlsStream,
         active: &mut ActiveStage,
     ) -> Result<(), NativeError> {
-        // Reconcile desired state on every pass. A rapid remove -> add may coalesce,
-        // but can never leave the worker stuck at an obsolete edge-mailbox value.
-        // The atomic store originates under the C capture-manager lock and must not
-        // block behind an RDP callback trying to acquire that lock.
+        // Reconcile coalesced device state without blocking on the C capture-manager lock.
         let camera_available = self.desired_camera_available.load(Ordering::Acquire);
         let availability_update = self.camera.set_available(camera_available);
         if !camera_available {
-            // DeviceRemoved retires the old device and all of its sample credits.
-            // Drop every queued answer for that instance, including a current-epoch
-            // answer when physical/permission removal leaves the foreground capture
-            // gate open. None may leak into a later DeviceAdded instance.
+            // Removal invalidates every queued answer and credit for this device instance.
             self.media
                 .discard_camera_submission()
                 .map_err(|()| NativeError::protocol("media mailbox lock poisoned"))?;
@@ -127,17 +121,13 @@ impl NativeWorker {
             .map_err(|()| NativeError::protocol("media mailbox lock poisoned"))?;
 
         if let Some(submission) = camera {
-            // set_capture_active also rewrites an H.264 AU still in the mailbox.
-            // Revalidate here as well because the worker may already have taken a
-            // batch when C synchronously backgrounds the session.
+            // Revalidate batches already taken when C synchronously closes capture.
             let prepared = self
                 .media
                 .prepare_camera_send(submission)
                 .map_err(|()| NativeError::protocol("media mailbox lock poisoned"))?;
             if let Some(PreparedCameraSend { submission, permit }) = prepared {
-                // A stale H.264 answer becomes SampleError only after capture has
-                // reopened. Every wire response, including that fallback, holds the
-                // send permit through TLS write+flush so close is synchronous.
+                // Hold the send permit through TLS write/flush, including stale-AU SampleError replies.
                 let outbound = match submission {
                     CameraSubmission::H264 {
                         generation, data, ..
@@ -158,10 +148,7 @@ impl NativeWorker {
             }
         }
 
-        // submit_h264/submit_error arm the next server credit before the DVC
-        // write. Release the write permit first, then suppress the callback if a
-        // concurrent close already made capture inactive. A coalesced reopen
-        // delivers any retained notification on this or the next drain pass.
+        // Release the send permit before callbacks; inactive capture retains the next credit notification.
         if self
             .media
             .capture_is_active()
@@ -208,9 +195,6 @@ impl NativeWorker {
         self.write_all(tls, &frame, label)
     }
 
-    /// Sends one session-control request on the live connection. Failures here are
-    /// connection failures (the encode paths are infallible for valid state), so they
-    /// propagate like any other write error.
     fn dispatch_control(
         &mut self,
         tls: &mut TlsStream,
@@ -229,14 +213,7 @@ impl NativeWorker {
                 self.send_suppress_output(tls, active, full_rect, allow_display)?;
             }
             ControlCommand::RequestRefresh => {
-                // gnome-remote-desktop disables TS_REFRESH_RECT_PDU (FreeRDP_RefreshRect =
-                // FALSE) and does not force a keyframe when suppressed output resumes, but
-                // it tears down and recreates its encode sessions on EVERY Display Control
-                // monitor-layout submission — even a byte-identical one — ending in a
-                // RESET_GRAPHICS and a fresh IDR. So re-submit the current layout over the
-                // Display Control DVC (when the server opened it; mirror-mode grd does
-                // not), and also send a full-screen Refresh Rect for servers that honor
-                // the classic path.
+                // Layout resubmission forces a grd IDR when Display Control is available; also try Refresh Rect.
                 let layout_messages =
                     rdpedisp::encode_refresh_layout(active, image.width(), image.height())?;
                 if let Some(messages) = layout_messages {
@@ -326,23 +303,26 @@ impl NativeWorker {
                 share_id,
                 enable_server_pointer,
                 pointer_software_rendering,
+                static_channel_chunk_size,
+                ..
             } = seq.connection_activation_state()
             {
                 *image =
                     DecodedImage::new(PixelFormat::RgbA32, desktop_size.width, desktop_size.height);
-                active.set_fastpath_processor(
-                    fast_path::ProcessorBuilder {
-                        io_channel_id: seq.io_channel_id(),
-                        user_channel_id: seq.user_channel_id(),
-                        share_id,
-                        enable_server_pointer,
-                        pointer_software_rendering,
-                        bulk_decompressor: None,
-                    }
-                    .build(),
-                );
-                active.set_share_id(share_id);
-                active.set_enable_server_pointer(enable_server_pointer);
+                // Reactivation renegotiates VCChunkSize; applying the rest by hand would
+                // leave the X.224 processor chunking to the previous, possibly larger, limit.
+                if !active.reactivate(
+                    seq.io_channel_id(),
+                    seq.user_channel_id(),
+                    share_id,
+                    enable_server_pointer,
+                    pointer_software_rendering,
+                    static_channel_chunk_size,
+                ) {
+                    return Err(NativeError::protocol(format!(
+                        "reactivation offered an unusable static channel chunk size ({static_channel_chunk_size})"
+                    )));
+                }
                 self.callbacks
                     .desktop_size(desktop_size.width, desktop_size.height);
                 self.write_all(tls, out.filled(), "reactivation finalized")?;
@@ -351,20 +331,19 @@ impl NativeWorker {
 
             if seq.next_pdu_hint().is_some() {
                 let pdu = self.read_activation_pdu(tls, &seq)?;
-                seq.step(&pdu, &mut out).map_err(|e| {
-                    // grd is known to send nonstandard PDUs during reactivation; keep the
-                    // bytes so a field failure identifies the offending PDU from the log
-                    // alone, without a verbose-tracing rebuild.
-                    NativeError::protocol(format!(
-                        "reactivation step: {e}; pdu {} bytes: {}",
+                seq.step(&pdu, self.last_read_at, &mut out).map_err(|e| {
+                    let mut error = NativeError::connector(e);
+                    error.message = format!(
+                        "{}; pdu {} bytes: {}",
+                        error.message,
                         pdu.len(),
                         hex_prefix(&pdu, 64)
-                    ))
+                    );
+                    error
                 })?;
             } else {
-                seq.step_no_input(&mut out).map_err(|e| {
-                    NativeError::protocol(format!("reactivation step_no_input: {e}"))
-                })?;
+                seq.step_no_input(&mut out)
+                    .map_err(NativeError::connector)?;
             }
 
             if !out.filled().is_empty() {
@@ -409,7 +388,7 @@ impl NativeWorker {
         for unit in video_units {
             let pts = self.next_pts90k;
             self.next_pts90k = self.next_pts90k.wrapping_add(self.frame_pts_step.max(1));
-            self.callbacks.video_au(&unit.data, pts);
+            self.callbacks.video_au(&unit, pts);
         }
         Ok(())
     }

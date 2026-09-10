@@ -1,36 +1,11 @@
-#ifndef GNOMECAST_LUNA_VOLUME_H
-#define GNOMECAST_LUNA_VOLUME_H
+#ifndef LGNOME_LUNA_VOLUME_H
+#define LGNOME_LUNA_VOLUME_H
 
 #include <stdatomic.h>
 #include <stdbool.h>
 
-/* System (TV) master volume over the webOS Luna bus, for the mixer overlay's MASTER
- * fader. This deliberately does NOT touch the app's own audio mix: the fader mirrors
- * and drives the platform volume — the same one the remote's VOL keys, Bluetooth
- * headphone buttons and a keyboard's Fn-volume keys adjust — which webOS handles above
- * the app (none of those keys ever reach us; verified live).
- *
- * Transport: the NATIVE luna-service2 client library on a dedicated GMainLoop thread.
- * NEVER a luna-send-pub subprocess: fork()ing this process while the NDL/OMX video
- * pipeline is (re)loading raced its in-process decoder state and produced black
- * screens (child inherits driver/SVP handles), and a pipe-spawned subscriber cannot
- * deliver events anyway (block-buffered stdout, no stdbuf on the TV). In-process LS2
- * calls carry no fork. Volume-change SUBSCRIPTIONS do not exist for a dev-mode app on
- * this platform — every endpoint was probed live and refused or went dark (the exact dead
- * ends are documented in luna_volume.c) — so callers keep the cache live by polling
- * getVolume: the one-shots are cheap and each call wakes the dozing dynamic service.
- *
- * The audio methods used (absolute get/setVolume on luna://com.webos.audio) are
- * undocumented-but-working from the app's jail (verified live; LG documents only
- * volumeUp/Down/setMuted for third parties). If a firmware ever rejects them, the
- * module just stays unavailable and the MASTER fader dims — nothing else breaks.
- *
- * set() coalesces with at most ONE call in flight: the newest requested value is sent
- * when the bus is idle, otherwise it chains from the in-flight call's reply — a fader
- * drag can never queue a backlog of setVolume calls. The cache updates optimistically
- * on set() (snappy knob) and authoritatively from getVolume replies ONLY: a set
- * confirmation echoes an older value whenever sets chain, and writing it back would
- * visibly yank the knob backward mid-drag. */
+/* System volume over in-process LS2, independent of app mix gains.
+ * See docs/native-runbook.md, System volume, for platform limitations. */
 
 typedef struct NativeLunaVolume {
     void *impl; /* transport state (LS2 loop thread on webOS; NULL on host builds) */
@@ -41,12 +16,7 @@ typedef struct NativeLunaVolume {
     atomic_uint reply_seq;  /* bumps on every parsed reply — freshness fence for baselines */
 } NativeLunaVolume;
 
-/* Spawns the bus thread. Volume changes are POLLED: every LS2 volume-change
- * subscription endpoint is a dead end for a dev-mode app on this device —
- * refused outright, or accepted but delivering zero change events before the
- * dynamic service idles out (see the probe notes in luna_volume.c). On
- * platforms without the Luna bus this is a no-op that leaves the state
- * unavailable. */
+/* Starts the LS2 thread; callers poll via refresh. Unavailable without Luna. */
 bool native_luna_volume_start(NativeLunaVolume *lv);
 void native_luna_volume_stop(NativeLunaVolume *lv);
 
@@ -61,9 +31,7 @@ void native_luna_volume_set(NativeLunaVolume *lv, int pct);
 int native_luna_volume_cached(const NativeLunaVolume *lv);
 bool native_luna_volume_available(const NativeLunaVolume *lv);
 
-/* Count of bus replies parsed so far. Callers that must not act on a possibly stale
- * cache (e.g. the auto-raise baseline at streaming entry) record this value and wait
- * for it to move — the cache is only trusted once a reply arrived AFTER the record. */
+/* Record reply_seq and wait for it to advance before trusting a new baseline. */
 unsigned native_luna_volume_reply_seq(const NativeLunaVolume *lv);
 
 /* Pure reply parser (unit-tested): extracts "volume" and "muteStatus" from a Luna JSON

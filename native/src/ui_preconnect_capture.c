@@ -5,7 +5,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_ui_capture, cLogLevelInfo, cLogFlags_Default, "ui.capture", NULL);
+clog_define(g_native_log_ui_capture, cLogLevelInfo, "ui.capture");
 
 bool native_preconnect_ui_get_capture_values(NativePreconnectUi *ui,
                                              NativeSettings *settings) {
@@ -132,8 +132,10 @@ void ui_capture_save_clicked(lv_event_t *event) {
 }
 
 void ui_capture_cancel_clicked(lv_event_t *event) {
-    NativePreconnectUi *ui =
-        (NativePreconnectUi *)lv_event_get_user_data(event);
+    ui_cancel_capture_settings((NativePreconnectUi *)lv_event_get_user_data(event));
+}
+
+void ui_cancel_capture_settings(NativePreconnectUi *ui) {
     if (!ui || ui->capture_save_pending) {
         return;
     }

@@ -7,7 +7,7 @@
 #include "backend_ndl_api.h"
 #include "media_ndl_internal.h"
 
-/* Exercises the gnomecast video adapter over the real backend_ndl state machine with a scripted
+/* Exercises the lgnome video adapter over the real backend_ndl state machine with a scripted
  * fake NDL API. The media adapter is NOT linked: the test provides its own NativeMedia
  * and native_media_ndl_backend() double. */
 

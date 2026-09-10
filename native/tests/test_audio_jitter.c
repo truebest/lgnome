@@ -3,7 +3,7 @@
 #include <assert.h>
 #include <stdint.h>
 
-static NativeAudioJitterUpdate update(NativeAudioJitterController *controller, uint64_t now_ms, uint32_t timestamp_ms,
+static NativeAudioJitterUpdate update(NativeAudioJitterController *controller, uint32_t now_ms, uint32_t timestamp_ms,
                                       unsigned underruns, uint32_t target_ms) {
     return native_audio_jitter_update(controller, 960u, 48000u, timestamp_ms, now_ms, underruns, target_ms);
 }
@@ -21,7 +21,8 @@ static void test_growth_decay_and_talkspurt(void) {
     assert(result.target_action == NATIVE_AUDIO_JITTER_TARGET_UNCHANGED);
     result = update(&controller, 330u, 80u, 0u, 60u);
     assert(result.target_action == NATIVE_AUDIO_JITTER_TARGET_RAISE);
-    assert(result.target_delay_ms == NATIVE_AUDIO_JITTER_TARGET_MAX_MS);
+    /* 230 ms late against a 20 ms step, plus the headroom. */
+    assert(result.target_delay_ms == 230u);
 
     result = update(&controller, 5350u, 100u, 0u, result.target_delay_ms);
     assert(result.target_action == NATIVE_AUDIO_JITTER_TARGET_SET);
@@ -41,7 +42,7 @@ static void test_quantile_bucket_clamp_and_expiry(void) {
     native_audio_jitter_reset(&controller, 0u, 0u);
     (void)update(&controller, 20u, 20u, 0u, 60u);
 
-    uint64_t now_ms = 20u;
+    uint32_t now_ms = 20u;
     uint32_t timestamp_ms = 20u;
     NativeAudioJitterUpdate result = {0};
     for (unsigned i = 0; i < 18u; i++) {
@@ -97,9 +98,36 @@ static void test_decay_and_underrun_holdoff(void) {
     assert(result.target_delay_ms == 90u);
 }
 
+static void test_history_and_decay_are_independent_of_clock_wrap(void) {
+    NativeAudioJitterController reference, wrapped;
+    uint32_t now = 1000u;
+    const uint32_t offset = UINT32_MAX - 1999u;
+    native_audio_jitter_reset(&reference, now, 0);
+    native_audio_jitter_reset(&wrapped, now + offset, 0);
+    uint32_t target = 100u;
+    uint32_t timestamp = 100u;
+    for (unsigned i = 0; i < 1600; i++) {
+        /* Include bursts, history expiry, target decay and a long silence.
+         * At i=49 the shifted clock hits exactly zero. */
+        now += i == 100 ? 170u : i == 1200 ? 501u : 20u;
+        timestamp += 20u;
+        NativeAudioJitterUpdate a = update(&reference, now, timestamp, 0, target);
+        NativeAudioJitterUpdate b = update(&wrapped, now + offset, timestamp, 0, target);
+        assert(a.target_delay_ms == b.target_delay_ms);
+        assert(a.target_action == b.target_action);
+        assert(a.jitter_p95_ms == b.jitter_p95_ms);
+        assert(a.talkspurt == b.talkspurt);
+        assert(reference.count == wrapped.count);
+        assert(reference.last_arrival_ms + offset == wrapped.last_arrival_ms);
+        assert(reference.last_target_change_ms + offset == wrapped.last_target_change_ms);
+        target = a.target_delay_ms;
+    }
+}
+
 int main(void) {
     test_growth_decay_and_talkspurt();
     test_quantile_bucket_clamp_and_expiry();
     test_decay_and_underrun_holdoff();
+    test_history_and_decay_are_independent_of_clock_wrap();
     return 0;
 }

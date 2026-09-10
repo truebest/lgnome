@@ -4,10 +4,6 @@
 
 #include "ui_fonts.h"
 
-#include "clog.h"
-
-clog_define(g_native_log_ui_widgets, cLogLevelInfo, cLogFlags_Default, "ui.widgets", NULL);
-
 lv_obj_t *native_ui_preconnect_make_label(lv_obj_t *parent, const char *text, lv_style_t *style) {
     lv_obj_t *label = lv_label_create(parent);
     lv_obj_remove_style_all(label);
@@ -157,8 +153,4 @@ lv_obj_t *native_ui_preconnect_make_input(NativePreconnectUi *ui, lv_obj_t *pare
     lv_obj_add_event_cb(input, native_ui_preconnect_input_changed, LV_EVENT_VALUE_CHANGED, ui);
     lv_obj_add_event_cb(input, native_ui_preconnect_form_key_event, UI_FORM_KEY_EVENT, ui);
     return input;
-}
-
-void native_ui_preconnect_widgets_ready(void) {
-    clog(cLogLevelTrace, "pre-connect widgets ready");
 }

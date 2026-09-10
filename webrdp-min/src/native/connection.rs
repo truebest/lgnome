@@ -1,6 +1,6 @@
 //! TCP/TLS/CredSSP bootstrap and RDP connector construction.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 
@@ -13,8 +13,10 @@ use ironrdp_displaycontrol::client::DisplayControlClient;
 use ironrdp_dvc::DrdynvcClient;
 use ironrdp_egfx::client::GraphicsPipelineClient;
 use ironrdp_pdu::gcc::KeyboardType;
+use ironrdp_pdu::nego::SecurityProtocol;
 use ironrdp_pdu::rdp::capability_sets::MajorPlatformType;
 use ironrdp_pdu::rdp::client_info::{PerformanceFlags, TimezoneInfo};
+use ironrdp_rdpdr::{NoopRdpdrBackend, Rdpdr};
 use x509_cert::der::Decode as _;
 
 use super::egfx::NativeGfxHandler;
@@ -28,6 +30,10 @@ use crate::credssp::CredsspClient;
 
 impl NativeWorker {
     pub(super) fn connect_tcp(&mut self) -> Result<Option<TcpStream>, NativeError> {
+        tracing::info!(target: LOG_TARGET_TRANSPORT,
+            requested_width = self.config.width, requested_height = self.config.height,
+            local_pts_fps = self.config.fps,
+            "RDP request: TCP only (UDP unsupported), TLS/CredSSP enabled; local FPS sets PTS cadence, not server capture rate");
         let addrs: Vec<SocketAddr> = (self.config.host.as_str(), self.config.port)
             .to_socket_addrs()
             .map_err(|e| {
@@ -90,7 +96,14 @@ impl NativeWorker {
             },
             enable_tls: true,
             enable_credssp: true,
-            keyboard_type: KeyboardType::IbmEnhanced,
+            enable_standard_rdp_security: false,
+            connection_type: ironrdp_pdu::gcc::ConnectionType::Lan,
+            monitor_layout: None,
+            alternate_shell: String::new(),
+            work_dir: String::new(),
+            remote_application_mode: false,
+            rail_support_level: ironrdp_pdu::rdp::capability_sets::RailSupportLevel::empty(),
+            keyboard_type: KeyboardType::IBM_ENHANCED,
             keyboard_subtype: 0,
             keyboard_layout: 0,
             keyboard_functional_keys_count: 12,
@@ -102,7 +115,7 @@ impl NativeWorker {
             },
             bitmap: None,
             client_build: 0,
-            client_name: "gnomecast-native".to_owned(),
+            client_name: "lgnome-native".to_owned(),
             client_dir: "C:\\Windows\\System32\\mstscax.dll".to_owned(),
             platform: MajorPlatformType::UNSPECIFIED,
             compression_type: None,
@@ -118,32 +131,33 @@ impl NativeWorker {
             request_data: None,
             pointer_software_rendering: false,
             multitransport_flags: None,
+            support_dyn_vc_gfx_protocol: true,
             performance_flags: PerformanceFlags::ENABLE_FONT_SMOOTHING
                 | PerformanceFlags::ENABLE_DESKTOP_COMPOSITION,
             desktop_scale_factor: 0,
             hardware_id: None,
             license_cache: None,
             timezone_info: TimezoneInfo::default(),
-            alternate_shell: String::new(),
-            work_dir: String::new(),
         };
 
         let mut connector = ClientConnector::new(config, client_addr);
         let mut drdynvc = DrdynvcClient::new()
-            .with_dynamic_channel(GraphicsPipelineClient::new(
-                Box::new(NativeGfxHandler {
-                    shared: Arc::clone(&self.gfx),
-                }),
-                None,
-            ))
-            .with_dynamic_channel(rdpsnd::RdpsndDvcHandler::new(
-                self.callbacks,
-                self.config.prefer_pcm_audio,
-            ))
+            .with_dynamic_channel(
+                GraphicsPipelineClient::new(
+                    Box::new(NativeGfxHandler::new(Arc::clone(&self.gfx))),
+                    None,
+                )
+                .with_suspended_frame_acknowledgments(),
+            )
+            .with_listener(rdpsnd::RdpsndDvcFactory {
+                callbacks: self.callbacks,
+                prefer_pcm: self.config.prefer_pcm_audio,
+            })
             .with_typed_listener::<DisplayControlClient, _>(rdpedisp::DisplayControlFactory {
                 width: self.config.width,
                 height: self.config.height,
                 sink: self.callbacks,
+                gfx: Arc::clone(&self.gfx),
             });
         if self.config.enable_camera {
             drdynvc = drdynvc
@@ -157,6 +171,12 @@ impl NativeWorker {
                 .with_dynamic_channel(rdpeai::AudioInputHandler::new(self.audio_input.clone()));
         }
         connector.attach_static_channel(drdynvc);
+        // No devices are announced: Windows hosts only enable audio redirection for
+        // clients that offer rdpdr, and never open AUDIO_PLAYBACK_DVC without it.
+        connector.attach_static_channel(Rdpdr::new(
+            Box::new(NoopRdpdrBackend),
+            "gnomecast-native".to_owned(),
+        ));
         connector
     }
 
@@ -174,7 +194,7 @@ impl NativeWorker {
         let confirm = self.read_connector_pdu(tcp, connector, "X.224 negotiation response")?;
         let mut out = WriteBuf::new();
         connector
-            .step(&confirm, &mut out)
+            .step(&confirm, self.last_read_at, &mut out)
             .map_err(|e| NativeError::protocol(format!("X.224 negotiation response: {e}")))?;
         if !out.filled().is_empty() {
             self.write_all(tcp, out.filled(), "X.224 negotiation follow-up")?;
@@ -220,6 +240,10 @@ impl NativeWorker {
         tls.flush()
             .map_err(|e| NativeError::network(format!("TLS flush after handshake: {e}")))?;
 
+        tracing::info!(target: LOG_TARGET_TRANSPORT,
+            version = ?tls.conn.protocol_version(),
+            cipher = ?tls.conn.negotiated_cipher_suite().map(|suite| suite.suite()),
+            "TLS handshake complete (server certificate verification disabled)");
         let cert = tls
             .conn
             .peer_certificates()
@@ -228,8 +252,8 @@ impl NativeWorker {
         let parsed = x509_cert::Certificate::from_der(cert.as_ref())
             .map_err(|e| NativeError::network(format!("TLS peer certificate parse: {e}")))?;
         let public_key = parsed
-            .tbs_certificate
-            .subject_public_key_info
+            .tbs_certificate()
+            .subject_public_key_info()
             .subject_public_key
             .as_bytes()
             .ok_or_else(|| NativeError::network("TLS subject public key is not byte-aligned"))?
@@ -266,16 +290,52 @@ impl NativeWorker {
                 .map_err(|e| NativeError::protocol(format!("CredSSP: {e}")))?;
             self.write_all(tls, &next, "CredSSP response")?;
             if done {
+                let selected_protocol = match connector.state {
+                    ClientConnectorState::Credssp { selected_protocol } => selected_protocol,
+                    _ => SecurityProtocol::empty(),
+                };
                 connector.mark_credssp_as_done();
+                if selected_protocol.contains(SecurityProtocol::HYBRID_EX) {
+                    self.read_early_user_auth_result(tls)?;
+                }
                 return Ok(());
             }
         }
         Ok(())
     }
 
-    pub(super) fn pump_connector(
+    /// Consume the Early User Authorization Result PDU that a HYBRID_EX server
+    /// sends after CredSSP ([MS-RDPBCGR] 2.2.10.2).
+    fn read_early_user_auth_result(&mut self, tls: &mut TlsStream) -> Result<(), NativeError> {
+        const RESULT_LEN: usize = 4;
+        const AUTHZ_SUCCESS: u32 = 0;
+        const AUTHZ_ACCESS_DENIED: u32 = 5;
+
+        while self.inbuf.len() < RESULT_LEN {
+            if self.drain_commands() {
+                return Err(NativeError::network(
+                    "early user authorization result: stopped",
+                ));
+            }
+            self.read_more(tls, "early user authorization result")?;
+        }
+
+        let bytes: Vec<u8> = self.inbuf.drain(..RESULT_LEN).collect();
+        let result = u32::from_le_bytes(bytes.try_into().expect("drained RESULT_LEN bytes"));
+        match result {
+            AUTHZ_SUCCESS => Ok(()),
+            AUTHZ_ACCESS_DENIED => Err(NativeError::protocol(
+                "the server authenticated the credentials but denied this account remote access",
+            )),
+            other => Err(NativeError::protocol(format!(
+                "unexpected early user authorization result {other:#x}"
+            ))),
+        }
+    }
+
+    pub(super) fn pump_connector<T: Read + Write>(
         &mut self,
-        tls: &mut TlsStream,
+        tls: &mut T,
         mut connector: ClientConnector,
     ) -> Result<ConnectionResult, NativeError> {
         loop {
@@ -290,12 +350,12 @@ impl NativeWorker {
             if connector.next_pdu_hint().is_some() {
                 let pdu = self.read_connector_pdu(tls, &connector, "connector input")?;
                 connector
-                    .step(&pdu, &mut out)
-                    .map_err(|e| NativeError::protocol(format!("connector step: {e}")))?;
+                    .step(&pdu, self.last_read_at, &mut out)
+                    .map_err(|e| NativeError::connector(e))?;
             } else {
                 connector
                     .step_no_input(&mut out)
-                    .map_err(|e| NativeError::protocol(format!("connector step_no_input: {e}")))?;
+                    .map_err(|e| NativeError::connector(e))?;
             }
             if !out.filled().is_empty() {
                 self.write_all(tls, out.filled(), "connector output")?;

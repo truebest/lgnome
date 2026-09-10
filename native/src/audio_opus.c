@@ -3,15 +3,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-#ifdef HELLOLG_WITH_OPUS
+#ifdef LGNOME_WITH_OPUS
 #include <opus.h>
 #endif
 
 #include "clog.h"
 
-clog_define(g_native_log_audio, cLogLevelInfo, cLogFlags_Default, "audio.opus", NULL);
+clog_define(g_native_log_audio, cLogLevelInfo, "audio.opus");
 
-#ifdef HELLOLG_WITH_OPUS
+#ifdef LGNOME_WITH_OPUS
 
 /* 120ms at 48kHz — the largest frame an Opus packet may carry (MS-RDPEA/grd use 20ms,
  * but decode defensively). */
@@ -74,7 +74,7 @@ void native_opus_decoder_close(NativeOpusDecoder *decoder) {
     free(decoder);
 }
 
-#else /* !HELLOLG_WITH_OPUS */
+#else /* !LGNOME_WITH_OPUS */
 
 NativeOpusDecoder *native_opus_decoder_open(uint32_t sample_rate, uint16_t channels) {
     (void)sample_rate;

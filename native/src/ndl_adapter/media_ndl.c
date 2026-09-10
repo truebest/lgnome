@@ -7,25 +7,19 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_media, cLogLevelInfo, cLogFlags_Default, "media.ndl", NULL);
+clog_define(g_native_log_media, cLogLevelInfo, "media.ndl");
 
-#define GNOMECAST_NDL_FALLBACK_APP_ID "com.truebest.gnomecast.native"
+#define LGNOME_NDL_FALLBACK_APP_ID "com.truebest.lgnome.native"
 
+#ifdef LGNOME_WITH_NDL
 struct NativeMedia {
-    uint16_t viewport_width;
-    uint16_t viewport_height;
-#ifdef HELLOLG_WITH_NDL
     BackendNdl *backend;
     bool has_video;
     BackendNdlVideoInfo video;
     bool has_audio;
     BackendNdlAudioInfo audio;
-#else
-    int unused;
-#endif
 };
 
-#ifdef HELLOLG_WITH_NDL
 static void native_media_ndl_log(void *userdata, BackendNdlLogLevel level, const char *message) {
     (void)userdata;
     cLogLevel mapped = cLogLevelInfo;
@@ -65,7 +59,7 @@ static BackendNdlLogLevel native_media_ndl_min_level(void) {
     return BACKEND_NDL_LOG_OFF;
 }
 
-#ifdef HELLOLG_NDL_ADAPTER_TESTING
+#ifdef LGNOME_NDL_ADAPTER_TESTING
 BackendNdlLogLevel native_media_ndl_test_min_level(void) {
     return native_media_ndl_min_level();
 }
@@ -80,11 +74,8 @@ static BackendNdlResult native_media_ndl_apply_tracks(NativeMedia *media) {
 }
 #endif
 
-NativeMedia *native_media_open(uint16_t viewport_width, uint16_t viewport_height,
-                               const char *webos_sdk_version) {
-#ifndef HELLOLG_WITH_NDL
-    (void)viewport_width;
-    (void)viewport_height;
+NativeMedia *native_media_open(const char *webos_sdk_version) {
+#ifndef LGNOME_WITH_NDL
     (void)webos_sdk_version;
     clog(cLogLevelError, "NDL backend is not linked; hardware media unavailable");
     return NULL;
@@ -93,13 +84,11 @@ NativeMedia *native_media_open(uint16_t viewport_width, uint16_t viewport_height
     if (!media) {
         return NULL;
     }
-    media->viewport_width = viewport_width;
-    media->viewport_height = viewport_height;
 
     BackendNdlConfig config;
     backend_ndl_config_defaults(&config);
     const char *app_id = getenv("APPID");
-    config.app_id = app_id && app_id[0] ? app_id : GNOMECAST_NDL_FALLBACK_APP_ID;
+    config.app_id = app_id && app_id[0] ? app_id : LGNOME_NDL_FALLBACK_APP_ID;
     config.webos_sdk_version = webos_sdk_version;
     config.log_fn = native_media_ndl_log;
     config.minimum_log_level = native_media_ndl_min_level();
@@ -112,9 +101,8 @@ NativeMedia *native_media_open(uint16_t viewport_width, uint16_t viewport_height
         free(media);
         return NULL;
     }
-    clog(cLogLevelNotice, "NDL DirectMedia backend ready (profile=%s viewport=%ux%u)",
-         backend_ndl_abi_profile_name(backend_ndl_get_abi_profile(media->backend)),
-         (unsigned)viewport_width, (unsigned)viewport_height);
+    clog(cLogLevelNotice, "NDL DirectMedia backend ready (profile=%s)",
+         backend_ndl_abi_profile_name(backend_ndl_get_abi_profile(media->backend)));
     return media;
 #endif
 }
@@ -123,37 +111,20 @@ void native_media_close(NativeMedia *media) {
     if (!media) {
         return;
     }
-#ifdef HELLOLG_WITH_NDL
+#ifdef LGNOME_WITH_NDL
     backend_ndl_close(media->backend);
 #endif
     free(media);
 }
 
 void native_media_emergency_release(void) {
-#ifdef HELLOLG_WITH_NDL
+#ifdef LGNOME_WITH_NDL
     (void)backend_ndl_emergency_release();
 #endif
 }
 
-void native_media_set_viewport(NativeMedia *media, uint16_t viewport_width, uint16_t viewport_height) {
-    if (!media || viewport_width == 0 || viewport_height == 0) {
-        return;
-    }
-    if (media->viewport_width == viewport_width && media->viewport_height == viewport_height) {
-        return;
-    }
-    media->viewport_width = viewport_width;
-    media->viewport_height = viewport_height;
-#ifdef HELLOLG_WITH_NDL
-    /* No hardware call: the NDL video plane scales to the panel on its own, and the
-     * transparent SDL window above it handles UI-space scaling. Logged so viewport
-     * churn stays visible next to reload events. */
-    clog(cLogLevelDebug, "viewport=%ux%u", (unsigned)viewport_width, (unsigned)viewport_height);
-#endif
-}
-
 BackendNdl *native_media_ndl_backend(NativeMedia *media) {
-#ifndef HELLOLG_WITH_NDL
+#ifndef LGNOME_WITH_NDL
     (void)media;
     return NULL;
 #else
@@ -163,7 +134,7 @@ BackendNdl *native_media_ndl_backend(NativeMedia *media) {
 
 BackendNdlResult native_media_ndl_configure_video(NativeMedia *media,
                                                    const BackendNdlVideoInfo *info) {
-#ifndef HELLOLG_WITH_NDL
+#ifndef LGNOME_WITH_NDL
     (void)media;
     (void)info;
     return BACKEND_NDL_UNAVAILABLE;
@@ -186,7 +157,7 @@ BackendNdlResult native_media_ndl_configure_video(NativeMedia *media,
 
 BackendNdlResult native_media_ndl_configure_audio(NativeMedia *media,
                                                    const BackendNdlAudioInfo *info) {
-#ifndef HELLOLG_WITH_NDL
+#ifndef LGNOME_WITH_NDL
     (void)media;
     (void)info;
     return BACKEND_NDL_UNAVAILABLE;
@@ -208,7 +179,7 @@ BackendNdlResult native_media_ndl_configure_audio(NativeMedia *media,
 }
 
 BackendNdlResult native_media_ndl_clear_video(NativeMedia *media) {
-#ifndef HELLOLG_WITH_NDL
+#ifndef LGNOME_WITH_NDL
     (void)media;
     return BACKEND_NDL_UNAVAILABLE;
 #else
@@ -229,7 +200,7 @@ BackendNdlResult native_media_ndl_clear_video(NativeMedia *media) {
 }
 
 BackendNdlResult native_media_ndl_clear_audio(NativeMedia *media) {
-#ifndef HELLOLG_WITH_NDL
+#ifndef LGNOME_WITH_NDL
     (void)media;
     return BACKEND_NDL_UNAVAILABLE;
 #else

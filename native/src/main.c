@@ -33,7 +33,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_config, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_config, cLogLevelInfo, "native");
 
 int main(int argc, char **argv) {
     native_prepare_webos_logging();
@@ -52,7 +52,6 @@ int main(int argc, char **argv) {
         !native_config_apply_cli(&native_settings, argc, argv)) {
         return 2;
     }
-    native_config_apply_initial_desktop_hint(&native_settings);
 
     int sdl_result = native_prepare_sdl_runtime();
     if (sdl_result != 0) {
@@ -67,10 +66,9 @@ int main(int argc, char **argv) {
         native_shutdown_sdl_runtime();
         return 2;
     }
-    native_config_apply_initial_desktop_hint(&native_settings);
 
     native_config_log_effective(&native_settings);
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
     if (!native_config_validate_runtime(&native_settings)) {
         native_shutdown_sdl_runtime();
         return 2;
@@ -130,8 +128,8 @@ int main(int argc, char **argv) {
         atomic_init(&slot->current_state, (int)RDP_STATE_IDLE);
         atomic_init(&slot->terminal_state, (int)RDP_STATE_IDLE);
         atomic_init(&slot->session_failed, false);
-        atomic_init(&slot->desktop_width, native_settings.width);
-        atomic_init(&slot->desktop_height, native_settings.height);
+        atomic_init(&slot->desktop_width, NATIVE_RDP_INITIAL_DESKTOP_WIDTH);
+        atomic_init(&slot->desktop_height, NATIVE_RDP_INITIAL_DESKTOP_HEIGHT);
         atomic_init(&slot->video_ok_frames, 0);
         atomic_init(&slot->audio_codec, 0u);
         atomic_init(&slot->audio_sample_rate, 0u);
@@ -189,12 +187,12 @@ int main(int argc, char **argv) {
     app.mixer_mute_mask = 0;
     app.mixer_solo_mask = 0;
     native_duck_retarget(&app);
-    const char *snapshot_force = getenv("HELLOLG_SNAPSHOT_FORCE");
+    const char *snapshot_force = getenv("LGNOME_SNAPSHOT_FORCE");
     app.snapshot_force = snapshot_force && snapshot_force[0] != '\0' && strcmp(snapshot_force, "0") != 0;
     if (app.snapshot_force) {
-        clog(cLogLevelInfo, "HELLOLG_SNAPSHOT_FORCE: IDR-snapshot backgrounding for every slot");
+        clog(cLogLevelInfo, "LGNOME_SNAPSHOT_FORCE: IDR-snapshot backgrounding for every slot");
     }
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
     app.indicator_slot = -1;
     app.system_volume_seen = -1;
     app.system_volume_baseline_seq = 0;
@@ -208,7 +206,7 @@ int main(int argc, char **argv) {
 #endif
     atomic_init(&app.running, true);
     atomic_init(&app.exit_code, 0);
-    native_input_init(&app.input, NULL, native_settings.width, native_settings.height);
+    native_input_init(&app.input, NULL, NATIVE_RDP_INITIAL_DESKTOP_WIDTH, NATIVE_RDP_INITIAL_DESKTOP_HEIGHT);
     /* System-volume bridge for the MASTER fader; harmless where luna-send-pub does not
      * exist (every call fails, the fader just stays dimmed). */
     if (!app.camera_preview) {
@@ -219,7 +217,7 @@ int main(int argc, char **argv) {
         native_luna_volume_refresh(&app.luna_volume);
     }
 
-#ifndef HELLOLG_TARGET_WEBOS
+#ifndef LGNOME_TARGET_WEBOS
     int startup_slot = app.debug_connect_slot >= 0 ? app.debug_connect_slot
                                                    : NATIVE_SESSION_SLOT_GREEN;
     atomic_store(&app.active_index, startup_slot);

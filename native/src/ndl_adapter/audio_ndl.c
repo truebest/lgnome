@@ -6,16 +6,16 @@
 
 #include "rdp_ffi.h"
 
-#ifdef HELLOLG_WITH_NDL
+#ifdef LGNOME_WITH_NDL
 #include "media_ndl_internal.h"
 #endif
 
 #include "clog.h"
 
-clog_define(g_native_log_audio, cLogLevelInfo, cLogFlags_Default, "audio.ndl", NULL);
+clog_define(g_native_log_audio, cLogLevelInfo, "audio.ndl");
 
 struct NativeAudio {
-#ifdef HELLOLG_WITH_NDL
+#ifdef LGNOME_WITH_NDL
     /* Borrowed from the caller; the track never closes either object. */
     NativeMedia *media;
     BackendNdl *backend;
@@ -31,7 +31,7 @@ struct NativeAudio {
 };
 
 NativeAudio *native_audio_open(NativeMedia *media, uint32_t codec, uint32_t sample_rate, uint16_t channels) {
-#ifndef HELLOLG_WITH_NDL
+#ifndef LGNOME_WITH_NDL
     (void)media;
     (void)codec;
     (void)sample_rate;
@@ -95,7 +95,7 @@ NativeAudio *native_audio_open(NativeMedia *media, uint32_t codec, uint32_t samp
 }
 
 NativeAudioResult native_audio_feed(NativeAudio *audio, const uint8_t *data, size_t len) {
-#ifndef HELLOLG_WITH_NDL
+#ifndef LGNOME_WITH_NDL
     (void)audio;
     (void)data;
     (void)len;
@@ -139,7 +139,7 @@ void native_audio_disable(NativeAudio *audio) {
     if (!audio) {
         return;
     }
-#ifdef HELLOLG_WITH_NDL
+#ifdef LGNOME_WITH_NDL
     if (!audio->disabled) {
         clog(cLogLevelNotice, "audio muted; keeping the shared media pipeline intact");
         audio->disabled = true;
@@ -151,7 +151,7 @@ void native_audio_close(NativeAudio *audio) {
     if (!audio) {
         return;
     }
-#ifdef HELLOLG_WITH_NDL
+#ifdef LGNOME_WITH_NDL
     /* The media adapter reloads the surviving video track atomically. */
     if (audio->media && audio->backend && audio->audio_opened) {
         (void)native_media_ndl_clear_audio(audio->media);

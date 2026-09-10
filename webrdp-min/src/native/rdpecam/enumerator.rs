@@ -1,7 +1,7 @@
 //! RDPECAM device enumerator dynamic-channel handler.
 
 use ironrdp_core::impl_as_any;
-use ironrdp_dvc::{DvcMessage, DvcProcessor};
+use ironrdp_dvc::{DvcClientProcessor, DvcMessage, DvcProcessor};
 use ironrdp_pdu::PduResult;
 
 use super::super::{RdpLogLevel, LOG_TARGET_CAMERA};
@@ -124,3 +124,5 @@ impl DvcProcessor for CameraEnumerator {
         }
     }
 }
+
+impl DvcClientProcessor for CameraEnumerator {}

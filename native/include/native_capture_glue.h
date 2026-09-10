@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_NATIVE_CAPTURE_GLUE_H
-#define GNOMECAST_NATIVE_CAPTURE_GLUE_H
+#ifndef LGNOME_NATIVE_CAPTURE_GLUE_H
+#define LGNOME_NATIVE_CAPTURE_GLUE_H
 
 /* Applies the current capture settings: restarts the shared workers only on a
  * device/format change, then re-publishes each slot's per-profile permission and

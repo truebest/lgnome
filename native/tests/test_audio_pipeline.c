@@ -16,16 +16,19 @@
 #include "audio_pipeline.h"
 
 typedef struct FakeClock {
-    uint64_t now_ms;
+    uint32_t now_ms;
 } FakeClock;
 
-static uint64_t fake_now(void *ctx) {
+static uint32_t initial_clock_ms;
+
+static uint32_t fake_now(void *ctx) {
     return ((FakeClock *)ctx)->now_ms;
 }
 
 static void setup(NativeAudioPipeline *pipeline, FakeClock *clock) {
     memset(pipeline, 0, sizeof(*pipeline));
     memset(clock, 0, sizeof(*clock));
+    clock->now_ms = initial_clock_ms;
     assert(native_audio_pipeline_init_with_clock(pipeline, fake_now, clock));
 }
 
@@ -135,6 +138,40 @@ static void deliver_regular_packet(NativeAudioPipeline *pipeline, FakeClock *clo
     assert(native_audio_pipeline_read_s16(pipeline, out, NATIVE_AUDIO_PIPELINE_BLOCK_FRAMES));
 }
 
+static void test_large_producer_blocks_raise_the_standing_target(void) {
+    NativeAudioPipeline pipeline;
+    FakeClock clock;
+    setup(&pipeline, &clock);
+    assert(native_audio_pipeline_set_source_format(&pipeline, 0, 48000, 2));
+
+    static int16_t block[8928 * 2];
+    fill_s16(block, 8928, 2, 500);
+    uint32_t timestamp = 1000;
+    for (int i = 0; i < 20; i++) {
+        clock.now_ms += 186;
+        timestamp += 186u;
+        assert(native_audio_pipeline_push(&pipeline, 0, block, 8928, timestamp) == 0);
+        int16_t out[NATIVE_AUDIO_PIPELINE_BLOCK_FRAMES * 2];
+        for (int read = 0; read < 18; read++) {
+            assert(native_audio_pipeline_read_s16(&pipeline, out, NATIVE_AUDIO_PIPELINE_BLOCK_FRAMES));
+        }
+    }
+    NativeAudioSourceStats stats;
+    assert(native_audio_pipeline_get_source_stats(&pipeline, 0, &stats));
+    assert(stats.target_delay_ms >= 186);
+
+    /* Small frames from another server keep the old floor: 600 steps is the same
+     * settling window the growth/decay test uses. */
+    setup(&pipeline, &clock);
+    assert(native_audio_pipeline_set_source_format(&pipeline, 0, 48000, 2));
+    timestamp = 1000;
+    for (int i = 0; i < 600; i++) {
+        deliver_regular_packet(&pipeline, &clock, &timestamp, 20, 960);
+    }
+    assert(native_audio_pipeline_get_source_stats(&pipeline, 0, &stats));
+    assert(stats.target_delay_ms == 40);
+}
+
 static void test_jitter_target_growth_and_decay(void) {
     NativeAudioPipeline pipeline;
     FakeClock clock;
@@ -152,13 +189,14 @@ static void test_jitter_target_growth_and_decay(void) {
     assert(native_audio_pipeline_get_source_stats(&pipeline, 0, &stats));
     assert(stats.target_delay_ms >= 60);
 
-    /* A 230 ms TCP/HOL stall against a 20 ms capture step is an immediate peak. */
+    /* A 230 ms TCP/HOL stall against a 20 ms capture step is an immediate peak: the
+     * variation plus the headroom, still under the ceiling. */
     deliver_regular_packet(&pipeline, &clock, &timestamp, 230, 960);
     assert(native_audio_pipeline_get_source_stats(&pipeline, 0, &stats));
-    assert(stats.target_delay_ms == 150);
+    assert(stats.target_delay_ms == 230);
 
     /* Stable delivery can only remove 10 ms per five seconds. */
-    for (int i = 0; i < 3000; i++) {
+    for (int i = 0; i < 5000; i++) {
         deliver_regular_packet(&pipeline, &clock, &timestamp, 20, 960);
     }
     assert(native_audio_pipeline_get_source_stats(&pipeline, 0, &stats));
@@ -190,7 +228,8 @@ static void test_timestamp_wrap_fallback_and_silence_reset(void) {
     clock.now_ms += 230;
     assert(native_audio_pipeline_push(&pipeline, 0, packet, 960, 20u) == 0);
     assert(native_audio_pipeline_get_source_stats(&pipeline, 0, &stats));
-    assert(stats.target_delay_ms == 150);
+    /* 210 ms of variation against the 20 ms step, plus the headroom. */
+    assert(stats.target_delay_ms == 230);
     clock.now_ms += 501;
     assert(native_audio_pipeline_push(&pipeline, 0, packet, 960, 40u) == 0);
     assert(native_audio_pipeline_get_source_stats(&pipeline, 0, &stats));
@@ -335,8 +374,9 @@ static void test_hard_trim_fades_and_recovers_sink_stall(void) {
         clock.now_ms += 10;
     }
 
-    /* Simulate audio arriving while the sink is blocked for 200 ms. */
+    /* Stall long enough to exceed the producer-cadence target. */
     push_constant(&pipeline, 0, 9600, 2, 10000, 300);
+    push_constant(&pipeline, 0, 19200, 2, 10000, 500);
     assert(native_audio_pipeline_read_s16(&pipeline, out, NATIVE_AUDIO_PIPELINE_BLOCK_FRAMES));
     assert(out[0] > 9000);
     assert(out[238 * 2] < 1000);
@@ -499,23 +539,28 @@ static void test_duck_attack_hold_release(void) {
     assert(native_audio_pipeline_get_duck_factor_q15(&pipeline) == NATIVE_AUDIO_DUCK_GAIN_Q15);
 
     /* Silence the background: the duck holds, then releases on a timed ramp. */
-    uint64_t t_close = clock.now_ms;
+    uint32_t t_close = clock.now_ms;
     native_audio_pipeline_close_source(&pipeline, 1);
-    while (clock.now_ms < t_close + 500) {
+    while ((uint32_t)(clock.now_ms - t_close) < 500u) {
         duck_step(&pipeline, &clock, 20000, -1);
     }
     fg = source_peak(&pipeline, 0);
     assert(fg > 4800 && fg < 5300); /* inside the hold window */
-    while (clock.now_ms < t_close + 800) {
+    while ((uint32_t)(clock.now_ms - t_close) < 800u) {
         duck_step(&pipeline, &clock, 20000, -1);
     }
     fg = source_peak(&pipeline, 0);
     assert(fg > 11000 && fg < 14500); /* mid-release */
-    while (clock.now_ms < t_close + 1100) {
+    while ((uint32_t)(clock.now_ms - t_close) < 1100u) {
         duck_step(&pipeline, &clock, 20000, -1);
     }
     fg = source_peak(&pipeline, 0);
     assert(fg > 19000 && fg < 20500); /* fully released */
+    assert(native_audio_pipeline_get_duck_factor_q15(&pipeline) == NATIVE_AUDIO_PIPELINE_GAIN_UNITY_Q15);
+    /* Revisit the old hold timestamp after a full clock cycle. An expired
+     * hold must not revive while the background source remains closed. */
+    clock.now_ms = t_close + 20u;
+    duck_step(&pipeline, &clock, 20000, -1);
     assert(native_audio_pipeline_get_duck_factor_q15(&pipeline) == NATIVE_AUDIO_PIPELINE_GAIN_UNITY_Q15);
     native_audio_pipeline_destroy(&pipeline);
 }
@@ -534,8 +579,8 @@ static void test_duck_composes_with_user_fader_and_disable(void) {
     /* Disabling (empty trigger mask) releases to the fader level even while the
      * background stays loud. */
     native_audio_pipeline_set_duck_foreground(&pipeline, 0, 0u);
-    uint64_t t_disable = clock.now_ms;
-    while (clock.now_ms < t_disable + 500) {
+    uint32_t t_disable = clock.now_ms;
+    while ((uint32_t)(clock.now_ms - t_disable) < 500u) {
         duck_step(&pipeline, &clock, 20000, 20000);
     }
     fg = source_peak(&pipeline, 0);
@@ -621,16 +666,14 @@ static void test_duck_hold_does_not_transfer_on_switch(void) {
     }
     assert(source_peak(&pipeline, 0) < 5300); /* duck engaged by loud source 1 */
 
-    /* Mid-hold switch to source 1 with a mask whose only trigger (source 2) is silent:
-     * the old hold must NOT keep the new foreground attenuated — the release starts
-     * immediately, so well before the old hold would have expired the level is back. */
+    /* The old duck hold must not carry over to a silent trigger set. */
     native_audio_pipeline_set_duck_foreground(&pipeline, 1, 1u << 2);
-    uint64_t t_switch = clock.now_ms;
-    while (clock.now_ms < t_switch + 250) {
+    uint32_t t_switch = clock.now_ms;
+    while ((uint32_t)(clock.now_ms - t_switch) < 250u) {
         duck_step(&pipeline, &clock, 20000, 20000);
     }
     assert(source_peak(&pipeline, 1) > 10000); /* mid-release already; a leaked hold would pin ~5000 */
-    while (clock.now_ms < t_switch + 500) {
+    while ((uint32_t)(clock.now_ms - t_switch) < 500u) {
         duck_step(&pipeline, &clock, 20000, 20000);
     }
     int32_t recovered = source_peak(&pipeline, 1);
@@ -713,8 +756,8 @@ static void test_muted_background_cannot_trigger_duck(void) {
     /* Muting the noisy background releases the duck (hold + release) and, muted, it can
      * no longer re-trigger it no matter how loud its producer pushes. */
     native_audio_pipeline_set_source_muted(&pipeline, 1, true);
-    uint64_t t_mute = clock.now_ms;
-    while (clock.now_ms < t_mute + 1150) {
+    uint32_t t_mute = clock.now_ms;
+    while ((uint32_t)(clock.now_ms - t_mute) < 1150u) {
         duck_step(&pipeline, &clock, 20000, 20000);
     }
     assert(source_peak(&pipeline, 0) > 19000);
@@ -741,8 +784,8 @@ static void test_solo_cut_background_cannot_trigger_duck(void) {
 
     /* Soloing the foreground cuts the background, which releases the duck for good. */
     native_audio_pipeline_set_solo_mask(&pipeline, 1u << 0);
-    uint64_t t_solo = clock.now_ms;
-    while (clock.now_ms < t_solo + 1150) {
+    uint32_t t_solo = clock.now_ms;
+    while ((uint32_t)(clock.now_ms - t_solo) < 1150u) {
         duck_step(&pipeline, &clock, 20000, 20000);
     }
     assert(source_peak(&pipeline, 0) > 19000);
@@ -758,9 +801,6 @@ static void test_render_contract_smoke(void) {
     assert(native_audio_pipeline_set_source_format(&pipeline, 0, 48000, 2));
     push_constant(&pipeline, 0, 4800, 2, 1234, 100);
     float out[NATIVE_AUDIO_PIPELINE_BLOCK_FRAMES * 2];
-    /* This loop drives format application, rebuffer, drift updates and underrun from
-     * the callback-safe entry point. The implementation contains no allocator, logger,
-     * mutex or wait on this path; miniaudio's engine and voice caches were allocated by init. */
     for (int i = 0; i < 32; i++) {
         assert(native_audio_pipeline_read_f32(&pipeline, out, NATIVE_AUDIO_PIPELINE_BLOCK_FRAMES));
         clock.now_ms += 10;
@@ -793,10 +833,11 @@ static void test_pump_delivers_and_stops(void) {
     native_audio_pipeline_destroy(&pipeline);
 }
 
-int main(void) {
+static void test_with_fake_clock(void) {
     test_init_and_validation();
     test_mixed_rates_and_resampling_duration();
     test_jitter_target_growth_and_decay();
+    test_large_producer_blocks_raise_the_standing_target();
     test_timestamp_wrap_fallback_and_silence_reset();
     test_talkspurt_drops_pre_gap_frames();
     test_format_generation_rechecked_before_ring_read();
@@ -817,6 +858,14 @@ int main(void) {
     test_muted_background_cannot_trigger_duck();
     test_solo_cut_background_cannot_trigger_duck();
     test_render_contract_smoke();
+}
+
+int main(void) {
+    test_with_fake_clock();
+    /* Run the same audio/duck/meter expectations across monotonic wrap,
+     * including a render tick at exactly zero. */
+    initial_clock_ms = UINT32_MAX - 249u;
+    test_with_fake_clock();
     test_pump_delivers_and_stops();
     printf("test_audio_pipeline: all tests passed\n");
     return 0;

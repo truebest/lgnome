@@ -12,7 +12,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_audio_input_alsa, cLogLevelInfo, cLogFlags_Default, "audio.input.alsa", NULL);
+clog_define(g_native_log_audio_input_alsa, cLogLevelInfo, "audio.input.alsa");
 
 typedef struct snd_pcm_t snd_pcm_t;
 typedef long snd_pcm_sframes_t;
@@ -205,7 +205,7 @@ static bool audio_input_candidate_name(const char *stable_id,
     return stable_id_to_alsa_name(devices[index].stable_id, name, capacity);
 }
 
-#ifdef HELLOLG_AUDIO_INPUT_ALSA_TESTING
+#ifdef LGNOME_AUDIO_INPUT_ALSA_TESTING
 bool native_audio_input_candidate_name_for_test(const char *stable_id,
                                                 const NativeAudioInputDeviceInfo *devices,
                                                 size_t device_count, size_t index,

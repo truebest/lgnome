@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_CAPTURE_REDIRECT_H
-#define GNOMECAST_CAPTURE_REDIRECT_H
+#ifndef LGNOME_CAPTURE_REDIRECT_H
+#define LGNOME_CAPTURE_REDIRECT_H
 
 #include <stdbool.h>
 #include <stdint.h>

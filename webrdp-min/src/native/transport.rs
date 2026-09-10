@@ -12,6 +12,7 @@ use std::net::TcpStream;
 use std::time::Duration;
 
 use super::NativeError;
+use ironrdp_core::MonotonicInstant;
 
 pub(super) const IO_POLL_TIMEOUT: Duration = Duration::from_millis(10);
 pub(super) const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -19,6 +20,12 @@ pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The one owned TLS stream type every read/write path shares.
 pub(super) type TlsStream = rustls::StreamOwned<rustls::ClientConnection, TcpStream>;
+
+pub(super) fn monotonic_now() -> MonotonicInstant {
+    static EPOCH: std::sync::LazyLock<std::time::Instant> =
+        std::sync::LazyLock::new(std::time::Instant::now);
+    MonotonicInstant::from_millis(u64::try_from(EPOCH.elapsed().as_millis()).unwrap_or(u64::MAX))
+}
 
 pub(super) fn random_array<const N: usize>() -> Result<[u8; N], NativeError> {
     let mut a = [0u8; N];

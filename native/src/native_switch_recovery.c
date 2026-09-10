@@ -1,6 +1,6 @@
 /* Background stream recovery and IDR-snapshot preparation for slot switching.
  * SDL thread only; see native_switch.c for the coordinator. */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #include "native_switch_internal.h"
 
@@ -15,16 +15,9 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_switch_recovery, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_switch_recovery, cLogLevelInfo, "native");
 
-/* Sends `index` (the slot that owned the screen) to the background. A server that honors
- * keyframe requests is simply suppressed: switching back asks for a fresh IDR via the
- * Display Control layout resubmit. A refresh-ineffective server (grd <= 45, mirror mode)
- * emits its only IDR at connect time, so a plain suppress strands the slot behind an
- * unusable delta chain and switching back costs an ON-SCREEN reconnect. Instead,
- * reconnect it now — invisible behind the new active stream — and arm the AU snapshot:
- * on_video_au caches the fresh connect IDR and the switch tick suppresses the server
- * once it is in hand. Switching back then replays the cache instead of reconnecting. */
+/* Suppress background graphics, or reconnect off-screen to cache an IDR if refresh is ineffective. */
 
 void native_background_slot(App *app, int index) {
     NativeSessionSlot *slot = &app->sessions[index];
@@ -69,18 +62,8 @@ void native_background_slot(App *app, int index) {
     slot->suppressed = true;
 }
 
-/* Rebuilds the shared decoder's reference state for `target` from its cached connect
- * restart AU (SPS + PPS before IDR, plus raced deltas), feeding the raw AUs through
- * the regular ingest path (on_video_au)
- * exactly as if they had just arrived from the network — including the same-size in-band
- * decoder handover, so a matching resolution swaps with no pipeline reload. SDL thread;
- * the slot must be ACTIVE (owns the screen) and still suppressed, so a compliant server
- * has no AU in flight that could interleave with the replay (resume is only sent after
- * it). A stream that was still audible within the quiet window — the suppress tail of a
- * fast flip-back, or a server that ignores suppress altogether — is refused: its
- * in-flight AUs would race the replay and corrupt the reference chain, so the switch
- * takes the deterministic reconnect fallback instead.
- * Returns true when the decoder accepted the replay. */
+/* SDL thread: replay only while target is active, suppressed and quiet.
+ * Returns true if the decoder accepted the replay; resume output afterwards. */
 bool native_snapshot_replay(App *app, int target) {
     NativeSessionSlot *slot = &app->sessions[target];
     if (!atomic_load(&slot->snapshot_idr_ready)) {
@@ -98,10 +81,6 @@ bool native_snapshot_replay(App *app, int target) {
     }
     uint32_t since_last_au = native_monotonic_ms() - atomic_load(&slot->snapshot_last_au_ms);
     if (since_last_au < NATIVE_SNAPSHOT_QUIET_MS) {
-        /* Ready implies at least one AU was cached, so the stamp is valid. The normal
-         * suppress tail dies out within tens of ms of backgrounding, and a background
-         * period lasts far longer than the quiet window — this fires only for a
-         * flip-back racing the tail or a server that ignores TS_SUPPRESS_OUTPUT_PDU. */
         clog(cLogLevelDebug, "%s streamed %ums ago, may still have AUs in flight; skipping replay",
              native_session_slot_name(target), (unsigned)since_last_au);
         free(snap.buf);
@@ -126,11 +105,7 @@ bool native_snapshot_replay(App *app, int target) {
     return true;
 }
 
-/* Starts filling `target`'s AU snapshot so a deferred switch can complete without a
- * black reload window: the slot stays in the BACKGROUND (the current stream keeps the
- * screen) while a keyframe request — or, for a refresh-ineffective server, a hidden
- * reconnect — produces the IDR into the armed cache. The switch tick completes the
- * switch by replay once the cache is ready and the stream has gone quiet again. */
+/* Prepare the target snapshot in the background; switch after the cache becomes ready and quiet. */
 void native_prepare_pending_switch(App *app, int target) {
     NativeSessionSlot *slot = &app->sessions[target];
     if (slot->snapshot_pending) {
@@ -177,10 +152,6 @@ void native_prepare_pending_switch(App *app, int target) {
     slot->snapshot_deadline_ticks = 0;
     slot->suppressed = false;
     if (!reconnect) {
-        /* Resume output and ask for a keyframe; the IDR lands in the cache because the
-         * slot stays backgrounded. A server that yields none hits the no-AU deadline,
-         * which learns refresh_ineffective and reconnects — still behind the live
-         * stream. */
         rdp_set_suppress_output(slot->rdp, true);
         rdp_request_refresh(slot->rdp);
     }

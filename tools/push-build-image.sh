@@ -9,7 +9,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-image="${GNOMECAST_BUILD_IMAGE:-cubicattache/gnomecast-webos-build}"
+image="${LGNOME_BUILD_IMAGE:-cubicattache/gnomecast-webos-build}"
 tag="${1:-$(date +%Y%m%d)}"
 
 docker build -t "${image}:${tag}" -t "${image}:latest" "${repo_root}"

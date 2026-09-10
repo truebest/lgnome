@@ -25,7 +25,7 @@ static void capture_sink(const cLogEvent *event, void *context) {
 
 int main(void) {
     LogCapture capture = {0};
-    clog_set_sink(capture_sink, &capture);
+    clogx_test_set_sink(capture_sink, &capture);
     assert(clog_configure("*=off,rdp.rust=debug") == cLogConfigOK);
 
     assert(!native_rdp_log_is_enabled(RDP_LOG_TRACE));
@@ -65,7 +65,7 @@ int main(void) {
     assert(capture.level == cLogLevelError);
     assert(strstr(capture.message, "invalid Rust log level 99") != NULL);
 
-    clog_reset_sink();
+    clogx_test_set_sink(NULL, NULL);
     assert(clog_configure("") == cLogConfigOK);
     puts("PASS rdp-log");
     return 0;

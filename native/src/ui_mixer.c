@@ -1,6 +1,6 @@
 #include "ui_mixer.h"
 
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 #include <math.h>
 #include <stdlib.h>
 
@@ -14,7 +14,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_ui, cLogLevelInfo, cLogFlags_Default, "ui.mixer", NULL);
+clog_define(g_native_log_ui, cLogLevelInfo, "ui.mixer");
 
 int32_t native_ui_mixer_gain_db_to_q15(int gain_db) {
     static const int32_t table[] = {0,    46,   65,    92,    130,   184,   260,  368,  519,  734,  1036, 1464,
@@ -28,7 +28,7 @@ int32_t native_ui_mixer_gain_db_to_q15(int gain_db) {
     return table[(gain_db - NATIVE_MIXER_FADER_MIN_DB) / 3];
 }
 
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 static const char *ui_mixer_channel_labels[NATIVE_UI_MIXER_CHANNELS] = {"RED", "GREEN", "YELLOW", "BLUE", "MASTER"};
 
@@ -655,4 +655,4 @@ void native_ui_mixer_render(NativeUiMixer *mixer, const int32_t (*peaks)[2], con
     lv_refr_now(mixer->disp);
 }
 
-#endif /* HELLOLG_TARGET_WEBOS */
+#endif /* LGNOME_TARGET_WEBOS */

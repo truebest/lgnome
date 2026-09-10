@@ -1,8 +1,8 @@
-#ifndef GNOMECAST_NATIVE_SDL_EVENTS_H
-#define GNOMECAST_NATIVE_SDL_EVENTS_H
+#ifndef LGNOME_NATIVE_SDL_EVENTS_H
+#define LGNOME_NATIVE_SDL_EVENTS_H
 
 /* SDL event handling for the streaming screen (see native_sdl_events.c). */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #include <SDL.h>
 

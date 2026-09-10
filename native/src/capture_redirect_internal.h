@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_CAPTURE_REDIRECT_INTERNAL_H
-#define GNOMECAST_CAPTURE_REDIRECT_INTERNAL_H
+#ifndef LGNOME_CAPTURE_REDIRECT_INTERNAL_H
+#define LGNOME_CAPTURE_REDIRECT_INTERNAL_H
 
 /* Shared state between the capture-redirect lifecycle, camera/audio workers,
  * and the RDP protocol surface. Everything here is guarded by

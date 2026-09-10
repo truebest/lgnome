@@ -8,7 +8,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_ui_hub, cLogLevelInfo, cLogFlags_Default, "ui.hub", NULL);
+clog_define(g_native_log_ui_hub, cLogLevelInfo, "ui.hub");
 
 static const char *const UI_SLOT_NAMES[NATIVE_SETTINGS_MAX_SESSIONS] = {"Red", "Green", "Yellow", "Blue"};
 static const char *const UI_SLOT_NAMES_UPPER[NATIVE_SETTINGS_MAX_SESSIONS] = {"RED", "GREEN", "YELLOW", "BLUE"};
@@ -24,53 +24,6 @@ const char *ui_slot_display_name(const NativePreconnectUi *ui, int slot, char *f
     }
     (void)snprintf(fallback, fallback_cap, "%s", UI_SLOT_NAMES_UPPER[slot]);
     return fallback;
-}
-
-static const char *ui_state_text(NativePreconnectSessionState state) {
-    switch (state) {
-    case NATIVE_PRECONNECT_SESSION_OFFLINE:
-        return "Offline";
-    case NATIVE_PRECONNECT_SESSION_CONNECTING:
-        return "Connecting...";
-    case NATIVE_PRECONNECT_SESSION_CONNECTED:
-        return "Connected";
-    case NATIVE_PRECONNECT_SESSION_ERROR:
-        return "Connection failed";
-    case NATIVE_PRECONNECT_SESSION_NOT_SET_UP:
-    default:
-        return "Not set up";
-    }
-}
-
-const char *ui_badge_text(NativePreconnectSessionState state) {
-    switch (state) {
-    case NATIVE_PRECONNECT_SESSION_OFFLINE:
-        return "OFFLINE";
-    case NATIVE_PRECONNECT_SESSION_CONNECTING:
-        return "CONNECTING";
-    case NATIVE_PRECONNECT_SESSION_CONNECTED:
-        return "CONNECTED";
-    case NATIVE_PRECONNECT_SESSION_ERROR:
-        return "ERROR";
-    case NATIVE_PRECONNECT_SESSION_NOT_SET_UP:
-    default:
-        return "NOT SET UP";
-    }
-}
-
-static uint32_t ui_state_color(NativePreconnectSessionState state) {
-    switch (state) {
-    case NATIVE_PRECONNECT_SESSION_CONNECTED:
-        return 0x43d47e;
-    case NATIVE_PRECONNECT_SESSION_CONNECTING:
-        return 0xe8c15a;
-    case NATIVE_PRECONNECT_SESSION_ERROR:
-        return 0xe35d55;
-    case NATIVE_PRECONNECT_SESSION_OFFLINE:
-    case NATIVE_PRECONNECT_SESSION_NOT_SET_UP:
-    default:
-        return 0x8a909b;
-    }
 }
 
 static bool ui_audio_stream_text(const NativePreconnectUi *ui, int slot, char *text, size_t text_cap) {
@@ -142,14 +95,15 @@ void ui_update_hub(NativePreconnectUi *ui) {
     int selected = ui->selected_slot;
     const NativeSessionConfig *values = &ui->slot_values[selected];
     NativePreconnectSessionState state = ui->slot_states[selected];
+    NativeSessionStatus presentation = native_session_status(state, ui->slot_reasons[selected]);
     char fallback[32];
     const char *display_name = ui_slot_display_name(ui, selected, fallback, sizeof(fallback));
     lv_label_set_text(ui->hero_slot_label, UI_SLOT_NAMES_UPPER[selected]);
     lv_label_set_text(ui->hero_name_label, display_name);
-    lv_label_set_text(ui->hero_state_label, ui_state_text(state));
+    lv_label_set_text(ui->hero_state_label, presentation.title);
     lv_obj_set_style_bg_color(ui->hero_chip, lv_color_hex(native_ui_slot_rgb(selected)), 0);
     lv_obj_set_style_shadow_color(ui->hero_chip, lv_color_hex(native_ui_slot_rgb(selected)), 0);
-    uint32_t state_color = ui_state_color(state);
+    uint32_t state_color = presentation.color;
     lv_obj_set_style_bg_color(ui->hero_state_dot, lv_color_hex(state_color), 0);
     lv_obj_set_style_shadow_color(ui->hero_state_dot, lv_color_hex(state_color), 0);
     lv_obj_set_style_shadow_width(ui->hero_state_dot, 18, 0);
@@ -178,35 +132,28 @@ void ui_update_hub(NativePreconnectUi *ui) {
     } else {
         lv_obj_add_flag(ui->hero_audio_group, LV_OBJ_FLAG_HIDDEN);
     }
-    bool show_detail = ui->slot_details[selected][0] != '\0' && state == NATIVE_PRECONNECT_SESSION_ERROR;
+    bool show_detail = ui->slot_details[selected][0] != '\0' && native_ui_session_terminal(state);
     if (show_detail) {
         lv_label_set_text(ui->hero_detail_label, ui->slot_details[selected]);
+        lv_obj_set_style_bg_color(ui->hero_detail_panel, lv_color_hex(presentation.color), 0);
+        lv_obj_set_style_border_color(ui->hero_detail_panel, lv_color_hex(presentation.color), 0);
         lv_obj_clear_flag(ui->hero_detail_panel, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(ui->hero_detail_panel, LV_OBJ_FLAG_HIDDEN);
     }
 
-    const char *action = "Set up";
-    if (state == NATIVE_PRECONNECT_SESSION_CONNECTED) {
-        action = "Resume";
-    } else if (state == NATIVE_PRECONNECT_SESSION_CONNECTING) {
-        action = "Connecting...";
-    } else if (state == NATIVE_PRECONNECT_SESSION_OFFLINE) {
-        action = "Connect";
-    } else if (state == NATIVE_PRECONNECT_SESSION_ERROR) {
-        action = "Retry";
-    }
-    lv_label_set_text(ui->hero_action_label, action);
-    ui_set_disabled(ui->hero_action_btn, state == NATIVE_PRECONNECT_SESSION_CONNECTING);
-    ui_set_hidden(ui->hero_edit_btn, state == NATIVE_PRECONNECT_SESSION_NOT_SET_UP || state == NATIVE_PRECONNECT_SESSION_CONNECTING);
+    lv_label_set_text(ui->hero_action_label, presentation.action);
+    ui_set_disabled(ui->hero_action_btn, native_ui_session_connecting(state));
+    ui_set_hidden(ui->hero_edit_btn, state == NATIVE_PRECONNECT_SESSION_NOT_SET_UP || native_ui_session_connecting(state));
 
     for (int slot = 0; slot < NATIVE_SETTINGS_MAX_SESSIONS; slot++) {
         char card_fallback[32];
         const char *card_name = ui_slot_display_name(ui, slot, card_fallback, sizeof(card_fallback));
         NativePreconnectSessionState card_state = ui->slot_states[slot];
+        NativeSessionStatus card_status = native_session_status(card_state, ui->slot_reasons[slot]);
         lv_label_set_text(ui->card_name_labels[slot], card_name);
-        lv_label_set_text(ui->card_badge_labels[slot], ui_badge_text(card_state));
-        uint32_t badge_color = ui_state_color(card_state);
+        lv_label_set_text(ui->card_badge_labels[slot], card_status.badge);
+        uint32_t badge_color = card_status.color;
         lv_obj_set_style_bg_color(ui->card_badges[slot], lv_color_hex(badge_color), 0);
         lv_obj_set_style_bg_opa(ui->card_badges[slot], card_state == NATIVE_PRECONNECT_SESSION_NOT_SET_UP
                                                                   ? LV_OPA_TRANSP
@@ -330,6 +277,7 @@ void native_preconnect_ui_cancel_pending_navigation(NativePreconnectUi *ui) {
         ui->connecting = false;
         if (ui->requested_slot >= 0 && ui->requested_slot < NATIVE_SETTINGS_MAX_SESSIONS) {
             ui->slot_states[ui->requested_slot] = ui->requested_previous_state;
+            ui->slot_reasons[ui->requested_slot] = ui->requested_previous_reason;
             (void)snprintf(ui->slot_details[ui->requested_slot], UI_DETAIL_MAX, "%s",
                            ui->requested_previous_detail);
         }
@@ -497,13 +445,7 @@ void ui_hub_key_event(lv_event_t *event) {
         return;
     }
     uint32_t key = lv_event_get_key(event);
-    if (key == LV_KEY_ESC && !ui->setup_visible &&
-        !ui->capture_settings_visible && !ui->onboarding_visible) {
-        native_preconnect_ui_cancel_pending_navigation(ui);
-        ui->hub_close_requested = true;
-        ui->hub_closing = true;
-        lv_event_stop_processing(event);
-    } else if (ui->hub_closing || ui->connecting || ui_any_action_pending(ui) || ui_drawer_open(ui)) {
+    if (ui->hub_closing || ui->connecting || ui_any_action_pending(ui) || ui_drawer_open(ui)) {
         return;
     } else if (ui_hub_navigate(ui, lv_event_get_target(event), key)) {
         lv_event_stop_processing(event);

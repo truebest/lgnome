@@ -10,32 +10,22 @@ use std::sync::{Arc, Mutex};
 use super::LOG_TARGET_GRAPHICS;
 use ironrdp_egfx::client::{BitmapUpdate, GraphicsPipelineHandler};
 use ironrdp_egfx::pdu::{
-    CacheToSurfacePdu, CapabilitiesV81Flags, CapabilitiesV8Flags, CapabilitySet, Codec1Type,
-    GfxPdu, SolidFillPdu, SurfaceToSurfacePdu, WireToSurface2Pdu,
+    CacheToSurfacePdu, CapabilitiesV107Flags, CapabilitiesV81Flags, CapabilitiesV8Flags,
+    CapabilitySet, Codec1Type, GfxPdu, SolidFillPdu, SurfaceToSurfacePdu,
 };
 
 #[derive(Default)]
 pub(super) struct NativeGfxState {
-    pub(super) pending_video: Vec<NativeVideoUnit>,
+    pub(super) pending_video: Vec<Vec<u8>>,
     pub(super) pending_bitmap: Vec<NativeBitmapUnit>,
     pub(super) unsupported_graphics: Option<String>,
-    // Real graphics output size from the server's RDPGFX_RESET_GRAPHICS_PDU, which can
-    // differ from the negotiated MCS/GCC desktop size (e.g. a TV whose hardware decoder
-    // always runs at the panel's native resolution regardless of the requested session size).
-    // Applies uniformly to both the AVC420/H.264 and RemoteFX bitmap paths, so it is
-    // dispatched through the same on_desktop_size callback both codecs already rely on
-    // instead of being attached only to AVC420 access units.
+    // ResetGraphics dimensions, independent of the initial MCS/GCC desktop size.
     pub(super) graphics_width: u32,
     pub(super) graphics_height: u32,
     pub(super) graphics_size_pending: bool,
-    // Per-surface output origin from RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU. BitmapUpdate rectangles
-    // are surface-local, so this must be added before a bitmap update is queued, or updates on
-    // a surface mapped away from (0,0) land at the wrong desktop position.
+    // Add the mapped output origin to surface-local bitmap rectangles.
     pub(super) surface_origins: HashMap<u16, (u32, u32)>,
-}
-
-pub(super) struct NativeVideoUnit {
-    pub(super) data: Vec<u8>,
+    pub(super) avc444_aux_frames: u64,
 }
 
 pub(super) struct NativeBitmapUnit {
@@ -50,9 +40,89 @@ pub(super) struct NativeBitmapUnit {
 
 pub(super) struct NativeGfxHandler {
     pub(super) shared: Arc<Mutex<NativeGfxState>>,
+    undecodable_since_render: u32,
+    /// Session-wide log counter; successful renders must not reset the limiter.
+    undecodable_total: u32,
+    video_seen: bool,
+    bitmap_seen: bool,
+}
+
+const MAX_UNDECODABLE_UPDATES: u32 = 32;
+
+const UNDECODABLE_WARN_INTERVAL: u32 = 64;
+
+fn gfx_pdu_name(pdu: &GfxPdu) -> &'static str {
+    match pdu {
+        GfxPdu::WireToSurface1(_) => "WireToSurface1",
+        GfxPdu::WireToSurface2(_) => "WireToSurface2",
+        GfxPdu::DeleteEncodingContext(_) => "DeleteEncodingContext",
+        GfxPdu::SolidFill(_) => "SolidFill",
+        GfxPdu::SurfaceToSurface(_) => "SurfaceToSurface",
+        GfxPdu::SurfaceToCache(_) => "SurfaceToCache",
+        GfxPdu::CacheToSurface(_) => "CacheToSurface",
+        GfxPdu::EvictCacheEntry(_) => "EvictCacheEntry",
+        GfxPdu::CreateSurface(_) => "CreateSurface",
+        GfxPdu::DeleteSurface(_) => "DeleteSurface",
+        GfxPdu::StartFrame(_) => "StartFrame",
+        GfxPdu::EndFrame(_) => "EndFrame",
+        GfxPdu::FrameAcknowledge(_) => "FrameAcknowledge",
+        GfxPdu::ResetGraphics(_) => "ResetGraphics",
+        GfxPdu::MapSurfaceToOutput(_) => "MapSurfaceToOutput",
+        GfxPdu::CacheImportOffer(_) => "CacheImportOffer",
+        GfxPdu::CacheImportReply(_) => "CacheImportReply",
+        GfxPdu::CapabilitiesAdvertise(_) => "CapabilitiesAdvertise",
+        GfxPdu::CapabilitiesConfirm(_) => "CapabilitiesConfirm",
+        GfxPdu::MapSurfaceToWindow(_) => "MapSurfaceToWindow",
+        GfxPdu::QoeFrameAcknowledge(_) => "QoeFrameAcknowledge",
+        GfxPdu::MapSurfaceToScaledOutput(_) => "MapSurfaceToScaledOutput",
+        GfxPdu::MapSurfaceToScaledWindow(_) => "MapSurfaceToScaledWindow",
+        _ => "unknown",
+    }
 }
 
 impl NativeGfxHandler {
+    pub(super) fn new(shared: Arc<Mutex<NativeGfxState>>) -> Self {
+        Self {
+            shared,
+            undecodable_since_render: 0,
+            undecodable_total: 0,
+            video_seen: false,
+            bitmap_seen: false,
+        }
+    }
+
+    fn note_rendered_update(&mut self) {
+        self.undecodable_since_render = 0;
+    }
+
+    fn note_undecodable_update(&mut self, pdu: &GfxPdu) {
+        let codec = match pdu {
+            GfxPdu::WireToSurface1(wire) => format!("{:?}", wire.codec_id),
+            GfxPdu::WireToSurface2(_) => "RemoteFxProgressive".to_owned(),
+            _ => "n/a".to_owned(),
+        };
+        self.undecodable_since_render = self.undecodable_since_render.saturating_add(1);
+        self.undecodable_total = self.undecodable_total.saturating_add(1);
+        if self.undecodable_total == 1
+            || self
+                .undecodable_total
+                .is_multiple_of(UNDECODABLE_WARN_INTERVAL)
+        {
+            tracing::warn!(
+                target: LOG_TARGET_GRAPHICS,
+                pdu = gfx_pdu_name(pdu),
+                codec,
+                dropped = self.undecodable_total,
+                "dropping an EGFX update this client cannot decode"
+            );
+        }
+        if self.undecodable_since_render >= MAX_UNDECODABLE_UPDATES {
+            self.mark_unsupported_graphics(
+                "server sent only EGFX updates this client cannot decode",
+            );
+        }
+    }
+
     fn mark_unsupported_graphics(&self, detail: impl Into<String>) {
         if let Ok(mut shared) = self.shared.lock() {
             if shared.unsupported_graphics.is_none() {
@@ -64,19 +134,37 @@ impl NativeGfxHandler {
 
 impl GraphicsPipelineHandler for NativeGfxHandler {
     fn capabilities(&self) -> Vec<CapabilitySet> {
-        vec![
-            CapabilitySet::V8_1 {
-                flags: CapabilitiesV81Flags::AVC420_ENABLED | CapabilitiesV81Flags::SMALL_CACHE,
-            },
+        // AVC_THIN_CLIENT requests the YUV420 view; tested Windows hosts need V10 for H.264.
+        let caps = vec![
             CapabilitySet::V8 {
                 flags: CapabilitiesV8Flags::SMALL_CACHE,
             },
-        ]
+            CapabilitySet::V8_1 {
+                flags: CapabilitiesV81Flags::AVC420_ENABLED | CapabilitiesV81Flags::SMALL_CACHE,
+            },
+            CapabilitySet::V10_7 {
+                flags: CapabilitiesV107Flags::SMALL_CACHE | CapabilitiesV107Flags::AVC_THIN_CLIENT,
+            },
+        ];
+        tracing::info!(target: LOG_TARGET_GRAPHICS, offered = ?caps,
+            "EGFX offer: H.264 passthrough, native bitmap fallback, no full AVC444 presentation");
+        caps
     }
 
-    fn on_capabilities_confirmed(&mut self, _caps: &CapabilitySet) {}
+    fn on_capabilities_confirmed(&mut self, caps: &CapabilitySet) {
+        tracing::info!(
+            target: LOG_TARGET_GRAPHICS,
+            caps = ?caps,
+            "EGFX capabilities confirmed"
+        );
+    }
 
     fn on_reset_graphics(&mut self, width: u32, height: u32) {
+        // Log the first payload again after each graphics reset, not every frame.
+        tracing::info!(target: LOG_TARGET_GRAPHICS, width, height, "EGFX ResetGraphics received");
+        self.video_seen = false;
+        self.bitmap_seen = false;
+        self.undecodable_since_render = 0;
         if let Ok(mut shared) = self.shared.lock() {
             shared.pending_video.clear();
             shared.pending_bitmap.clear();
@@ -92,6 +180,8 @@ impl GraphicsPipelineHandler for NativeGfxHandler {
     }
 
     fn on_surface_mapped(&mut self, surface_id: u16, origin_x: u32, origin_y: u32) {
+        tracing::debug!(target: LOG_TARGET_GRAPHICS, surface_id, origin_x, origin_y,
+            "EGFX surface mapped to output");
         if let Ok(mut shared) = self.shared.lock() {
             shared
                 .surface_origins
@@ -115,6 +205,12 @@ impl GraphicsPipelineHandler for NativeGfxHandler {
                 update.codec_id
             ));
             return;
+        }
+        if !self.bitmap_seen {
+            tracing::info!(target: LOG_TARGET_GRAPHICS, codec = ?update.codec_id,
+                surface_id = update.surface_id, width = update.width, height = update.height,
+                "first decoded bitmap rectangle since graphics reset (not full desktop size)");
+            self.bitmap_seen = true;
         }
         let stride = u32::from(update.width) * 4;
         // u64: `stride * height` overflows usize on the 32-bit webOS target for
@@ -148,10 +244,7 @@ impl GraphicsPipelineHandler for NativeGfxHandler {
                 data: update.data.clone(),
             });
         }
-    }
-
-    fn on_wire_to_surface2(&mut self, _pdu: &WireToSurface2Pdu) {
-        // RemoteFX Progressive is decoded by IronRDP into `on_bitmap_updated` RGBA tiles.
+        self.note_rendered_update();
     }
 
     fn on_avc420_frame(
@@ -163,14 +256,33 @@ impl GraphicsPipelineHandler for NativeGfxHandler {
         _height: u16,
         nal: &[u8],
     ) -> bool {
-        // `_width`/`_height` above are the frame's destination rectangle on the surface,
-        // not the surface's full resolution; the real graphics output size is dispatched
-        // separately via on_reset_graphics/on_desktop_size (see drain_gfx).
+        // Frame rectangles are not desktop dimensions; ResetGraphics supplies those.
         if !nal.is_empty() {
+            if !self.video_seen {
+                tracing::info!(target: LOG_TARGET_GRAPHICS, surface_id = _surface_id,
+                    left = _left, top = _top, width = _width, height = _height, bytes = nal.len(),
+                    "first H.264 YUV420 AU since graphics reset; rectangle is not desktop size; may be AVC444 base view");
+                self.video_seen = true;
+            }
             if let Ok(mut shared) = self.shared.lock() {
-                shared
-                    .pending_video
-                    .push(NativeVideoUnit { data: nal.to_vec() });
+                shared.pending_video.push(nal.to_vec());
+            }
+            self.note_rendered_update();
+        }
+        true
+    }
+
+    // NDL presents every decoded AU; submitting the auxiliary view would display chroma as luma.
+    fn on_avc444_aux_frame(&mut self, _nal: &[u8]) -> bool {
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.avc444_aux_frames += 1;
+            let dropped_aux = shared.avc444_aux_frames;
+            if dropped_aux == 1 || dropped_aux % 100 == 0 {
+                tracing::warn!(
+                    target: LOG_TARGET_GRAPHICS,
+                    dropped_aux,
+                    "server sent AVC444; rendering its YUV420 view only, chroma refinement dropped"
+                );
             }
         }
         true
@@ -180,21 +292,12 @@ impl GraphicsPipelineHandler for NativeGfxHandler {
         true
     }
 
-    // Surface-mutating EGFX operations the client deliberately IGNORES — do not turn these
-    // into mark_unsupported_graphics (a review once did; every live session then died with
-    // "server used unsupported EGFX SurfaceToSurface" right after Active):
-    //
-    // - gnome-remote-desktop sends SurfaceToSurface as part of ROUTINE AVC420 sessions.
-    // - On the hardware path the TV's video plane shows the complete decoded H.264 stream;
-    //   server-side surface composition never reaches the screen, so ignoring these ops is
-    //   visually correct there — confirmed by every live session to date.
-    // - They matter only for the RemoteFX/RGBA software fallback, where ignoring them CAN
-    //   leave stale pixels on servers that use them for that path (grd does not today). If
-    //   such a server appears, implement the ops on the RGBA canvas instead of failing.
-    //
-    // The dispatcher matches these PDUs explicitly, so they never reach on_unhandled_pdu;
-    // the trait defaults are silent no-ops. Trace them through the C logging bridge to stay
-    // observable when the corresponding target is enabled.
+    /// Callbacks present directly; composited surfaces are unused.
+    fn wants_composited_output(&self) -> bool {
+        false
+    }
+
+    // Hardware H.264 ignores surface composition. Bitmap support requires canvas operations, not session failure.
     fn on_solid_fill(&mut self, pdu: &SolidFillPdu) {
         tracing::debug!(
             target: LOG_TARGET_GRAPHICS,
@@ -221,15 +324,25 @@ impl GraphicsPipelineHandler for NativeGfxHandler {
         );
     }
 
+    // Unhandled AVC444 cannot be presented; other codecs may coexist with decodable updates.
     fn on_unhandled_pdu(&mut self, pdu: &GfxPdu) {
-        let codec = match pdu {
-            GfxPdu::WireToSurface1(pdu) => match pdu.codec_id {
-                Codec1Type::Avc444 | Codec1Type::Avc444v2 => "AVC444",
-                _ => "unsupported",
-            },
-            _ => "unsupported",
-        };
-        self.mark_unsupported_graphics(format!("server produced unsupported {codec} EGFX PDU"));
+        match pdu {
+            GfxPdu::WireToSurface1(wire)
+                if matches!(wire.codec_id, Codec1Type::Avc444 | Codec1Type::Avc444v2) =>
+            {
+                self.mark_unsupported_graphics("server produced unsupported AVC444 EGFX PDU");
+            }
+            GfxPdu::WireToSurface1(_) | GfxPdu::WireToSurface2(_) => {
+                self.note_undecodable_update(pdu);
+            }
+            other => {
+                tracing::warn!(
+                    target: LOG_TARGET_GRAPHICS,
+                    pdu = gfx_pdu_name(other),
+                    "ignoring unhandled EGFX PDU"
+                );
+            }
+        }
     }
 }
 
@@ -277,9 +390,8 @@ mod tests {
             }),
         ];
         for (name, invoke) in cases {
-            let mut handler = NativeGfxHandler {
-                shared: Arc::new(Mutex::new(NativeGfxState::default())),
-            };
+            let mut handler =
+                NativeGfxHandler::new(Arc::new(Mutex::new(NativeGfxState::default())));
             invoke(&mut handler);
             // gnome-remote-desktop sends these during routine AVC420 sessions; they must
             // never take the session down (regression: they briefly did).
@@ -297,15 +409,9 @@ mod tests {
 
     #[test]
     fn reset_graphics_marks_size_pending_once_per_distinct_value() {
-        let mut handler = NativeGfxHandler {
-            shared: Arc::new(Mutex::new(NativeGfxState::default())),
-        };
+        let mut handler = NativeGfxHandler::new(Arc::new(Mutex::new(NativeGfxState::default())));
 
-        // The server's real graphics output can be larger than the negotiated MCS/GCC
-        // desktop size (e.g. a TV whose hardware decoder always runs at panel resolution).
-        // This must be dispatched to both the ss4s/H.264 and RemoteFX paths uniformly, so
-        // it goes through on_desktop_size (see drain_gfx) rather than being attached only
-        // to AVC420 access units.
+        // ResetGraphics dimensions may change independently of the initial handshake.
         handler.on_reset_graphics(3840, 2160);
         {
             let shared = handler.shared.lock().unwrap();
@@ -331,28 +437,109 @@ mod tests {
         assert_eq!(shared.graphics_height, 1080);
     }
 
+    fn undecodable_wire_to_surface1() -> GfxPdu {
+        use ironrdp_egfx::pdu::{PixelFormat, WireToSurface1Pdu};
+
+        GfxPdu::WireToSurface1(WireToSurface1Pdu {
+            surface_id: 1,
+            codec_id: Codec1Type::RemoteFx,
+            pixel_format: PixelFormat::XRgb,
+            destination_rectangle: ExclusiveRectangle {
+                left: 0,
+                top: 0,
+                right: 64,
+                bottom: 64,
+            },
+            bitmap_data: vec![0xFF; 16],
+        })
+    }
+
+    #[test]
+    fn a_stream_that_only_ever_drops_updates_fails_the_session_over() {
+        let mut handler = NativeGfxHandler::new(Arc::new(Mutex::new(NativeGfxState::default())));
+        let pdu = undecodable_wire_to_surface1();
+
+        for _ in 0..MAX_UNDECODABLE_UPDATES - 1 {
+            handler.on_unhandled_pdu(&pdu);
+        }
+        assert!(
+            handler
+                .shared
+                .lock()
+                .unwrap()
+                .unsupported_graphics
+                .is_none(),
+            "a server may open with updates this client skips"
+        );
+
+        handler.on_unhandled_pdu(&pdu);
+        assert!(
+            handler
+                .shared
+                .lock()
+                .unwrap()
+                .unsupported_graphics
+                .is_some(),
+            "a server that never renders must not hold a blank session"
+        );
+    }
+
+    #[test]
+    fn dropped_updates_stay_non_fatal_while_the_session_renders() {
+        let mut handler = NativeGfxHandler::new(Arc::new(Mutex::new(NativeGfxState::default())));
+        let pdu = undecodable_wire_to_surface1();
+
+        // Windows mixes tiles this client cannot decode into a working AVC420 stream.
+        let alternating = MAX_UNDECODABLE_UPDATES * 4;
+        for _ in 0..alternating {
+            handler.on_unhandled_pdu(&pdu);
+            handler.on_avc420_frame(1, 0, 0, 64, 64, &[0u8; 4]);
+        }
+        assert!(handler
+            .shared
+            .lock()
+            .unwrap()
+            .unsupported_graphics
+            .is_none());
+
+        // The rendered updates in between must not restart the warning interval, or this
+        // per-frame path warns on every single drop.
+        assert_eq!(handler.undecodable_total, alternating);
+        assert_eq!(handler.undecodable_since_render, 0);
+
+        // A server that switches to a codec this client cannot decode freezes the picture
+        // no matter how much it rendered before, so the run alone decides.
+        for _ in 0..MAX_UNDECODABLE_UPDATES {
+            handler.on_unhandled_pdu(&pdu);
+        }
+        assert!(handler
+            .shared
+            .lock()
+            .unwrap()
+            .unsupported_graphics
+            .is_some());
+    }
+
     #[test]
     fn bitmap_update_offsets_by_mapped_surface_origin() {
-        let mut handler = NativeGfxHandler {
-            shared: Arc::new(Mutex::new(NativeGfxState::default())),
-        };
+        let mut handler = NativeGfxHandler::new(Arc::new(Mutex::new(NativeGfxState::default())));
 
         // Server maps surface 7 at a non-zero desktop position (e.g. a second monitor).
         handler.on_surface_mapped(7, 1920, 100);
 
-        handler.on_bitmap_updated(&BitmapUpdate {
-            surface_id: 7,
-            destination_rectangle: ExclusiveRectangle {
+        handler.on_bitmap_updated(&BitmapUpdate::new(
+            7,
+            ExclusiveRectangle {
                 left: 10,
                 top: 20,
                 right: 12,
                 bottom: 22,
             },
-            codec_id: Codec1Type::Uncompressed,
-            data: vec![0u8; 2 * 2 * 4],
-            width: 2,
-            height: 2,
-        });
+            Codec1Type::Uncompressed,
+            vec![0u8; 2 * 2 * 4],
+            2,
+            2,
+        ));
 
         let shared = handler.shared.lock().unwrap();
         assert_eq!(shared.pending_bitmap.len(), 1);
@@ -367,19 +554,19 @@ mod tests {
             let mut shared = handler.shared.lock().unwrap();
             shared.pending_bitmap.clear();
         }
-        handler.on_bitmap_updated(&BitmapUpdate {
-            surface_id: 7,
-            destination_rectangle: ExclusiveRectangle {
+        handler.on_bitmap_updated(&BitmapUpdate::new(
+            7,
+            ExclusiveRectangle {
                 left: 10,
                 top: 20,
                 right: 12,
                 bottom: 22,
             },
-            codec_id: Codec1Type::Uncompressed,
-            data: vec![0u8; 2 * 2 * 4],
-            width: 2,
-            height: 2,
-        });
+            Codec1Type::Uncompressed,
+            vec![0u8; 2 * 2 * 4],
+            2,
+            2,
+        ));
         {
             let shared = handler.shared.lock().unwrap();
             assert_eq!(shared.pending_bitmap[0].left, 10);
@@ -394,19 +581,19 @@ mod tests {
             let mut shared = handler.shared.lock().unwrap();
             shared.pending_bitmap.clear();
         }
-        handler.on_bitmap_updated(&BitmapUpdate {
-            surface_id: 7,
-            destination_rectangle: ExclusiveRectangle {
+        handler.on_bitmap_updated(&BitmapUpdate::new(
+            7,
+            ExclusiveRectangle {
                 left: 10,
                 top: 20,
                 right: 12,
                 bottom: 22,
             },
-            codec_id: Codec1Type::Uncompressed,
-            data: vec![0u8; 2 * 2 * 4],
-            width: 2,
-            height: 2,
-        });
+            Codec1Type::Uncompressed,
+            vec![0u8; 2 * 2 * 4],
+            2,
+            2,
+        ));
         let shared = handler.shared.lock().unwrap();
         assert_eq!(
             shared.pending_bitmap[0].left, 10,
@@ -416,28 +603,17 @@ mod tests {
     }
 
     #[test]
-    fn gfx_capabilities_do_not_advertise_avc444() {
-        let handler = NativeGfxHandler {
-            shared: Arc::new(Mutex::new(NativeGfxState::default())),
-        };
+    fn gfx_capabilities_offer_avc420_and_windows_v10_fallback() {
+        let handler = NativeGfxHandler::new(Arc::new(Mutex::new(NativeGfxState::default())));
 
         let capabilities = handler.capabilities();
-        assert_eq!(capabilities.len(), 2);
         assert_eq!(
-            capabilities[0],
+            capabilities[1],
             CapabilitySet::V8_1 {
                 flags: CapabilitiesV81Flags::AVC420_ENABLED | CapabilitiesV81Flags::SMALL_CACHE,
             }
         );
-        assert_eq!(
-            capabilities[1],
-            CapabilitySet::V8 {
-                flags: CapabilitiesV8Flags::SMALL_CACHE,
-            }
-        );
-        assert!(!capabilities
-            .iter()
-            .any(|capability| matches!(capability, CapabilitySet::V10_7 { .. })));
+        assert_eq!(capabilities.len(), 3);
         assert!(handler.wants_avc420_passthrough());
     }
 }

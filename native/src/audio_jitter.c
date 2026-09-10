@@ -5,7 +5,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_audio_jitter, cLogLevelInfo, cLogFlags_Default, "audio.jitter", NULL);
+clog_define(g_native_log_audio_jitter, cLogLevelInfo, "audio.jitter");
 
 #define NATIVE_AUDIO_JITTER_WINDOW_MS 10000u
 #define NATIVE_AUDIO_JITTER_TARGET_DECAY_MS 5000u
@@ -28,7 +28,7 @@ static void jitter_samples_clear(NativeAudioJitterController *controller) {
     controller->count = 0;
 }
 
-void native_audio_jitter_reset(NativeAudioJitterController *controller, uint64_t now_ms, unsigned underruns) {
+void native_audio_jitter_reset(NativeAudioJitterController *controller, uint32_t now_ms, unsigned underruns) {
     if (!controller) {
         return;
     }
@@ -56,10 +56,10 @@ static void jitter_remove_oldest(NativeAudioJitterController *controller) {
     controller->count--;
 }
 
-static void jitter_expire(NativeAudioJitterController *controller, uint64_t now_ms) {
+static void jitter_expire(NativeAudioJitterController *controller, uint32_t now_ms) {
     while (controller->count > 0) {
         const NativeAudioJitterSample *sample = &controller->samples[controller->head];
-        if (now_ms >= sample->arrival_ms && now_ms - sample->arrival_ms <= NATIVE_AUDIO_JITTER_WINDOW_MS) {
+        if (now_ms - sample->arrival_ms <= NATIVE_AUDIO_JITTER_WINDOW_MS) {
             break;
         }
         jitter_remove_oldest(controller);
@@ -81,7 +81,7 @@ static uint32_t jitter_p95(const NativeAudioJitterController *controller) {
     return (NATIVE_AUDIO_JITTER_BUCKETS - 1u) * NATIVE_AUDIO_JITTER_BUCKET_MS;
 }
 
-static uint32_t jitter_add(NativeAudioJitterController *controller, uint64_t now_ms, uint32_t variation_ms) {
+static uint32_t jitter_add(NativeAudioJitterController *controller, uint32_t now_ms, uint32_t variation_ms) {
     jitter_expire(controller, now_ms);
     if (controller->count == NATIVE_AUDIO_JITTER_SAMPLES) {
         jitter_remove_oldest(controller);
@@ -99,7 +99,7 @@ static uint32_t jitter_add(NativeAudioJitterController *controller, uint64_t now
 }
 
 NativeAudioJitterUpdate native_audio_jitter_update(NativeAudioJitterController *controller, size_t frames,
-                                                   uint32_t sample_rate, uint32_t timestamp_ms, uint64_t now_ms,
+                                                   uint32_t sample_rate, uint32_t timestamp_ms, uint32_t now_ms,
                                                    unsigned underruns, uint32_t current_target_ms) {
     NativeAudioJitterUpdate update = {
         .target_delay_ms = current_target_ms,
@@ -114,7 +114,7 @@ NativeAudioJitterUpdate native_audio_jitter_update(NativeAudioJitterController *
         duration_ms = 1;
     }
 
-    if (!controller->have_arrival || now_ms < controller->last_arrival_ms) {
+    if (!controller->have_arrival) {
         controller->have_arrival = true;
         controller->last_arrival_ms = now_ms;
         controller->last_timestamp_ms = timestamp_ms;
@@ -122,8 +122,7 @@ NativeAudioJitterUpdate native_audio_jitter_update(NativeAudioJitterController *
         return update;
     }
 
-    uint64_t arrival_delta_64 = now_ms - controller->last_arrival_ms;
-    uint32_t arrival_delta = arrival_delta_64 > UINT32_MAX ? UINT32_MAX : (uint32_t)arrival_delta_64;
+    uint32_t arrival_delta = now_ms - controller->last_arrival_ms;
     if (arrival_delta > NATIVE_AUDIO_JITTER_LONG_GAP_MS) {
         jitter_samples_clear(controller);
         update.jitter_p95_ms = 0;
@@ -151,15 +150,20 @@ NativeAudioJitterUpdate native_audio_jitter_update(NativeAudioJitterController *
         controller->last_target_change_ms = now_ms;
     }
 
+    uint32_t cadence_target = clamp_u32(expected_ms + NATIVE_AUDIO_JITTER_TARGET_HEADROOM_MS,
+                                        NATIVE_AUDIO_JITTER_TARGET_MIN_MS, NATIVE_AUDIO_JITTER_TARGET_MAX_MS);
     uint32_t peak_target = clamp_u32(variation_ms + NATIVE_AUDIO_JITTER_TARGET_HEADROOM_MS,
                                      NATIVE_AUDIO_JITTER_TARGET_MIN_MS, NATIVE_AUDIO_JITTER_TARGET_MAX_MS);
+    if (cadence_target > peak_target) {
+        peak_target = cadence_target;
+    }
     if (peak_target > current_target_ms) {
         update.target_delay_ms = peak_target;
         update.target_action = NATIVE_AUDIO_JITTER_TARGET_RAISE;
         controller->last_target_change_ms = now_ms;
     } else {
         uint32_t calculated = clamp_u32(update.jitter_p95_ms + NATIVE_AUDIO_JITTER_TARGET_HEADROOM_MS,
-                                        NATIVE_AUDIO_JITTER_TARGET_MIN_MS, NATIVE_AUDIO_JITTER_TARGET_MAX_MS);
+                                        cadence_target, NATIVE_AUDIO_JITTER_TARGET_MAX_MS);
         if (calculated < current_target_ms &&
             now_ms - controller->last_target_change_ms >= NATIVE_AUDIO_JITTER_TARGET_DECAY_MS) {
             uint32_t reduced = current_target_ms > NATIVE_AUDIO_JITTER_TARGET_DECAY_STEP_MS

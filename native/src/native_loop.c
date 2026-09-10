@@ -7,7 +7,7 @@
 #include <stdatomic.h>
 
 #include "camera_preview.h"
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 #include "input_evdev.h"
 #endif
 #include "native_app.h"
@@ -25,9 +25,9 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_loop, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_loop, cLogLevelInfo, "native");
 
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 /* Early-exit teardown for the loop bring-up ladder. Any argument may be NULL /
  * text_input false at the stage that failed; teardown order matters (renderer
  * before window before the subsystem). */
@@ -54,7 +54,7 @@ int native_run_app_loop(App *app, NativeSettings *settings) {
     clog(cLogLevelInfo, "creating borderless SDL window %dx%d", NATIVE_LOCAL_SURFACE_WIDTH,
          NATIVE_LOCAL_SURFACE_HEIGHT);
     uint32_t window_flags = SDL_WINDOW_SHOWN | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_BORDERLESS;
-    SDL_Window *window = SDL_CreateWindow("gnomecast", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
+    SDL_Window *window = SDL_CreateWindow("lgnome", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED,
                                           NATIVE_LOCAL_SURFACE_WIDTH, NATIVE_LOCAL_SURFACE_HEIGHT, window_flags);
     if (!window) {
         clog(cLogLevelError, "SDL_CreateWindow failed: %s", SDL_GetError());
@@ -138,8 +138,7 @@ int native_run_app_loop(App *app, NativeSettings *settings) {
             native_drain_pointer_clamp(app);
             native_drain_pointer_warp(app, window);
             native_cursor_tick(app);
-            native_drain_evdev_mouse(app, window);
-            native_drain_evdev_keyboard(app);
+            native_drain_evdev_input(app, window);
             SDL_Event event;
             while (SDL_PollEvent(&event)) {
                 native_handle_sdl_event(app, window, renderer, &event);

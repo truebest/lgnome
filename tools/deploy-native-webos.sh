@@ -1,16 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Avoid leaking generated launch parameters if someone invokes this helper with bash -x.
+# Launch parameters may contain credentials.
 set +x
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-dist_dir="${NATIVE_WEBOS_DIST_DIR:-$repo_root/dist/native-webos}"
-appinfo="${NATIVE_WEBOS_APPINFO:-$repo_root/native/deploy/webos/appinfo.json}"
-app_id="${NATIVE_WEBOS_APP_ID:-}"
-config_path="${HELLOLG_NATIVE_CONFIG:-$repo_root/native/config.local.json}"
-launch_with_defaults="${HELLOLG_LAUNCH_WITH_DEFAULTS:-0}"
-camera_preview=0
-ipk="${NATIVE_WEBOS_IPK:-}"
+app_id=com.truebest.lgnome.native
+ipk=""
+mode=""
+value=""
 install_app=1
 launch_app=1
 
@@ -20,197 +17,101 @@ fail() {
 }
 
 usage() {
-  printf '%s\n' \
-    "Usage: ARES_DEVICE=<tv-device> $0 [--ipk PATH] [--config PATH] [--with-defaults] [--camera-preview] [--no-install] [--no-launch]" \
-    "" \
-    "Installs the native webOS IPK and launches it with redacted RDP config params." \
-    "If no IPK exists, this script runs tools/build-native-webos.sh first."
+  echo "Usage: ARES_DEVICE=<tv-device> $0 --ipk PATH [--no-launch]"
+  echo "       $0 [--ipk PATH | --no-install] [--connect-slot COLOR | --config FILE | --with-defaults | --camera-preview]"
+  echo "Default launch uses saved profiles. Configuration overrides are explicit."
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --ipk)
-      [[ $# -ge 2 ]] || fail "--ipk requires a path"
-      ipk="$2"
+    --ipk|--config|--connect-slot)
+      [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || fail "$1 requires a value"
+      if [[ "$1" == --ipk ]]; then
+        [[ -z "$ipk" ]] || fail "--ipk specified twice"
+        ipk="$2"
+      else
+        [[ -z "$mode" ]] || fail "launch modes are mutually exclusive"
+        mode="$1"
+        value="$2"
+      fi
       shift 2
       ;;
-    --ipk=*)
-      ipk="${1#--ipk=}"
+    --with-defaults|--camera-preview)
+      [[ -z "$mode" ]] || fail "launch modes are mutually exclusive"
+      mode="$1"
       shift
       ;;
-    --config)
-      [[ $# -ge 2 ]] || fail "--config requires a path"
-      config_path="$2"
-      shift 2
-      ;;
-    --config=*)
-      config_path="${1#--config=}"
-      shift
-      ;;
-    --with-defaults)
-      launch_with_defaults=1
-      shift
-      ;;
-    --camera-preview)
-      camera_preview=1
-      shift
-      ;;
-    --no-install)
-      install_app=0
-      shift
-      ;;
-    --no-launch)
-      launch_app=0
-      shift
-      ;;
-    -h|--help)
-      usage
-      exit 0
-      ;;
-    *)
-      fail "unknown argument: $1"
-      ;;
+    --no-install) install_app=0; shift ;;
+    --no-launch) launch_app=0; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) fail "unknown argument: $1" ;;
   esac
 done
 
-if [[ "$install_app" == "1" ]]; then
-  if [[ -z "$ipk" ]]; then
-    if [[ ! -d "$dist_dir" || -z "$(find "$dist_dir" -maxdepth 1 -type f -name '*.ipk' -print -quit)" ]]; then
-      "$repo_root/tools/build-native-webos.sh"
-    fi
-    ipk="$(find "$dist_dir" -maxdepth 1 -type f -name '*.ipk' -printf '%T@ %p\n' | sort -n | tail -n 1 | cut -d' ' -f2-)"
-  fi
-  [[ -f "$ipk" ]] || fail "package not found: $ipk"
+[[ "$install_app" == 1 || "$launch_app" == 1 ]] || fail "nothing to do"
+[[ "$launch_app" == 1 || -z "$mode" ]] || fail "launch mode requires launching"
+if [[ "$install_app" == 1 ]]; then
+  [[ -n "$ipk" && -f "$ipk" ]] || fail "installation requires --ipk PATH to an existing package"
+  command -v ares-install >/dev/null || fail "ares-install not found"
+else
+  [[ -z "$ipk" ]] || fail "--ipk conflicts with --no-install"
+fi
+if [[ "$launch_app" == 1 ]]; then
+  command -v ares-launch >/dev/null || fail "ares-launch not found"
 fi
 
-if [[ -z "$app_id" ]]; then
-  [[ -f "$appinfo" ]] || fail "appinfo.json not found: $appinfo"
-  app_id="$(python3 - "$appinfo" <<'PY'
-import json
-import sys
-with open(sys.argv[1], "r", encoding="utf-8") as f:
-    print(json.load(f)["id"])
-PY
-)"
-fi
-[[ -n "$app_id" ]] || fail "empty app id"
-
-args=()
-if [[ -n "${ARES_DEVICE:-}" ]]; then
-  args=(-d "$ARES_DEVICE")
-fi
-
-if [[ "$install_app" == "1" ]]; then
-  command -v ares-install >/dev/null 2>&1 ||
-    fail "ares-install not found. Load the webOS CLI, for example: source ~/.nvm/nvm.sh && nvm use 22"
-  echo "deploy-native-webos: installing $ipk" >&2
-  ares-install "${args[@]}" "$ipk"
-fi
-
-if [[ "$launch_app" != "1" ]]; then
-  exit 0
-fi
-
-command -v ares-launch >/dev/null 2>&1 ||
-  fail "ares-launch not found. Load the webOS CLI, for example: source ~/.nvm/nvm.sh && nvm use 22"
-
-if [[ "$camera_preview" == "1" ]]; then
-  echo "deploy-native-webos: launching $app_id in local camera preview mode" >&2
-  ares-launch "${args[@]}" "$app_id" --params '{"cameraPreview":true,"ignoreSavedConfig":true}'
-  exit 0
-fi
-
-if [[ "$launch_with_defaults" == "1" ]]; then
-  echo "deploy-native-webos: launching $app_id with native defaults" >&2
-  ares-launch "${args[@]}" "$app_id" --params '{"ignoreSavedConfig":true}'
-  exit 0
-fi
-
-[[ -n "$config_path" ]] || fail "empty config path; set HELLOLG_NATIVE_CONFIG or use --config"
-[[ -f "$config_path" ]] ||
-  fail "config file not found: $config_path (not packaged). Use --with-defaults only for explicit defaults-only smoke launch."
-
-launch_params="$(python3 - "$config_path" <<'PY'
+launch_args=()
+case "$mode" in
+  --connect-slot)
+    case "$value" in red|green|yellow|blue) ;; *) fail "invalid profile color" ;; esac
+    launch_args=(--params "{\"connectSlot\":\"$value\"}")
+    ;;
+  --with-defaults) launch_args=(--params '{"ignoreSavedConfig":true}') ;;
+  --camera-preview) launch_args=(--params '{"cameraPreview":true,"ignoreSavedConfig":true}') ;;
+  --config)
+    launch_params="$(python3 - "$value" <<'PY'
 import json
 import sys
 
-path = sys.argv[1]
+def settings_object(fields):
+    if fields.keys() & {"connectSlot", "cameraPreview", "ignoreSavedConfig", "params", "launchParams"}:
+        raise ValueError()
+    return fields
+
 try:
-    with open(path, "r", encoding="utf-8") as f:
-        config = json.load(f)
-except Exception as exc:
-    raise SystemExit(f"failed to read JSON config: {exc}")
-
-if not isinstance(config, dict):
-    raise SystemExit("config root must be a JSON object")
-
-params = {}
-if isinstance(config.get("name"), str):
-    params["name"] = config["name"]
-
-for key in (
-    "host",
-    "username",
-    "password",
-    "domain",
-    "cameraDeviceId",
-    "audioInputDeviceId",
-):
-    if key not in config:
-        continue
-    value = config[key]
-    if not isinstance(value, str):
-        raise SystemExit(f"config field {key} must be a string")
-    params[key] = value
-
-for key, minimum, maximum in (
-    ("port", 1, 65535),
-    ("fps", 1, 240),
-    ("wheelStep", 1, 120),
-    ("wheelScrollDivisor", 1, 120),
-    # Keep in step with NATIVE_CAMERA_MIN/MAX_* in native/include/camera_v4l2.h;
-    # a stricter bound here silently blocks a mode the app itself accepts.
-    ("cameraWidth", 640, 1920),
-    ("cameraHeight", 480, 1080),
-    ("cameraFps", 1, 30),
-    ("audioInputGainDb", -12, 18),
-):
-    if key not in config:
-        continue
-    value = config[key]
-    if not isinstance(value, int) or isinstance(value, bool) or value < minimum or value > maximum:
-        raise SystemExit(f"config field {key} must be an integer in [{minimum}, {maximum}]")
-    params[key] = value
-
-for key in (
-    "relativeMouse",
-    "cameraRedirect",
-    "audioInputRedirect",
-    "cameraEnabled",
-    "audioInputEnabled",
-):
-    if key not in config:
-        continue
-    value = config[key]
-    if not isinstance(value, bool):
-        raise SystemExit(f"config field {key} must be a boolean")
-    params[key] = value
-
-if "audioCodec" in config:
-    value = config["audioCodec"]
-    if value not in ("auto", "opus", "pcm"):
-        raise SystemExit("config field audioCodec must be auto, opus, or pcm")
-    params["audioCodec"] = value
-
-if "sessions" in config:
-    value = config["sessions"]
-    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
-        raise SystemExit("config field sessions must be an array of objects")
-    params["sessions"] = value
-
-print(json.dumps(params, ensure_ascii=False, separators=(",", ":")))
+    with open(sys.argv[1], "rb") as file:
+        raw = file.read(16384)
+    if len(raw) >= 16384:
+        raise ValueError()
+    config = json.loads(raw, object_hook=settings_object)
+    if not isinstance(config, dict):
+        raise ValueError()
+    params = json.dumps(config, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    # ares-launch rewrites literal apostrophes before JSON parsing.
+    params = params.replace("'", r"\u0027")
+    if len(params.encode("utf-8")) >= 16384:
+        raise ValueError()
+except (OSError, ValueError, RecursionError):
+    raise SystemExit("config must be a JSON object below 16 KiB without launch-control keys")
+print(params)
 PY
-)" || fail "failed to prepare launch parameters from $config_path"
+)" || fail "invalid explicit config"
+    launch_args=(--params "$launch_params")
+    ;;
+esac
 
-echo "deploy-native-webos: launching $app_id with config from $config_path (credentials redacted)" >&2
-ares-launch "${args[@]}" "$app_id" --params "$launch_params"
+device_args=()
+[[ -z "${ARES_DEVICE:-}" ]] || device_args=(-d "$ARES_DEVICE")
+if [[ "$install_app" == 1 ]]; then
+  "$repo_root/tools/build-native-webos.sh" --verify-ipk "$ipk"
+  ares-install "${device_args[@]}" "$ipk"
+fi
+if [[ "$launch_app" == 1 ]]; then
+  if [[ -n "$mode" ]]; then
+    running="$(ares-launch "${device_args[@]}" --running)"
+    if awk -v id="$app_id" '$1 == id { found = 1 } END { exit !found }' <<<"$running"; then
+      ares-launch "${device_args[@]}" --close "$app_id"
+    fi
+  fi
+  ares-launch "${device_args[@]}" "$app_id" "${launch_args[@]}"
+fi

@@ -108,7 +108,7 @@ static void make_base_dir(char *base, size_t cap) {
     if (!tmp || !tmp[0]) {
         tmp = "/tmp";
     }
-    (void)snprintf(base, cap, "%s/gnomecast-cfgtestXXXXXX", tmp);
+    (void)snprintf(base, cap, "%s/lgnome-cfgtestXXXXXX", tmp);
     assert(mkdtemp(base) != NULL);
 }
 

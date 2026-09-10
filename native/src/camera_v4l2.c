@@ -21,7 +21,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_camera, cLogLevelInfo, cLogFlags_Default, "camera.v4l2", NULL);
+clog_define(g_native_log_camera, cLogLevelInfo, "camera.v4l2");
 
 _Static_assert(NATIVE_CAMERA_FRAME_RATE_MAX >= NATIVE_CAMERA_MAX_FPS,
                "frame-rate enumeration must retain every supported whole FPS");
@@ -555,7 +555,7 @@ static size_t native_camera_enumerate_devices(NativeCameraDeviceInfo *devices, s
     return count;
 }
 
-#ifdef HELLOLG_CAMERA_V4L2_TESTING
+#ifdef LGNOME_CAMERA_V4L2_TESTING
 static const NativeCameraV4l2TestNodes *g_test_nodes;
 
 void native_camera_v4l2_set_test_nodes(const NativeCameraV4l2TestNodes *nodes) {
@@ -566,7 +566,7 @@ void native_camera_v4l2_set_test_nodes(const NativeCameraV4l2TestNodes *nodes) {
 /* The mode-enumeration walks below reach the driver only through these three
  * calls, which the host tests replace wholesale. */
 static int native_camera_open_node(const char *path) {
-#ifdef HELLOLG_CAMERA_V4L2_TESTING
+#ifdef LGNOME_CAMERA_V4L2_TESTING
     if (g_test_nodes) {
         return g_test_nodes->open_node(path);
     }
@@ -575,7 +575,7 @@ static int native_camera_open_node(const char *path) {
 }
 
 static int native_camera_node_ioctl(int fd, unsigned long request, void *argument) {
-#ifdef HELLOLG_CAMERA_V4L2_TESTING
+#ifdef LGNOME_CAMERA_V4L2_TESTING
     if (g_test_nodes) {
         return g_test_nodes->node_ioctl(fd, request, argument);
     }
@@ -584,7 +584,7 @@ static int native_camera_node_ioctl(int fd, unsigned long request, void *argumen
 }
 
 static void native_camera_close_node(int fd) {
-#ifdef HELLOLG_CAMERA_V4L2_TESTING
+#ifdef LGNOME_CAMERA_V4L2_TESTING
     if (g_test_nodes) {
         g_test_nodes->close_node(fd);
         return;
@@ -594,7 +594,7 @@ static void native_camera_close_node(int fd) {
 }
 
 size_t native_camera_enumerate(NativeCameraDeviceInfo *devices, size_t capacity) {
-#ifdef HELLOLG_CAMERA_V4L2_TESTING
+#ifdef LGNOME_CAMERA_V4L2_TESTING
     if (g_test_nodes) {
         return g_test_nodes->enumerate(devices, capacity);
     }

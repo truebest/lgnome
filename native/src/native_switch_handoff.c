@@ -1,6 +1,6 @@
 /* Atomic ownership handoff between live RDP slots. The ordering here is the
  * privacy/input/video boundary of the switch state machine; SDL thread only. */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #include "native_switch_internal.h"
 
@@ -18,7 +18,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_switch_handoff, cLogLevelInfo, cLogFlags_Default, "native", NULL);
+clog_define(g_native_log_switch_handoff, cLogLevelInfo, "native");
 
 /* Finalizes a switch to `target`, which must already be connected. Retargets input,
  * cursor, and the shared video path while the mixed audio track stays attached, then
@@ -49,30 +49,15 @@ void native_complete_session_switch(App *app, int target) {
     native_flush_held_inputs(app);
     native_input_set_active(&app->input, false);
 
-    /* Route worker callbacks to the new slot; the old session's in-flight AUs stop
-     * feeding the shared decoder immediately (active check in on_video_au). The video
-     * track itself is NOT closed here: the old picture stays up and on_video_au swaps
-     * the decoder in one pipeline reload once the new stream's keyframe is in hand —
-     * no black gap, one audio interruption instead of two. */
-    /* Snapshot the watchdog baseline BEFORE the target becomes active: its worker can
-     * decode the resume keyframe at any point after the switch below, and on a static
-     * desktop that keyframe is the only frame coming — baselining after it would make
-     * the watchdog reconnect a successful switch and mislearn refresh_ineffective. */
+    /* Retain the old video track until the new owner supplies a keyframe. */
+    /* Baseline before activation: the target may immediately decode its only frame. */
     unsigned switch_baseline = atomic_load(&target_slot->video_ok_frames);
 
     /* The privacy boundary precedes the ownership publication: close and drain the
      * old slot's Rust payload gate before active_index can describe it as background. */
     native_capture_pause_for_active_slot_change(app);
     pthread_mutex_lock(&app->video_lock);
-    /* The active flip and the stale-recovery clear live INSIDE video_lock: on_video_au
-     * publishes video_refresh_needed under the same lock after re-checking the active
-     * slot, so an outgoing worker mid-feed cannot interleave with the switch and leave
-     * a stale request behind. A pending request belongs to the OUTGOING owner and goes
-     * stale with the ownership change: draining it after the switch would send a
-     * spurious refresh to the fresh target and arm its watchdog into a needless
-     * reconnect on a static desktop. The old slot needs no recovery either way —
-     * backgrounding reconnects it (snapshot) or suppresses it (resume asks for its own
-     * keyframe on return). */
+    /* Change owner and clear stale refresh under video_lock, shared with on_video_au publication. */
     unsigned target_epoch = atomic_load(&target_slot->connect_epoch);
     if (app->hub_return_rgba && app->hub_return_rgba_owner_slot == target) {
         if (!native_promote_hub_return_rgba_locked(app, target, target_epoch)) {
@@ -106,18 +91,9 @@ void native_complete_session_switch(App *app, int target) {
     native_request_pointer_window_size_update(app);
     native_cursor_reassert(&target_slot->cursor);
 
-    /* Background the old server (graphics off, rdpsnd audio keeps feeding the mix; a
-     * refresh-ineffective one reconnects hidden to cache its IDR) and wake the new one.
-     * A previously suppressed session resumes with a delta frame the reloaded hardware
-     * decoder cannot use, so bring the keyframe with us: a cached IDR snapshot replays
-     * instantly, a refresh-capable server gets a keyframe request, and a refresh-
-     * ineffective one without a snapshot reconnects for its connect IDR. */
     native_background_slot(app, old_index);
     if (target_slot->snapshot_pending) {
-        /* The target's own hidden reconnect is still in flight: let the live connection
-         * feed the decoder directly — its first frame IS the connect IDR (make-before-
-         * break). In the ms-wide window where that IDR already landed in the cache
-         * instead, the keyframe watchdog below reconnects — no worse than before. */
+        /* An in-flight hidden reconnect can deliver its IDR directly after activation. */
         target_slot->snapshot_pending = false;
         pthread_mutex_lock(&app->video_lock);
         native_au_snapshot_reset(&target_slot->snapshot);
@@ -133,10 +109,6 @@ void native_complete_session_switch(App *app, int target) {
             /* The replay attempt flagged the slot (terminal feed error): the failure
              * drain routes it; nothing to resume here. */
         } else if (target_slot->refresh_ineffective && !NATIVE_SWITCH_TEST_NO_RECONNECT) {
-            /* This server never delivers a keyframe on request (no Display Control
-             * channel, Refresh Rect ignored — learned from an earlier watchdog timeout).
-             * Skip the doomed wait and reconnect right away: a fresh connection always
-             * starts with an IDR. */
             clog(cLogLevelWarning,
                  "%s server yields no keyframe on request; reconnecting immediately for a fresh IDR",
                  native_session_slot_name(target));

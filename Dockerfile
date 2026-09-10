@@ -1,9 +1,9 @@
-# Native gnomecast build environment for local and CI builds.
+# Native lgnome build environment for local and CI builds.
 #
 # Build:
-#   docker build -t gnomecast-native-build .
+#   docker build -t lgnome-native-build .
 # Use:
-#   docker run --rm -v "$PWD:/workspace" -w /workspace gnomecast-native-build \
+#   docker run --rm -v "$PWD:/workspace" -w /workspace lgnome-native-build \
 #     bash -lc './tools/build-native-webos.sh'
 
 FROM ubuntu:24.04

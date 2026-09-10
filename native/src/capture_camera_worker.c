@@ -17,7 +17,7 @@
 #include "clog.h"
 #include "native_time.h"
 
-clog_define(g_native_log_capture_camera_worker, cLogLevelInfo, cLogFlags_Default, "capture.redirect", NULL);
+clog_define(g_native_log_capture_camera_worker, cLogLevelInfo, "capture.redirect");
 
 #define CAMERA_READ_TIMEOUT_MS 100
 #define CAMERA_TIMEOUT_LIMIT 20u
@@ -118,7 +118,7 @@ void capture_camera_set_physical_available(NativeCaptureRedirectImpl *impl, bool
     pthread_mutex_unlock(&impl->lock);
 }
 
-#ifdef HELLOLG_CAPTURE_REDIRECT_TESTING
+#ifdef LGNOME_CAPTURE_REDIRECT_TESTING
 void native_capture_redirect_test_set_camera_physical_available(NativeCaptureRedirect *redirect, bool available) {
     if (!redirect || !redirect->impl) {
         return;
@@ -200,7 +200,7 @@ void *capture_camera_worker_main(void *context) {
     NativeCameraCapture *capture = NULL;
     NativeCameraH264Stream *stream = NULL;
     bool physical_available = false;
-    uint64_t next_device_probe_ms = 0u;
+    uint32_t next_device_probe_ms = native_monotonic_ms();
     unsigned timeouts = 0u;
     unsigned previous_profile_count = 0u;
     int active_slot = -1;
@@ -234,6 +234,7 @@ void *capture_camera_worker_main(void *context) {
         }
         if (target_changed) {
             camera_close_resources(&capture, &stream);
+            next_device_probe_ms = native_monotonic_ms();
             active_slot = target_slot;
             active_generation = target_generation;
             active_state_generation = target_state_generation;
@@ -250,14 +251,14 @@ void *capture_camera_worker_main(void *context) {
                 physical_available = false;
                 capture_camera_set_physical_available(impl, false);
             }
-            next_device_probe_ms = 0u;
+            next_device_probe_ms = native_monotonic_ms();
             timeouts = 0u;
             native_sleep_ms(25u);
             continue;
         }
 
-        uint64_t now_ms = native_monotonic_ms64();
-        if ((!physical_available || !capture) && now_ms >= next_device_probe_ms) {
+        uint32_t now_ms = native_monotonic_ms();
+        if ((!physical_available || !capture) && native_deadline_reached_ms(now_ms, next_device_probe_ms)) {
             bool present = camera_device_present(impl);
             if (present != physical_available) {
                 physical_available = present;
@@ -281,14 +282,14 @@ void *capture_camera_worker_main(void *context) {
             physical_available = false;
             capture_camera_set_physical_available(impl, false);
             camera_close_resources(&capture, &stream);
-            next_device_probe_ms = native_monotonic_ms64() + CAMERA_DEVICE_RETRY_MS;
+            next_device_probe_ms = native_monotonic_ms() + CAMERA_DEVICE_RETRY_MS;
             native_sleep_ms(25u);
             continue;
         }
         if (!camera_submit_queued(impl, active_slot, active_generation, active_state_generation, active_owner_epoch,
                                   stream)) {
             camera_close_resources(&capture, &stream);
-            next_device_probe_ms = 0u;
+            next_device_probe_ms = native_monotonic_ms();
             continue;
         }
 
@@ -300,7 +301,7 @@ void *capture_camera_worker_main(void *context) {
                 clog(cLogLevelWarning, "native-H.264 camera stopped producing frames; reopening capture");
                 camera_fail_credit(impl, active_slot, active_generation);
                 camera_close_resources(&capture, &stream);
-                next_device_probe_ms = 0u;
+                next_device_probe_ms = native_monotonic_ms();
                 timeouts = 0u;
             }
             continue;
@@ -308,7 +309,7 @@ void *capture_camera_worker_main(void *context) {
         if (acquire_result != NATIVE_CAMERA_ACQUIRE_FRAME) {
             camera_fail_credit(impl, active_slot, active_generation);
             camera_close_resources(&capture, &stream);
-            next_device_probe_ms = 0u;
+            next_device_probe_ms = native_monotonic_ms();
             timeouts = 0u;
             continue;
         }
@@ -319,7 +320,7 @@ void *capture_camera_worker_main(void *context) {
         if (ingest_result == NATIVE_CAMERA_H264_INGEST_RECOVER) {
             camera_fail_credit(impl, active_slot, active_generation);
             camera_close_resources(&capture, &stream);
-            next_device_probe_ms = 0u;
+            next_device_probe_ms = native_monotonic_ms();
             continue;
         }
         if (ingest_result == NATIVE_CAMERA_H264_INGEST_SAMPLE_ERROR) {
@@ -334,7 +335,7 @@ void *capture_camera_worker_main(void *context) {
         if (!camera_submit_queued(impl, active_slot, active_generation, active_state_generation, active_owner_epoch,
                                   stream)) {
             camera_close_resources(&capture, &stream);
-            next_device_probe_ms = 0u;
+            next_device_probe_ms = native_monotonic_ms();
         }
     }
 

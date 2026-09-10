@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_AUDIO_INPUT_PCM_H
-#define GNOMECAST_AUDIO_INPUT_PCM_H
+#ifndef LGNOME_AUDIO_INPUT_PCM_H
+#define LGNOME_AUDIO_INPUT_PCM_H
 
 #include <stdbool.h>
 #include <stddef.h>

@@ -1,8 +1,8 @@
-#ifndef GNOMECAST_NATIVE_PRESENTATION_H
-#define GNOMECAST_NATIVE_PRESENTATION_H
+#ifndef LGNOME_NATIVE_PRESENTATION_H
+#define LGNOME_NATIVE_PRESENTATION_H
 
 /* SDL-thread presentation (see native_presentation.c). SDL builds only. */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #include <SDL.h>
 #include <stdbool.h>

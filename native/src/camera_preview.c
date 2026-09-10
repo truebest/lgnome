@@ -1,7 +1,7 @@
 /* Diagnostic local-camera preview: opens the first streaming V4L2 node,
  * renders frames until BACK/app termination. Split from camera_v4l2.c so the
  * device-capture header stays SDL-free. SDL builds only. */
-#ifdef HELLOLG_TARGET_WEBOS
+#ifdef LGNOME_TARGET_WEBOS
 
 #include "camera_preview.h"
 
@@ -11,7 +11,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_camera_preview, cLogLevelInfo, cLogFlags_Default, "camera.preview", NULL);
+clog_define(g_native_log_camera_preview, cLogLevelInfo, "camera.preview");
 
 static bool native_camera_preview_event(const SDL_Event *event, atomic_bool *running) {
     switch (event->type) {

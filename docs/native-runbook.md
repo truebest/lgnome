@@ -54,14 +54,30 @@ the TV remote's color buttons in the remote's own order: red, green, yellow, blu
   setup/onboarding layer first; on the unobscured HUB it returns to the session that was
   on screen when HUB opened. A new connection started from HUB keeps that return target
   until the new worker is ACTIVE, so validation/start/network failures remain returnable.
+- **Keyboard Esc** follows the same return path: close an open dropdown, cancel Edit
+  without saving, then return from HUB to the live session. It works without a focused
+  widget and while a connection is pending; holding Esc dismisses only one layer.
 - **HUB D-pad navigation**: LEFT/RIGHT move across all four computer cards, UP enters
   the selected card's action controls, and the remaining directions move between
   Connect/Resume, Edit, Help, and the selected card. OK activates the focused element.
   Colour keys and CH +/- remain optional direct shortcuts.
+- **Connection status**: `REBOOT`, `SHUTDOWN`, `SIGNED OUT`, and `CLOSED` identify
+  normal session endings in grey. `REPLACED`, `TIMED OUT`, `LOST`, and `FAILED` are
+  amber; protocol, graphics, and server failures remain red `ERROR`. The selected
+  card explains the last disconnection. A transport close without a server reason
+  never implies a reboot. Server shutdown/reboot codes are `0x19`/`0x1A` in
+  [MS-RDPBCGR Set Error Info](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/a21a1bd9-2303-49c1-90ec-3932435c248c).
+  Explicit server terminations require manual Connect/Retry. Ambiguous MCS
+  user/provider disconnects retain the GNOME handoff limit of three total attempts,
+  one second apart, displayed as `RETRYING`. The last reason survives worker cleanup
+  until a new connection or profile change; it is not persisted across app launches.
+  The C/Rust callback is `on_state(ctx, state, reason, detail)`: `reason` is the shared
+  `RdpDisconnectReason` enum, while `detail` is synchronous diagnostic text for logs.
+  Rebuild both sides together after ABI changes; UI text comes from the typed reason.
 - **Brand and type** follow the `dc_v3` prototype: the four-colour cube rotates in HUB
   and onboarding. Pre-generated IBM Plex Sans fonts render headings, controls, and
   prose; IBM Plex Mono renders values, metadata, fields, badges, and scales; JetBrains
-  Mono is reserved for the `gnomecast_` wordmark. The TV package does not parse or ship
+  Mono is reserved for the `lgnome_` wordmark. The TV package does not parse or ship
   runtime TTF files.
 - Switching to a connected slot moves the VIDEO plane and — KVM-style — the keyboard and
   mouse to it; a colored square in the top-right corner confirms the active slot for
@@ -79,7 +95,7 @@ the TV remote's color buttons in the remote's own order: red, green, yellow, blu
   own SPSC ring and dynamic converter, so 44.1kHz PCM and 48kHz Opus can play
   simultaneously. NDL receives paced
   S16LE from the engine pump. PCM-only servers keep working unchanged; builds with
-  `HELLOLG_WITH_OPUS=OFF` mute Opus sessions with a log.
+  `LGNOME_WITH_OPUS=OFF` mute Opus sessions with a log.
 - **Audio quality** is a global setting (`audioCodec`, also a pre-connect UI dropdown and
   the `--audio-codec` CLI flag): `auto` (default) lets the server pick Opus; `pcm` offers
   the server PCM only, trading ~1.4Mbps per session for a lossless stream. It applies to
@@ -147,6 +163,12 @@ the TV remote's color buttons in the remote's own order: red, green, yellow, blu
   `V4L2_PIX_FMT_H264` at the exact required resolution and frame rate; a marketing H.264
   claim without driver exposure is insufficient. The previously used Logitech Brio 300
   may be incompatible if its V4L2 node does not provide native H.264.
+- Device acceptance: native H.264 capture was observed on an Adesso CyberTrack H5 at
+  640x480/15 fps; the earlier Brio 300 software-encoding path does not qualify this
+  implementation. Still qualify long-stream reference integrity, Stop/Start,
+  reconnect, unplug/replug, and foreground handoff between two capture-enabled
+  sessions. RDPEAI was observed streaming ALSA 48 kHz mono resampled to negotiated
+  44.1 kHz stereo and must remain live during these checks.
 - Microphone redirection opens ALSA through `dlopen` (there is no hard `libasound`
   dependency), preferring 48 kHz mono and then stereo. The input is gain-adjusted,
   linearly resampled and packetized independently for every 44.1 kHz stereo S16LE stream
@@ -155,12 +177,18 @@ the TV remote's color buttons in the remote's own order: red, green, yellow, blu
   paced silence for the foreground consumer and retries in the background; background
   streams send no PCM. It never terminates video or an RDP session.
 - **Adaptive delay is always enabled and has no user control.** Every source starts at
-  60ms, ranges from 40–150ms, and derives its target from a rolling 10s histogram of
-  relative arrival/capture-time variation (`p95 + 20ms`, 5ms buckets). RDPEA timestamp
+  60ms and ranges from 40–260ms. The target covers both the producer's block cadence
+  and a rolling 10s histogram of relative arrival/capture-time variation
+  (`max(block cadence, p95) + 20ms`, 5ms buckets). In the measured Windows session,
+  PCM arrived in roughly 186ms blocks, compared with roughly 20ms Opus packets from
+  gnome-remote-desktop. Even punctual 186ms blocks drain a shorter standing queue
+  between arrivals; the 260ms ceiling leaves room for that cadence and headroom.
+  RDPEA timestamp
   wrap is handled; zero/repeated timestamps fall back to decoded duration. A gap over
   500ms is a talkspurt boundary and re-primes at least 60ms rather than polluting the
-  jitter estimate. New peaks and underruns raise the target immediately; stable delivery
-  can lower it by at most 10ms per five seconds, never below 40ms.
+  jitter estimate. New peaks or a longer block cadence raise the target immediately;
+  underruns postpone decay. Stable delivery can lower it by at most 10ms per five
+  seconds, never below the cadence-derived floor or 40ms.
 - Queue error beyond 10ms changes each source's SRC ratio smoothly, capped at +/-0.5%
   by a 50ms error, with a slow drift term for mismatched producer/DAC clocks. A backlog
   over target by 80ms fades out for 5ms, drops old frames to `target + 20ms`, resets the
@@ -188,7 +216,7 @@ the TV remote's color buttons in the remote's own order: red, green, yellow, blu
   server's next delta references exactly the replayed state. The first frame shown is
   the desktop as of backgrounding time; the resume delta catches it up. Cache overflow
   (a server that keeps streaming despite suppress) voids the snapshot and switch-back
-  falls back to the visible reconnect. `HELLOLG_SNAPSHOT_FORCE=1` arms snapshot
+  falls back to the visible reconnect. `LGNOME_SNAPSHOT_FORCE=1` arms snapshot
   backgrounding for every slot without waiting for the watchdog to learn — the on-device
   experiment knob for validating that grd's resume delta really continues the cached
   chain.
@@ -336,16 +364,16 @@ reinstalls AND TV power cycles; `/media/developer/temp/<appid>-<euid>` is the ne
 candidate (persistent ext4), and the tmpfs `/tmp/<appid>-<euid>` fallback is last —
 loading scans the same priority order, so settings migrate upward on the next save.
 Explicit webOS launch params or CLI flags override loaded settings (flat launch/CLI keys
-target the green slot). Set `HELLOLG_IGNORE_SAVED_CONFIG=1` for a one-off launch that
+target the green slot). Set `LGNOME_IGNORE_SAVED_CONFIG=1` for a one-off launch that
 ignores saved UI settings.
 
 Changing connection fields on a still-live background profile and pressing **Save** ends
 that old worker, so the newly labelled profile can never resume the previous computer by
 mistake. **Save and connect** replaces it immediately; a name-only edit leaves it running.
 
-`audioPrebufferMs` and `--audio-prebuffer-ms` are accepted for one compatibility release,
-ignored, and produce one deprecation warning. Persisted JSON no longer writes the field;
-old value `0` does not disable buffering.
+Resolution belongs to each profile (`desktopWidth` / `desktopHeight`). Legacy global
+`width`, `height`, and `audioPrebufferMs` JSON keys are ignored, as are the retired
+`--width`, `--height`, and `--audio-prebuffer-ms` CLI flags. Audio buffering is adaptive.
 
 ## Local Build And Test
 
@@ -354,12 +382,12 @@ Targeted local loop:
 ```sh
 ./tools/syntax-check-native.sh
 cargo test --manifest-path webrdp-min/Cargo.toml --features native native::
-cmake -S native -B /tmp/gnomecast-native-build-tests
-cmake --build /tmp/gnomecast-native-build-tests
-ctest --test-dir /tmp/gnomecast-native-build-tests --output-on-failure
+cmake -S native -B /tmp/lgnome-native-build-tests
+cmake --build /tmp/lgnome-native-build-tests
+ctest --test-dir /tmp/lgnome-native-build-tests --output-on-failure
 ```
 
-Add `-DHELLOLG_WITH_OPUS=ON` to the configure step to include the `audio-opus` test; the
+Add `-DLGNOME_WITH_OPUS=ON` to the configure step to include the `audio-opus` test; the
 flag is off by default on host builds (ExternalOPUS downloads the libopus source tarball)
 and on only for webOS cross-builds.
 
@@ -367,10 +395,10 @@ Build and link the native shell against the real Rust static library:
 
 ```sh
 cargo build --manifest-path webrdp-min/Cargo.toml --features native
-cmake -S native -B /tmp/gnomecast-native-rust-build \
-  -DHELLOLG_LINK_RDP_FFI=ON \
+cmake -S native -B /tmp/lgnome-native-rust-build \
+  -DLGNOME_LINK_RDP_FFI=ON \
   -DRDP_FFI_LIB="$PWD/webrdp-min/target/debug/libwebrdp_min.a"
-cmake --build /tmp/gnomecast-native-rust-build
+cmake --build /tmp/lgnome-native-rust-build
 ```
 
 ## webOS Build, Package, Install, Launch
@@ -415,8 +443,9 @@ release snapshots — one commit per version, tags never moved — produced by
    released `.gitmodules` points at the public mirror rather than the private dev remote,
    so `release-github.sh` refuses to publish while the mirror's `main` tree differs from
    the pin — otherwise the snapshot would ship a gitlink nobody can resolve.
-3. Bump the version in `native/deploy/webos/appinfo.json` and drop any "not yet released"
-   wording from `README.md`: the script snapshots `main`'s tree verbatim.
+3. Bump the version in `native/deploy/webos/appinfo.json`; the script snapshots `main`'s
+   tree verbatim. Per-version notes belong in the GitHub Release, not in the repo —
+   `README.md` describes the current client, so it does not accumulate a changelog.
 4. Build a fresh IPK from that exact `main`, record its SHA-256, deploy that same file,
    and repeat the smoke test.
 5. Publish the snapshot and tag with `tools/release-github.sh`, wait for GitHub CI, then
@@ -428,8 +457,7 @@ different one (for example an HTTPS remote when no SSH key is registered with Gi
 Install and launch:
 
 ```sh
-ARES_DEVICE=<tv-device> HELLOLG_NATIVE_CONFIG=native/config.local.json \
-  ./tools/deploy-native-webos.sh
+ARES_DEVICE=<tv-device> ./tools/deploy-native-webos.sh --ipk /path/to/verified.ipk
 ```
 
 ### Local USB camera preview probe
@@ -439,7 +467,7 @@ accepts uncompressed 640x480 YUYV. It renders that stream in the normal native S
 window and exits on the remote's BACK button:
 
 ```sh
-ARES_DEVICE=<tv-device> ./tools/deploy-native-webos.sh --camera-preview
+ARES_DEVICE=<tv-device> ./tools/deploy-native-webos.sh --no-install --camera-preview
 ```
 
 This is a YUYV-only diagnostic. It proves only local camera capture and presentation;
@@ -453,7 +481,7 @@ The hub waits for a colour-button press, which an automated on-device check cann
 `connectSlot` names a saved profile to open at launch instead:
 
 ```sh
-ares-launch -d <tv-device> com.truebest.gnomecast.native --params '{"connectSlot":"red"}'
+ARES_DEVICE=<tv-device> ./tools/deploy-native-webos.sh --no-install --connect-slot red
 ```
 
 `--connect-slot red` does the same for host runs. This is a debugging aid, not a
@@ -462,33 +490,35 @@ already be configured — the connection then follows the ordinary user-initiate
 it cannot skip validation or reach a state the remote could not. An unconfigured or
 unknown name is logged and leaves the hub as it was.
 
-`tools/deploy-native-webos.sh` installs the latest IPK, reads the host-side config file,
-and sends supported fields
-with `ares-launch --params` without printing the generated JSON. The native app opens a
-four-profile session hub; each colour-key card has a right-side setup drawer for its name,
-address, username, domain, password, `30/60 FPS`, global audio-quality preference, and
-separate camera and microphone opt-in toggles. The HUB camera icon opens the shared device,
-camera-mode, and microphone-gain settings.
-The local SDL graphics/UI surface is
-fixed at 1920x1080 (webOS always scales this virtual canvas to the panel; the video decoder
-plane runs at the server's real resolution independently, so a larger local surface has no
-benefit — see the EGFX surface-size note below). The RDP initial desktop request is a
-separate, fixed hint of 3840x2160: H.264 bypasses SDL entirely, so the UI canvas does not
-constrain it, and a mirroring server overrides the request with its own monitor size in any
-case. Asking for the panel's 4K therefore only decides whether that correction is a resize
-or a no-op, and on a 4K server the session now activates at its final size instead of
-renegotiating from 1080p. The runtime desktop size reported by the server remains the source
-of truth for stream/input sizing. Use `--with-defaults` only for an explicit defaults-only startup smoke.
+`tools/deploy-native-webos.sh --ipk PATH` verifies and installs that exact package,
+then launches with saved profiles and no configuration parameters. It does not build
+or select an IPK automatically. `--no-launch` installs only; `--no-install` launches
+the installed version. The CMake `webos-install-native` target likewise requires
+`-DLGNOME_NATIVE_IPK=/absolute/path/to/package.ipk`.
 
-The native app id is `com.truebest.gnomecast.native`. The native package must contain the
-native executable and native `appinfo.json`; package verification rejects browser/runtime files such as
+Choose at most one launch mode: `--connect-slot COLOR`, `--config FILE`,
+`--with-defaults`, or `--camera-preview`. These modes close a running instance before
+launching so startup parameters take effect. `--config` sends an explicit JSON object;
+it must be below 16 KiB and cannot contain launch-control keys. The app validates
+settings fields. `--with-defaults` explicitly bypasses persisted profiles for a smoke
+check. Ordinary updates need neither option.
+
+The local SDL UI canvas is 1920x1080; the hardware video plane uses the server's actual
+resolution independently. Each profile requests its saved desktop size (3840x2160 by
+default). A mirroring server can override it; the reported runtime size controls video
+and input mapping.
+
+The native app id is `com.truebest.lgnome.native`. The native package must contain the
+native executable and native `appinfo.json`; verification also checks the app identity and
+rejects packaged settings (only an empty `settings/` directory is allowed). It rejects browser/runtime files such as
 `*.html`, `*.js`, `package.json`, and historical `app/` or `service/` trees.
 
 ## Audio Device Acceptance
 
 NDL is the selected production sink. Accept it on TV with
 30 minutes of 4K/60 video plus continuous audio, at least two audible sessions, stable
-target returning to no more than 60ms, no underrun for jitter within the current target,
+target returning to no more than 60ms for 20ms source blocks (or block cadence plus
+20ms for larger blocks), no underrun for jitter within the current target,
 and recovery from gaps above 150ms without permanent backlog. CPU regression must stay
 within 5 percentage points and RSS within 4MB.
 
@@ -498,6 +528,26 @@ the already proven TV media stack. Do not add an SDL audio sink or a custom NDL 
 backend without a new explicit design decision. WSOLA/PLC remains deferred unless the
 current +/-0.5% SRC and rare fade/drop corrections prove insufficient.
 
+### System volume
+
+The MASTER fader controls webOS system volume independently of app mix gains.
+It uses an in-process LS2 thread: spawning a Luna subprocess during NDL reloads
+caused black video on the tested TV. Sets coalesce to one in-flight request;
+getVolume replies update the authoritative cache, while setVolume confirmations
+can echo obsolete values during a drag.
+
+Developer Mode probes on that TV found no usable volume subscription:
+
+| Endpoint or registration | Observed result |
+| --- | --- |
+| `com.webos.audio/getVolume` subscription | Accepted, but no change events; the dynamic service later idled out. |
+| `com.webos.service.audio/master/getVolume` | `Message status unknown`. |
+| `com.webos.service.apiadapter/audio/getVolume` | `Not permitted to send`. |
+| Named LS2 client registration | `Invalid permissions`; anonymous registration worked. |
+
+The client therefore polls getVolume. Firmware that rejects get/setVolume leaves
+the MASTER control unavailable without affecting session audio.
+
 ## Native logging
 
 The C shell, Rust RDP core, and the NDL adapter all end at the embedded `clog` C11
@@ -505,31 +555,30 @@ logger. A C source file defines its default prefix/category once, then ordinary 
 contain only the level and message:
 
 ```c
-clog_define(g_native_log_config, cLogLevelTrace, cLogFlags_Default, "ExampleApp", NULL);
+clog_define(g_native_log_config, cLogLevelTrace, "ExampleApp");
 
 clog(cLogLevelNotice, "Hello, World!\n");
 clog(cLogLevelError, "Error: %d\n", err);
 ```
 
-`clog_define` is file-scoped and appears exactly once per production application translation
-unit. The exceptions are `category_log.c` (the logger engine itself) and generated font
-sources. The standalone `backend_ndl` library retains its callback API instead of depending
+A C file that logs declares exactly one file-scoped `clog_define`. Pure helpers need
+neither a category nor an artificial log call. The standalone `backend_ndl` library retains its callback API instead of depending
 on the application logger. A category string is both the printed prefix and the selector
 used for live configuration. It is 1-63 ASCII bytes: alphanumeric, `_`, or `-` components
 separated by single dots.
-Default flags print local wall time, monotonic time since launch, severity, prefix, and
-automatic source metadata for trace/debug messages. Individual flags can select those
-fields, disable all metadata with `cLogFlags_None`, or force source metadata. The final config
-argument is reserved and must currently be `NULL`. The lowercase `clog` macro intentionally
-owns the same name as the C99 complex logarithm, so a translation unit using `<complex.h>`
-must not include `clog.h`.
+The fixed format prints local wall time, monotonic time since launch, severity, and
+category; trace/debug and `diagnostics.*` messages also include source metadata.
+Production output goes to stderr. Tests can install a capture hook before starting
+logging threads and remove it after joining them.
+The lowercase `clog` macro shares the C99 complex logarithm's name, so a translation
+unit using `<complex.h>` must not include `clog.h`.
 
 By default the application prints `info` and higher to stderr; the native executable
-redirects stderr to `/tmp/gnomecast-native.log` unless `HELLOLG_NATIVE_LOG_PATH` overrides
-the path. Set `GNOMECAST_LOG` before launch to change thresholds:
+redirects stderr to `/tmp/lgnome-native.log` unless `LGNOME_NATIVE_LOG_PATH` overrides
+the path. Set `LGNOME_LOG` before launch to change thresholds:
 
 ```sh
-GNOMECAST_LOG='*=info,native=debug,rdp=debug,audio=debug,media.ndl=debug,input=warn'
+LGNOME_LOG='*=info,native=debug,rdp=debug,audio=debug,media.ndl=debug,input=warn'
 ```
 
 This is an environment variable of the native process. The host-side
@@ -553,8 +602,9 @@ tracing target (including `webrdp.transport`, `webrdp.session`, `webrdp.graphics
 `rdp=debug` cover every dotted child. The logger deliberately does not print credentials
 or config-file contents.
 
-`GNOMECAST_LOG` is the only runtime log-level control. The obsolete `WEBRDP_LOG` and
-`GNOMECAST_NDL_LOG` variables and the `/tmp/gnomecast-ndl-debug` marker are not supported.
+`LGNOME_LOG` is the only runtime log-level control. The obsolete `WEBRDP_LOG`,
+`GNOMECAST_LOG`, and `GNOMECAST_NDL_LOG` variables and the `/tmp/gnomecast-ndl-debug`
+marker are not supported.
 Rust probes the enabled `rdp.rust` levels when a session worker starts (pruning disabled
 trace/debug callsites), re-checks the level before formatting each surviving event, and
 forwards the structured level, tracing target, and message synchronously. Events outside
@@ -564,16 +614,11 @@ an active RDP worker have no native callback and are dropped.
 coverage and rejects direct stderr/SDL logging in application C plus stderr logging in
 production Rust.
 
-Diagnostic assertions are compiled out of product (`NDEBUG`) builds. In debug builds an
-assert can include a backtrace when the target libc supports it; debugger breaks remain
-off unless the `diagnostics.break` category is explicitly enabled and a debugger is
-actually attached.
-
 ## NDL Backend Smoke (on-TV, run after backend changes)
 
-Watch `/tmp/gnomecast-native.log` over ssh while exercising. For sink-level
+Watch `/tmp/lgnome-native.log` over ssh while exercising. For sink-level
 telemetry, launch the native process with
-`GNOMECAST_LOG='media.ndl=debug'`. The adapter mirrors the effective `media.ndl` level
+`LGNOME_LOG='media.ndl=debug'`. The adapter mirrors the effective `media.ndl` level
 into the backend's minimum log level when media opens, so debug telemetry is not even
 produced while the level is filtered out. Every 300 accepted video AUs, `video sink`
 reports the DirectMedia render-buffer getter and the EWMA/maximum duration and error
@@ -585,7 +630,7 @@ transient drop from a dead sink.
 
 1. **Probe/init**: startup shows `[backend-ndl] loaded NDL library: libNDL_directmedia.so.1`
    (or which candidate/RTLD_DEFAULT won), any missing optional symbols, and
-   `initialized app_id=com.truebest.gnomecast.native`. A dlopen or `NDL_DirectMediaInit`
+   `initialized app_id=com.truebest.lgnome.native`. A dlopen or `NDL_DirectMediaInit`
    failure logs the exact `NDL_DirectMediaGetError()` text.
 2. **Connect**: green session → video within ~2 s of the first IDR
    (`media loaded: generation=N video=yes`), audio starts immediately (the empty-frame
@@ -608,7 +653,7 @@ transient drop from a dead sink.
    back. The background profile must send no camera or microphone payload while its
    incoming playback audio keeps feeding the mix. The foreground microphone and RDP
    session must survive camera recovery. Repeatedly close and reopen a GNOME Camera/Zoom
-   consumer; each stop must be acknowledged successfully, the PipeWire `GnomeCast Camera`
+   consumer; each stop must be acknowledged successfully, the PipeWire `lgnome Camera`
    device must remain available (its node serial may be recreated), and the next open
    must restart video without reconnecting RDP.
 8. **30 min soak**: RSS stable (`/proc/<pid>/status` over ssh), no log spam from
@@ -625,12 +670,23 @@ open item.
   `ProtocolError`, or a specific TLS/CredSSP diagnostic.
 - H.264-capable sessions should use the NDL hardware path; if the server cannot provide H.264,
   verify native RemoteFX bitmap updates reach the SDL RGBA presenter.
+- A Windows host can confirm `V10_7{SMALL_CACHE}` yet remain on Uncompressed/ClearCodec
+  while frame acknowledgments are active. The native worker sends one
+  `SUSPEND_FRAME_ACKNOWLEDGEMENT` response and then stops acknowledging frames, telling the
+  server not to apply EGFX backpressure; on the validated host and continuous-motion
+  workload this changes the session to H.264 after roughly 7-8 seconds. Once H.264 is live, Windows can
+  continue sending RemoteFX/ClearCodec still-region refinements. The native shell holds the
+  hardware plane for 1500 ms after each H.264 feed and drops those tiles instead of tearing
+  the decoder down. With `native=debug`, `refinement tiles dropped while H.264 is live`
+  confirms this path. At the default log level, expect one
+  `switching graphics path from native RemoteFX RGBA to NDL/H.264` notice followed by the
+  five-second `video: ... frames` cadence summaries, with no reverse switch.
 - Camera redirection requires an exact native-H.264 V4L2 mode. `camera.v4l2` reports
   capture open/reopen failures, `camera.h264` reports decoder-seed/FIFO recovery, and
   `capture.redirect` reports the number of camera and microphone consumers.
   `webrdp.camera` should advertise the device only to the foreground opted-in session
   after RDPECAM version negotiation.
-  Use `GNOMECAST_LOG='*=info,webrdp.camera=debug'` to record serialized RX/TX start/stop
+  Use `LGNOME_LOG='*=info,webrdp.camera=debug'` to record serialized RX/TX start/stop
   transitions, device state, active-stream count, pending sample credits, aggregate
   sample response/error counters, and protocol error codes. Per-sample success is not
   logged because it is a frame-rate hot path; the counters are included with each
@@ -656,7 +712,7 @@ open item.
   plane (`SDL_CreateColorCursor`, see `cursor_sdl.c`) — never as an SDL overlay, which would
   need per-tick presents and re-introduce the flicker above. Check the log for
   `DEBUG cursor: server cursor WxH ...` on connect (enable it with
-  `GNOMECAST_LOG='cursor=debug'`); `WARN cursor: color cursor
+  `LGNOME_LOG='cursor=debug'`); `WARN cursor: color cursor
   unavailable: ...` means the webOS SDL port refused color cursors and the client stays on
   the default arrow. The mouse is read from grabbed `/dev/input` (evdev) and the cursor is
   driven by warping the OS pointer to the logical position, so server shapes ride the real
@@ -673,66 +729,7 @@ open item.
   fixed server-side.
 - Decoder/render failures should surface as `DecoderError` and must not fall back to
   MSE, WebCodecs, RDCleanPath, or browser rendering.
-- Input issues: run `ctest --test-dir /tmp/gnomecast-native-build-tests -R input-sdl --output-on-failure`.
-
-## Current Status
-
-Implemented:
-
-- Native CMake target and native `appinfo.json` for app id `com.truebest.gnomecast.native`.
-- Frozen C ABI in `native/include/rdp_ffi.h`.
-- Rust `native` feature exporting FFI lifecycle, input symbols, direct TCP/TLS/CredSSP
-  worker scaffold, AVC420 callbacks, and native RemoteFX/bitmap callbacks.
-- C FFI stub for local scaffold builds; product webOS builds require the Rust staticlib.
-- Pinned native dependency submodules, including miniaudio 0.11.25, with provenance and
-  license staging.
-- Standalone `third_party/backend_ndl/` DirectMedia library plus gnomecast adapters in
-  `native/src/ndl_adapter/`: dlopen, atomic combined-track loads, callbacks, optional PCM
-  priming/keyframe gating, and application-owned H.264 framing/recovery policy.
-- H.264 framing normalization, including AU size caps. NOTE: the wire carries BOTH
-  framings — the nominal RDPEGFX shape is AVC length-prefixed (converted to Annex-B),
-  but gnome-remote-desktop delivers Annex-B outright (passed through). Any code
-  classifying AUs must handle both — use the `h264_annexb.h` scanners, never a
-  hand-rolled parser. The Rust callback forwards raw AUs without a keyframe hint;
-  `native_video_ingest_au` derives the decoder restart point (SPS + PPS before IDR)
-  before snapshot and decoder-ownership gates, including on snapshot replay.
-- Native RGBA surface helper for RemoteFX/bitmap dirty rectangles.
-- CTests for ABI layout, H.264 scanning/conversion/keyframe detection, input helpers,
-  session-failure/exit-code policy, and camera mode enumeration against a fake V4L2 node
-  table (no camera needed).
-- SDL/webOS fullscreen event loop and input dispatch in product builds.
-- Two native webOS helper scripts: build/package/verify and deploy/launch.
-- Native package/install/launch verification on the TV.
-- Live fullscreen GNOME desktop through the NDL hardware plane, TV-verified (AVC420),
-  including correct behavior when the server's real EGFX surface
-  resolution differs from the negotiated MCS/GCC desktop size.
-- Multi-RDP: four session slots (red/green/yellow/blue, remote-button order)
-  with color-button screen navigation (stream when connected, direct connect when a
-  saved profile is offline, setup drawer when empty),
-  KVM-style input switching, mixed PCM audio from all connected sessions,
-  suppress-output backgrounding, Display-Control-based keyframe refresh with a
-  reconnect watchdog, session-array persisted settings with legacy fallback.
-- Headless miniaudio float engine with per-session `ma_sound` voices, independent source
-  rates, adaptive jitter/drift control, gain/meters, and an S16 NDL pump.
-- Per-profile RDPECAM camera and RDPEAI microphone redirection, foreground-scoped camera
-  hotplug, foreground-only microphone payload, shared V4L2/ALSA devices, stable-device
-  selection, native Annex-B H.264 stream normalization, and on-TV input settings.
-
-Not yet implemented or not yet TV-verified:
-
-- Native RemoteFX/bitmap fallback path against a server without H.264.
-- Live fullscreen RemoteFX-only/native RGBA presentation on TV.
-- Multi-RDP on-device verification: color-button scancodes during streaming, switch
-  latency, simultaneous audio mix, RSS with two sessions, background session surviving a
-  switch (Phase 0 device checks from the multi-RDP plan).
-- Miniaudio/NDL device acceptance described above.
-- Native-H.264 camera acceptance on TV beyond the verified basic path: long-stream
-  reference integrity, Stop/Start, reconnect, unplug/replug, two capture-enabled sessions,
-  foreground handoff, and return. Live capture itself is device-verified with an Adesso
-  CyberTrack H5 at 640x480 at 15 fps. The earlier Brio 300 validation used the removed
-  YUYV conversion/encoding path and does not validate this implementation. RDPEAI was
-  independently observed streaming (ALSA 48 kHz mono resampled to the negotiated 44.1 kHz
-  stereo) and must remain live throughout.
+- Input issues: run `ctest --test-dir /tmp/lgnome-native-build-tests -R input-sdl --output-on-failure`.
 
 ## Third-Party Provenance
 
@@ -745,3 +742,65 @@ git submodule update --init third_party/backend_ndl third_party/IronRDP third_pa
 See `third_party/PROVENANCE.md` for pinned commits, licenses, and the Moonlight reference boundary.
 
 [grd-camera-media-format]: https://gitlab.gnome.org/GNOME/gnome-remote-desktop/-/blob/00195e889ad9390d4fa462d291a70fa92fe64678/src/grd-rdp-dvc-camera-device.c#L1388
+
+### Connection and video diagnostics
+
+At the default info level, each session reports its requested desktop size and local
+PTS cadence, the TCP-only transport, negotiated TLS version/cipher, and the RDP
+activation size/compression. The local FPS setting controls synthetic video timestamps;
+it is not a request that changes the Windows capture-rate limit. The TLS summary also
+states the current certificate-verification policy; it never prints certificates,
+credentials, or TLS keys.
+
+EGFX logs the advertised capability sets and the server-confirmed set separately.
+ResetGraphics reports the actual graphics size. The first H.264 base-view AU and first
+bitmap rectangle after each reset identify the observed payload path. An H.264 base
+view alone does not establish AVC420 negotiation: AVC444 can also carry that view, and
+its dropped auxiliary data is reported separately. Surface mappings are debug-level.
+Decoder-open records include slot, connection epoch, dimensions, AU framing, and
+SPS/PPS/IDR presence. No compressed payload bytes are logged.
+
+The tested Windows host needs V10 capabilities for H.264; AVC_THIN_CLIENT requests
+its YUV420 view. The NDL decoder presents every submitted AU, so the client drops
+AVC444 auxiliary chroma rather than displaying it as an image. H.264 callbacks feed
+the hardware plane directly and leave IronRDP's unused compositor disabled.
+SolidFill, SurfaceToSurface and CacheToSurface are currently ignored: they are not
+needed to present complete H.264 frames, but may leave stale pixels in bitmap-only
+sessions. Supporting those operations requires updates to the RGBA canvas.
+
+The periodic video window belongs to the shared decoder and can span a slot switch;
+`last_slot` identifies the callback ending the window. It counts access units accepted
+by the decoder, not displayed
+frames or server frame boundaries. AU/s and compressed-input bitrate cannot establish
+screen FPS or end-to-end latency. Static desktops may produce few AUs without any
+performance problem. Compare the same moving scene when changing modes.
+
+### Mouse and keyboard event ordering
+
+Grabbed evdev mouse and keyboard events share a timestamp-ordered queue. The
+reader uses a common monotonic clock and publishes only events older than the
+start of a completed device sweep under one lock. Newer events wait for the
+next sweep, including when libevdev has buffered them without fd readiness.
+The SDL thread drains contiguous mouse/keyboard runs without moving wheel or button
+edges across modifier presses/releases. Kernel timestamps preserve ordering
+when separate USB device nodes are read in a different order. Motion coalescing
+happens in the mouse drain and stops at keyboard boundaries.
+
+Queue overflow logs a rate-limited warning and requests release of held remote
+keys/buttons, discarding further input until that reset is consumed. Replaying
+a partial sweep could restore an old press after losing its release. A failed EVIOCGRAB excludes that device from raw input.
+Mixer handoff samples physical mouse-button state after ungrab, so releases
+already consumed by evdev cannot strand the overlay's held-button mask.
+Host `input-event-queue` tests cover Ctrl/wheel ordering, reversed device reads,
+motion boundaries, equal timestamps, ring wrap, sweep cutoffs and overflow recovery. Actual
+USB capture and focus/HUB transitions still require the full webOS build and a
+TV smoke test. `input-sdl` also verifies Ctrl+Alt+Shift with clicks, dragging
+and wheel events through the C RDP send boundary: all left/right modifier
+combinations, all press/release orders and both device-read orders.
+
+Cursor visibility uses the webOS platform API because SDL_ShowCursor(SDL_DISABLE)
+also stops pointer-event delivery on the tested firmware. Raw evdev activity bypasses
+the compositor, so input takeover and overlay return restore the server's cursor
+artwork before its visibility. A server-requested hide remains in effect. Cursor
+resizing uses premultiplied-alpha area sampling to avoid dark fringes; capped hotspots
+are derived from original geometry to avoid accumulated rounding or saturation.

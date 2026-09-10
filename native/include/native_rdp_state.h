@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_NATIVE_RDP_STATE_H
-#define GNOMECAST_NATIVE_RDP_STATE_H
+#ifndef LGNOME_NATIVE_RDP_STATE_H
+#define LGNOME_NATIVE_RDP_STATE_H
 
 #include <stdbool.h>
 
@@ -10,6 +10,8 @@
 
 typedef struct App App;
 typedef struct NativeSessionSlot NativeSessionSlot;
+
+void native_slot_record_state(NativeSessionSlot *slot, RdpState state, RdpDisconnectReason reason);
 
 const char *rdp_state_name(RdpState state);
 bool rdp_state_is_terminal_error(RdpState state);

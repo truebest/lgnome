@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_RDP_FFI_H
-#define GNOMECAST_RDP_FFI_H
+#ifndef LGNOME_RDP_FFI_H
+#define LGNOME_RDP_FFI_H
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -19,8 +19,32 @@ typedef enum RdpState {
     RDP_STATE_DECODER_ERROR = 6,
     RDP_STATE_NETWORK_ERROR = 7,
     RDP_STATE_PROTOCOL_ERROR = 8,
-    RDP_STATE_STOPPED = 9
+    RDP_STATE_STOPPED = 9,
+    RDP_STATE_DISCONNECTED = 10,
+    RDP_STATE_RECONNECTING = 11
 } RdpState;
+
+typedef enum RdpDisconnectReason {
+    RDP_DISCONNECT_NONE = 0,
+    RDP_DISCONNECT_PEER_DISCONNECTED = 1,
+    RDP_DISCONNECT_USER_DISCONNECT = 2,
+    RDP_DISCONNECT_USER_LOGOFF = 3,
+    RDP_DISCONNECT_ADMIN_DISCONNECT = 4,
+    RDP_DISCONNECT_ADMIN_LOGOFF = 5,
+    RDP_DISCONNECT_SESSION_REPLACED = 6,
+    RDP_DISCONNECT_IDLE_TIMEOUT = 7,
+    RDP_DISCONNECT_SESSION_TIMEOUT = 8,
+    RDP_DISCONNECT_SERVER_SHUTDOWN = 9,
+    RDP_DISCONNECT_SERVER_REBOOT = 10,
+    RDP_DISCONNECT_SERVER_ERROR = 11,
+    RDP_DISCONNECT_ACCESS_DENIED = 12,
+    RDP_DISCONNECT_LICENSE_ERROR = 13,
+    RDP_DISCONNECT_BROKER_ERROR = 14,
+    RDP_DISCONNECT_CONNECTION_FAILED = 15,
+    RDP_DISCONNECT_CONNECTION_LOST = 16,
+    RDP_DISCONNECT_PROTOCOL_ERROR = 17,
+    RDP_DISCONNECT_GRAPHICS_ERROR = 18,
+} RdpDisconnectReason;
 
 /* Values shared with RDP_AUDIO_CODEC_* constants in webrdp-min/src/native/abi.rs. */
 typedef enum RdpAudioCodec {
@@ -63,12 +87,12 @@ typedef struct RdpConfig {
 
 typedef struct RdpCallbacks {
     void *ctx;
-    void (*on_state)(void *ctx, RdpState state, const char *detail);
+    void (*on_state)(void *ctx, RdpState state, RdpDisconnectReason reason, const char *detail);
     /* Logging callbacks are synchronous. target/message remain valid only for the call.
      * on_log_enabled lets Rust avoid formatting disabled tracing events. It must answer
-     * by level alone (true if any target could want the level): the worker also probes
+     * by level: the worker also probes
      * it once per level when a session starts to prune disabled callsites. */
-    bool (*on_log_enabled)(void *ctx, RdpLogLevel level, const char *target);
+    bool (*on_log_enabled)(void *ctx, RdpLogLevel level);
     void (*on_log)(void *ctx, RdpLogLevel level, const char *target, const char *message);
     void (*on_desktop_size)(void *ctx, uint16_t width, uint16_t height);
     /* Raw AVC420 access unit. The C shell classifies AVC/Annex-B framing and IDR

@@ -13,23 +13,10 @@
 #include <string.h>
 #include <time.h>
 
-#if defined(__unix__) || defined(__APPLE__)
-#include <sched.h>
-#endif
-
-#if defined(__linux__)
-#include <signal.h>
-#endif
-
-#if defined(CLOGX_HAVE_EXECINFO) && CLOGX_HAVE_EXECINFO
-#include <execinfo.h>
-#endif
-
 #define CLOGX_MAX_RULES 32u
 #define CLOGX_MAX_SELECTOR 63u
 #define CLOGX_MESSAGE_CAPACITY 2048u
 #define CLOGX_LINE_CAPACITY 2048u
-#define CLOGX_BACKTRACE_FRAMES 32
 #define CLOGX_NS_PER_SECOND UINT64_C(1000000000)
 #define CLOGX_NS_PER_MILLISECOND UINT64_C(1000000)
 
@@ -38,35 +25,21 @@ typedef struct ClogxRule {
     ClogxLevel level;
 } ClogxRule;
 
-typedef struct ClogxSinkSlot {
-    ClogxSink sink;
-    void *context;
-    uint32_t in_flight;
-} ClogxSinkSlot;
-
 static atomic_flag g_state_lock = ATOMIC_FLAG_INIT;
 static ClogxCategory *g_categories;
 static ClogxRule g_rules[CLOGX_MAX_RULES];
 static size_t g_rule_count;
-static ClogxSinkSlot g_sink_slots[2];
-static unsigned g_active_sink_slot;
-static atomic_flag g_sink_set_lock = ATOMIC_FLAG_INIT;
-
 static atomic_flag g_clock_lock = ATOMIC_FLAG_INIT;
 static uint64_t g_monotonic_origin_ns;
 static uint64_t g_monotonic_fallback_last_ns;
 
 #ifdef CLOGX_TESTING
+static ClogxTestSink g_test_sink;
+static void *g_test_sink_context;
 static ClogxTestClock g_test_wall_clock;
 static ClogxTestClock g_test_monotonic_clock;
 #endif
 
-static ClogxCategory g_diagnostics_assert =
-    CLOGX_CATEGORY_INITIALIZER("diagnostics.assert", CLOGX_LEVEL_ERROR);
-static ClogxCategory g_diagnostics_backtrace =
-    CLOGX_CATEGORY_INITIALIZER("diagnostics.backtrace", CLOGX_LEVEL_ERROR);
-static ClogxCategory g_diagnostics_break =
-    CLOGX_CATEGORY_INITIALIZER("diagnostics.break", CLOGX_LEVEL_OFF);
 static ClogxCategory g_diagnostics_internal =
     CLOGX_CATEGORY_INITIALIZER("diagnostics.internal", CLOGX_LEVEL_WARN);
 
@@ -77,12 +50,6 @@ static void clogx_lock(atomic_flag *lock) {
 
 static void clogx_unlock(atomic_flag *lock) {
     atomic_flag_clear_explicit(lock, memory_order_release);
-}
-
-static void clogx_thread_yield(void) {
-#if defined(__unix__) || defined(__APPLE__)
-    (void)sched_yield();
-#endif
 }
 
 static uint64_t clogx_timespec_ns(const struct timespec *ts) {
@@ -319,48 +286,13 @@ int clogx_configure(const char *spec) {
 }
 
 int clogx_configure_env(void) {
-    const char *spec = getenv("GNOMECAST_LOG");
+    const char *spec = getenv("LGNOME_LOG");
     int result = clogx_configure(spec ? spec : "");
     if (result != CLOGX_CONFIG_OK) {
         clogx_logf(&g_diagnostics_internal, CLOGX_LEVEL_WARN, __FILE__, __LINE__, __func__,
-                   "invalid GNOMECAST_LOG rules ignored (status=%d)", result);
+                   "invalid LGNOME_LOG rules ignored (status=%d)", result);
     }
     return result;
-}
-
-void clogx_set_sink(ClogxSink sink, void *context) {
-    clogx_lock(&g_sink_set_lock);
-
-    unsigned old_slot;
-    for (;;) {
-        clogx_lock(&g_state_lock);
-        old_slot = g_active_sink_slot;
-        unsigned new_slot = 1u - old_slot;
-        if (g_sink_slots[new_slot].in_flight == 0) {
-            g_sink_slots[new_slot].sink = sink;
-            g_sink_slots[new_slot].context = context;
-            g_active_sink_slot = new_slot;
-            clogx_unlock(&g_state_lock);
-            break;
-        }
-        clogx_unlock(&g_state_lock);
-        clogx_thread_yield();
-    }
-
-    for (;;) {
-        clogx_lock(&g_state_lock);
-        bool drained = g_sink_slots[old_slot].in_flight == 0;
-        clogx_unlock(&g_state_lock);
-        if (drained) {
-            break;
-        }
-        clogx_thread_yield();
-    }
-    clogx_unlock(&g_sink_set_lock);
-}
-
-void clogx_reset_sink(void) {
-    clogx_set_sink(NULL, NULL);
 }
 
 static size_t clogx_append(char *output, size_t capacity, size_t offset, const char *text, size_t text_len) {
@@ -374,7 +306,6 @@ static size_t clogx_append(char *output, size_t capacity, size_t offset, const c
 }
 
 static size_t clogx_format_event(const ClogxEvent *event, char *output, size_t capacity) {
-    ClogxFlags flags = event->flags;
     char metadata[256];
     size_t metadata_len = 0;
     uint64_t wall_ms = (event->wall_time_ns / CLOGX_NS_PER_MILLISECOND) % 1000u;
@@ -398,45 +329,22 @@ static size_t clogx_format_event(const ClogxEvent *event, char *output, size_t c
     wall_minute = (int)((seconds_in_day / UINT64_C(60)) % UINT64_C(60));
     wall_second = (int)(seconds_in_day % UINT64_C(60));
 #endif
-    if (flags & CLOGX_FLAG_PRINT_TIME) {
-        uint64_t elapsed_ms = event->monotonic_time_ns / CLOGX_NS_PER_MILLISECOND;
-        int length = snprintf(metadata + metadata_len, sizeof(metadata) - metadata_len,
-                              "%02d:%02d:%02d.%03llu +%06llu.%03llu ", wall_hour, wall_minute,
-                              wall_second, (unsigned long long)wall_ms,
-                              (unsigned long long)(elapsed_ms / 1000u),
-                              (unsigned long long)(elapsed_ms % 1000u));
-        if (length > 0) {
-            metadata_len += (size_t)length < sizeof(metadata) - metadata_len
-                                ? (size_t)length
-                                : strlen(metadata + metadata_len);
-        }
-    }
-    if ((flags & CLOGX_FLAG_PRINT_LEVEL) && metadata_len < sizeof(metadata) - 1u) {
-        int length = snprintf(metadata + metadata_len, sizeof(metadata) - metadata_len, "%s ",
-                              clogx_level_name(event->level));
-        if (length > 0) {
-            metadata_len += (size_t)length < sizeof(metadata) - metadata_len
-                                ? (size_t)length
-                                : strlen(metadata + metadata_len);
-        }
-    }
-    if ((flags & CLOGX_FLAG_PRINT_CATEGORY) && metadata_len < sizeof(metadata) - 1u) {
-        int length = snprintf(metadata + metadata_len, sizeof(metadata) - metadata_len, "%s: ",
-                              event->category ? event->category : "unknown");
-        if (length > 0) {
-            metadata_len += (size_t)length < sizeof(metadata) - metadata_len
-                                ? (size_t)length
-                                : strlen(metadata + metadata_len);
-        }
+    uint64_t elapsed_ms = event->monotonic_time_ns / CLOGX_NS_PER_MILLISECOND;
+    int length = snprintf(metadata, sizeof(metadata),
+                          "%02d:%02d:%02d.%03llu +%06llu.%03llu %s %s: ",
+                          wall_hour, wall_minute, wall_second, (unsigned long long)wall_ms,
+                          (unsigned long long)(elapsed_ms / 1000u),
+                          (unsigned long long)(elapsed_ms % 1000u),
+                          clogx_level_name(event->level), event->category ? event->category : "unknown");
+    if (length > 0) {
+        metadata_len = (size_t)length < sizeof(metadata) ? (size_t)length : strlen(metadata);
     }
 
     size_t offset = 0;
     offset = clogx_append(output, capacity, offset, metadata, metadata_len);
     bool automatic_source = event->level <= CLOGX_LEVEL_DEBUG ||
                             (event->category && strncmp(event->category, "diagnostics.", 12) == 0);
-    bool show_source = (flags & CLOGX_FLAG_PRINT_SOURCE) != 0 ||
-                       ((flags & CLOGX_FLAG_AUTO_SOURCE) != 0 && automatic_source);
-    if (show_source && event->file && event->function) {
+    if (automatic_source && event->file && event->function) {
         char source[320];
         int source_len = snprintf(source, sizeof(source), "%s:%d %s: ", event->file, event->line, event->function);
         if (source_len > 0) {
@@ -462,29 +370,16 @@ static size_t clogx_format_event(const ClogxEvent *event, char *output, size_t c
     return offset;
 }
 
-static void clogx_default_sink(const ClogxEvent *event) {
+static void clogx_deliver(const ClogxEvent *event) {
+#ifdef CLOGX_TESTING
+    if (g_test_sink) {
+        g_test_sink(event, g_test_sink_context);
+        return;
+    }
+#endif
     char line[CLOGX_LINE_CAPACITY];
     (void)clogx_format_event(event, line, sizeof(line));
     (void)fwrite(line, 1, strlen(line), stderr);
-}
-
-static void clogx_deliver(const ClogxEvent *event) {
-    clogx_lock(&g_state_lock);
-    unsigned slot_index = g_active_sink_slot;
-    ClogxSink sink = g_sink_slots[slot_index].sink;
-    void *context = g_sink_slots[slot_index].context;
-    if (sink) {
-        g_sink_slots[slot_index].in_flight++;
-    }
-    clogx_unlock(&g_state_lock);
-    if (sink) {
-        sink(event, context);
-        clogx_lock(&g_state_lock);
-        g_sink_slots[slot_index].in_flight--;
-        clogx_unlock(&g_state_lock);
-    } else {
-        clogx_default_sink(event);
-    }
 }
 
 static void clogx_mark_truncated(char *message, size_t capacity) {
@@ -531,13 +426,10 @@ static bool clogx_vformat_message(char *message, size_t capacity, const char *fo
     return truncated;
 }
 
-static void clogx_vlogf_internal(ClogxCategory *category, ClogxLevel level, const char *file, int line,
-                                 const char *function, const char *format, va_list args, bool force) {
-    if (!category || !format || (!force && !clogx_enabled(category, level))) {
+void clogx_vlogf(ClogxCategory *category, ClogxLevel level, const char *file, int line,
+                  const char *function, const char *format, va_list args) {
+    if (!category || !format || !clogx_enabled(category, level)) {
         return;
-    }
-    if (force) {
-        clogx_register_category(category);
     }
 
     char message[CLOGX_MESSAGE_CAPACITY];
@@ -545,7 +437,6 @@ static void clogx_vlogf_internal(ClogxCategory *category, ClogxLevel level, cons
 
     ClogxEvent event = {
         .level = level,
-        .flags = category->flags,
         .category = category->name,
         .message = message,
         .file = file,
@@ -558,24 +449,11 @@ static void clogx_vlogf_internal(ClogxCategory *category, ClogxLevel level, cons
     clogx_deliver(&event);
 }
 
-void clogx_vlogf(ClogxCategory *category, ClogxLevel level, const char *file, int line,
-                  const char *function, const char *format, va_list args) {
-    clogx_vlogf_internal(category, level, file, line, function, format, args, false);
-}
-
 void clogx_logf(ClogxCategory *category, ClogxLevel level, const char *file, int line,
                  const char *function, const char *format, ...) {
     va_list args;
     va_start(args, format);
     clogx_vlogf(category, level, file, line, function, format, args);
-    va_end(args);
-}
-
-static void clogx_logf_force(ClogxCategory *category, ClogxLevel level, const char *file, int line,
-                             const char *function, const char *format, ...) {
-    va_list args;
-    va_start(args, format);
-    clogx_vlogf_internal(category, level, file, line, function, format, args, true);
     va_end(args);
 }
 
@@ -626,109 +504,6 @@ void clogx_logf_suppressed(ClogxCategory *category, ClogxLevel level, const char
     va_end(args);
 }
 
-static void clogx_emit_backtrace(const char *file, int line, const char *function, bool force) {
-#if defined(CLOGX_HAVE_EXECINFO) && CLOGX_HAVE_EXECINFO
-    void *frames[CLOGX_BACKTRACE_FRAMES];
-    int count = backtrace(frames, CLOGX_BACKTRACE_FRAMES);
-    char **symbols = count > 0 ? backtrace_symbols(frames, count) : NULL;
-    for (int i = 2; i < count; i++) {
-        if (force) {
-            if (symbols) {
-                clogx_logf_force(&g_diagnostics_backtrace, CLOGX_LEVEL_ERROR, file, line, function,
-                                 "#%d %s", i - 2, symbols[i]);
-            } else {
-                clogx_logf_force(&g_diagnostics_backtrace, CLOGX_LEVEL_ERROR, file, line, function,
-                                 "#%d %p", i - 2, frames[i]);
-            }
-        } else {
-            if (symbols) {
-                clogx_logf(&g_diagnostics_backtrace, CLOGX_LEVEL_ERROR, file, line, function,
-                           "#%d %s", i - 2, symbols[i]);
-            } else {
-                clogx_logf(&g_diagnostics_backtrace, CLOGX_LEVEL_ERROR, file, line, function,
-                           "#%d %p", i - 2, frames[i]);
-            }
-        }
-    }
-    free(symbols);
-#else
-    (void)file;
-    (void)line;
-    (void)function;
-    (void)force;
-#endif
-}
-
-#if defined(__linux__)
-static bool clogx_debugger_attached(void) {
-    FILE *status = fopen("/proc/self/status", "r");
-    if (!status) {
-        return false;
-    }
-    char line[128];
-    bool attached = false;
-    while (fgets(line, sizeof(line), status)) {
-        if (strncmp(line, "TracerPid:", 10) == 0) {
-            attached = strtoul(line + 10, NULL, 10) != 0;
-            break;
-        }
-    }
-    fclose(status);
-    return attached;
-}
-#endif
-
-static bool clogx_break_enabled(ClogxLevel trigger_level) {
-    return clogx_enabled(&g_diagnostics_break, trigger_level);
-}
-
-static void clogx_maybe_break(ClogxLevel trigger_level) {
-#if defined(__linux__)
-    if (clogx_break_enabled(trigger_level) && clogx_debugger_attached()) {
-        (void)raise(SIGTRAP);
-    }
-#else
-    (void)trigger_level;
-#endif
-}
-
-void clogx_assert_fail(ClogxCategory *category, const char *expression, const char *file, int line,
-                       const char *function, const char *format, ...) {
-    char detail[CLOGX_MESSAGE_CAPACITY] = "";
-    if (format) {
-        va_list args;
-        va_start(args, format);
-        (void)clogx_vformat_message(detail, sizeof(detail), format, args);
-        va_end(args);
-    }
-    const char *source_category = category && category->name ? category->name : "unknown";
-    if (detail[0]) {
-        clogx_logf(&g_diagnostics_assert, CLOGX_LEVEL_ERROR, file, line, function,
-                   "%s: assertion failed: %s (%s)", source_category, expression ? expression : "?", detail);
-    } else {
-        clogx_logf(&g_diagnostics_assert, CLOGX_LEVEL_ERROR, file, line, function,
-                   "%s: assertion failed: %s", source_category, expression ? expression : "?");
-    }
-    if (clogx_enabled(&g_diagnostics_backtrace, CLOGX_LEVEL_ERROR)) {
-        clogx_emit_backtrace(file, line, function, false);
-    }
-    clogx_maybe_break(CLOGX_LEVEL_ERROR);
-}
-
-_Noreturn void clogx_panicf(ClogxCategory *category, const char *file, int line,
-                            const char *function, const char *format, ...) {
-    char detail[CLOGX_MESSAGE_CAPACITY];
-    va_list args;
-    va_start(args, format);
-    (void)clogx_vformat_message(detail, sizeof(detail), format ? format : "panic", args);
-    va_end(args);
-    ClogxCategory *output_category = category ? category : &g_diagnostics_assert;
-    clogx_logf_force(output_category, CLOGX_LEVEL_FATAL, file, line, function, "%s", detail);
-    clogx_emit_backtrace(file, line, function, true);
-    clogx_maybe_break(CLOGX_LEVEL_FATAL);
-    abort();
-}
-
 #ifdef CLOGX_TESTING
 void clogx_test_set_clocks(ClogxTestClock wall_clock, ClogxTestClock monotonic_clock) {
     clogx_lock(&g_clock_lock);
@@ -743,7 +518,8 @@ size_t clogx_test_format_event(const ClogxEvent *event, char *output, size_t cap
     return clogx_format_event(event, output, capacity);
 }
 
-bool clogx_test_break_enabled(ClogxLevel trigger_level) {
-    return clogx_break_enabled(trigger_level);
+void clogx_test_set_sink(ClogxTestSink sink, void *context) {
+    g_test_sink = sink;
+    g_test_sink_context = context;
 }
 #endif

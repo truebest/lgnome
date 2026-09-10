@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_UI_PRECONNECT_H
-#define GNOMECAST_UI_PRECONNECT_H
+#ifndef LGNOME_UI_PRECONNECT_H
+#define LGNOME_UI_PRECONNECT_H
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -13,13 +13,7 @@
 typedef struct NativePreconnectUi NativePreconnectUi;
 typedef bool (*NativePreconnectUiBackgroundDrawFn)(void *ctx, SDL_Renderer *renderer);
 
-typedef enum NativePreconnectSessionState {
-    NATIVE_PRECONNECT_SESSION_NOT_SET_UP = 0,
-    NATIVE_PRECONNECT_SESSION_OFFLINE,
-    NATIVE_PRECONNECT_SESSION_CONNECTING,
-    NATIVE_PRECONNECT_SESSION_CONNECTED,
-    NATIVE_PRECONNECT_SESSION_ERROR,
-} NativePreconnectSessionState;
+#include "ui_session_status.h"
 
 /* The 1920x1080 hub presents four fixed red/green/yellow/blue profiles and opens one
  * profile at a time in its setup drawer. Audio/capture preferences are app-global,
@@ -40,6 +34,9 @@ void native_preconnect_ui_set_connecting(NativePreconnectUi *ui, int slot, bool 
 /* Drawer-only status text. Session cards are updated explicitly with set_slot_state. */
 void native_preconnect_ui_set_status(NativePreconnectUi *ui, const char *status, bool error);
 /* Updates one hub card from main.c's session state. `detail` is copied and may be NULL. */
+void native_preconnect_ui_set_slot_status(NativePreconnectUi *ui, int slot,
+                                          NativePreconnectSessionState state,
+                                          RdpDisconnectReason reason, const char *detail);
 void native_preconnect_ui_set_slot_state(NativePreconnectUi *ui, int slot,
                                          NativePreconnectSessionState state, const char *detail);
 /* Updates one card's live stream metadata. `session_minutes` counts the logical user
@@ -73,9 +70,6 @@ void native_preconnect_ui_open_setup(NativePreconnectUi *ui, int slot);
 bool native_preconnect_ui_request_connect(NativePreconnectUi *ui, int slot);
 /* A newer remote colour-key action supersedes an unconsumed Resume/Connect action. */
 void native_preconnect_ui_cancel_pending_navigation(NativePreconnectUi *ui);
-bool native_preconnect_ui_read_current(NativePreconnectUi *ui, char *host, size_t host_cap, uint16_t *port,
-                                       char *username, size_t username_cap, char *password, size_t password_cap,
-                                       char *domain, size_t domain_cap, uint16_t *fps, uint16_t *audio_codec);
 /* Copies slot `slot`'s stored name, host/port, credentials, fps, and duck mask into
  * *out. Returns false (leaving *out untouched) for an out-of-range slot or invalid port. */
 bool native_preconnect_ui_get_slot_values(NativePreconnectUi *ui, int slot, NativeSessionConfig *out);

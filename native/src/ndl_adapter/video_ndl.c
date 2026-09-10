@@ -4,13 +4,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef HELLOLG_WITH_NDL
+#ifdef LGNOME_WITH_NDL
 #include "media_ndl_internal.h"
 #endif
 
 #include "clog.h"
 
-clog_define(g_native_log_video, cLogLevelInfo, cLogFlags_Default, "video.ndl", NULL);
+clog_define(g_native_log_video, cLogLevelInfo, "video.ndl");
 
 struct NativeVideo {
     uint16_t width;
@@ -19,7 +19,7 @@ struct NativeVideo {
     uint8_t *annexb;
     size_t annexb_cap;
     bool terminal_error;
-#ifdef HELLOLG_WITH_NDL
+#ifdef LGNOME_WITH_NDL
     /* Borrowed from the caller; the track never closes either object. */
     NativeMedia *media;
     BackendNdl *backend;
@@ -33,7 +33,7 @@ struct NativeVideo {
 #endif
 };
 
-#ifdef HELLOLG_WITH_NDL
+#ifdef LGNOME_WITH_NDL
 /* NDL exposes no capability query (limits live inside the firmware); the stream is
  * opened lazily on the first config IDR, exactly like the pipeline load itself. */
 static NativeVideoResult native_video_open_stream(NativeVideo *video) {
@@ -91,7 +91,7 @@ static void native_video_log_invalid_h264(const uint8_t *data, size_t len) {
 }
 
 NativeVideo *native_video_open(NativeMedia *media, uint16_t width, uint16_t height, uint16_t fps) {
-#ifndef HELLOLG_WITH_NDL
+#ifndef LGNOME_WITH_NDL
     (void)media;
     (void)width;
     (void)height;
@@ -134,7 +134,7 @@ void native_video_close(NativeVideo *video) {
     if (!video) {
         return;
     }
-#ifdef HELLOLG_WITH_NDL
+#ifdef LGNOME_WITH_NDL
     /* The media adapter reloads the surviving audio track atomically. */
     if (video->media && video->backend && video->video_opened) {
         (void)native_media_ndl_clear_video(video->media);
@@ -190,7 +190,7 @@ NativeVideoResult native_video_feed(NativeVideo *video, const uint8_t *data, siz
         return NATIVE_VIDEO_ERROR;
     }
 
-#ifndef HELLOLG_WITH_NDL
+#ifndef LGNOME_WITH_NDL
     (void)info;
     (void)annexb_len;
     return NATIVE_VIDEO_UNSUPPORTED;

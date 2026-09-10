@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_INPUT_SDL_H
-#define GNOMECAST_INPUT_SDL_H
+#ifndef LGNOME_INPUT_SDL_H
+#define LGNOME_INPUT_SDL_H
 
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -30,7 +30,6 @@ typedef struct NativeInput {
 void native_input_init(NativeInput *input, RdpSession *session, uint16_t desktop_width, uint16_t desktop_height);
 void native_input_set_session(NativeInput *input, RdpSession *session);
 void native_input_set_active(NativeInput *input, bool active);
-bool native_input_is_active(const NativeInput *input);
 void native_input_set_desktop_size(NativeInput *input, uint16_t desktop_width, uint16_t desktop_height);
 void native_input_set_window_size(NativeInput *input, uint16_t window_width, uint16_t window_height);
 void native_input_map_point(const NativeInput *input, int window_x, int window_y, uint16_t *rdp_x, uint16_t *rdp_y);

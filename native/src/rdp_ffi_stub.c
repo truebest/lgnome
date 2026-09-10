@@ -4,7 +4,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_rdp, cLogLevelInfo, cLogFlags_Default, "rdp.stub", NULL);
+clog_define(g_native_log_rdp, cLogLevelInfo, "rdp.stub");
 
 struct RdpSession {
     RdpCallbacks callbacks;
@@ -12,7 +12,7 @@ struct RdpSession {
 
 static void emit_state(const RdpCallbacks *callbacks, RdpState state, const char *detail) {
     if (callbacks && callbacks->on_state) {
-        callbacks->on_state(callbacks->ctx, state, detail);
+        callbacks->on_state(callbacks->ctx, state, RDP_DISCONNECT_NONE, detail);
     }
 }
 

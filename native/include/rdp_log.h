@@ -1,5 +1,5 @@
-#ifndef GNOMECAST_RDP_LOG_H
-#define GNOMECAST_RDP_LOG_H
+#ifndef LGNOME_RDP_LOG_H
+#define LGNOME_RDP_LOG_H
 
 #include <stdbool.h>
 

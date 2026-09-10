@@ -3,12 +3,11 @@
 
 use std::ffi::CString;
 use std::fmt;
-use std::ptr;
 
 use ironrdp_graphics::pointer::DecodedPointer;
 
 use super::egfx::NativeBitmapUnit;
-use super::{RdpCallbacks, RdpLogLevel, RdpState};
+use super::{RdpCallbacks, RdpDisconnectReason, RdpLogLevel, RdpState};
 
 fn cstring_lossy(value: &str) -> CString {
     let bytes: Vec<u8> = value
@@ -20,7 +19,7 @@ fn cstring_lossy(value: &str) -> CString {
     CString::new(bytes).expect("interior NUL bytes are removed")
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub(super) struct CallbackSink {
     pub(super) callbacks: RdpCallbacks,
 }
@@ -31,66 +30,32 @@ unsafe impl Send for CallbackSink {}
 unsafe impl Sync for CallbackSink {}
 
 impl CallbackSink {
-    pub(super) const LOG_TARGET_STACK_CAPACITY: usize = 128;
-
-    pub(super) fn empty() -> Self {
-        Self {
-            callbacks: RdpCallbacks {
-                ctx: ptr::null_mut(),
-                on_state: None,
-                on_log_enabled: None,
-                on_log: None,
-                on_desktop_size: None,
-                on_video_au: None,
-                on_bitmap_update: None,
-                on_audio_format: None,
-                on_audio_data: None,
-                on_pointer_bitmap: None,
-                on_pointer_position: None,
-                on_pointer_state: None,
-                on_camera_start: None,
-                on_camera_stop: None,
-                on_camera_sample_request: None,
-                on_audio_input_start: None,
-                on_audio_input_stop: None,
-            },
-        }
-    }
-
     pub(super) fn new(callbacks: RdpCallbacks) -> Self {
         Self { callbacks }
     }
 
     pub(super) fn emit_state(&self, state: RdpState, detail: impl AsRef<str>) {
+        self.emit_state_reason(state, RdpDisconnectReason::None, detail);
+    }
+
+    pub(super) fn emit_state_reason(
+        &self,
+        state: RdpState,
+        reason: RdpDisconnectReason,
+        detail: impl AsRef<str>,
+    ) {
         if let Some(cb) = self.callbacks.on_state {
             let detail = cstring_lossy(detail.as_ref());
-            cb(self.callbacks.ctx, state, detail.as_ptr());
+            cb(self.callbacks.ctx, state, reason, detail.as_ptr());
         }
     }
 
-    pub(super) fn log_enabled(&self, level: RdpLogLevel, target: &str) -> bool {
-        if self.callbacks.on_log.is_none() {
-            return false;
-        }
-        let Some(cb) = self.callbacks.on_log_enabled else {
-            return true;
-        };
-        // Called per surviving tracing event: keep it allocation-free. Targets are
-        // short module paths; anything unusual falls back to a heap CString.
-        let bytes = target.as_bytes();
-        let mut buf = [0u8; Self::LOG_TARGET_STACK_CAPACITY];
-        if Self::log_target_uses_stack(target) {
-            buf[..bytes.len()].copy_from_slice(bytes);
-            cb(self.callbacks.ctx, level, buf.as_ptr().cast())
-        } else {
-            let target = cstring_lossy(target);
-            cb(self.callbacks.ctx, level, target.as_ptr())
-        }
-    }
-
-    pub(super) fn log_target_uses_stack(target: &str) -> bool {
-        let bytes = target.as_bytes();
-        bytes.len() < Self::LOG_TARGET_STACK_CAPACITY && !bytes.contains(&0)
+    pub(super) fn log_enabled(&self, level: RdpLogLevel) -> bool {
+        self.callbacks.on_log.is_some()
+            && self
+                .callbacks
+                .on_log_enabled
+                .is_none_or(|cb| cb(self.callbacks.ctx, level))
     }
 
     pub(super) fn emit_log(&self, level: RdpLogLevel, target: &str, line: &str) {
@@ -102,7 +67,7 @@ impl CallbackSink {
     }
 
     pub(super) fn log(&self, level: RdpLogLevel, target: &str, arguments: fmt::Arguments<'_>) {
-        if self.log_enabled(level, target) {
+        if self.log_enabled(level) {
             self.emit_log(level, target, &arguments.to_string());
         }
     }
@@ -221,6 +186,51 @@ mod tests {
     use super::*;
 
     #[test]
+    fn state_sink_preserves_reason_in_the_same_event() {
+        use std::ffi::CStr;
+        use std::sync::Mutex;
+        type Events = Mutex<Vec<(RdpState, RdpDisconnectReason, String)>>;
+        extern "C" fn on_state(
+            ctx: *mut core::ffi::c_void,
+            state: RdpState,
+            reason: RdpDisconnectReason,
+            detail: *const std::ffi::c_char,
+        ) {
+            let events = unsafe { &*ctx.cast::<Events>() };
+            let detail = unsafe { CStr::from_ptr(detail) }
+                .to_string_lossy()
+                .into_owned();
+            events.lock().unwrap().push((state, reason, detail));
+        }
+        let events = Events::new(Vec::new());
+        let mut callbacks = CallbackSink::default().callbacks;
+        callbacks.ctx = (&events as *const Events).cast_mut().cast();
+        callbacks.on_state = Some(on_state);
+        let sink = CallbackSink::new(callbacks);
+        sink.emit_state_reason(
+            RdpState::Disconnected,
+            RdpDisconnectReason::ServerReboot,
+            "server restarting",
+        );
+        sink.emit_state(RdpState::Stopped, "stopped");
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                (
+                    RdpState::Disconnected,
+                    RdpDisconnectReason::ServerReboot,
+                    "server restarting".into()
+                ),
+                (
+                    RdpState::Stopped,
+                    RdpDisconnectReason::None,
+                    "stopped".into()
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn video_sink_forwards_raw_au_and_full_width_pts() {
         use std::sync::Mutex as StdMutex;
 
@@ -236,7 +246,7 @@ mod tests {
         }
 
         let seen = StdMutex::new(None);
-        let mut callbacks = CallbackSink::empty().callbacks;
+        let mut callbacks = CallbackSink::default().callbacks;
         callbacks.ctx = (&seen as *const StdMutex<Option<(Vec<u8>, u64)>>)
             .cast_mut()
             .cast();
@@ -287,7 +297,7 @@ mod tests {
         }
 
         let seen = StdMutex::new(Seen::default());
-        let mut callbacks = CallbackSink::empty().callbacks;
+        let mut callbacks = CallbackSink::default().callbacks;
         callbacks.ctx = (&seen as *const StdMutex<Seen>).cast_mut().cast();
         callbacks.on_pointer_bitmap = Some(on_pointer_bitmap);
         callbacks.on_pointer_position = Some(on_pointer_position);

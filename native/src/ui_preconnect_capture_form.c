@@ -5,7 +5,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_ui_capture_form, cLogLevelInfo, cLogFlags_Default, "ui.capture.form", NULL);
+clog_define(g_native_log_ui_capture_form, cLogLevelInfo, "ui.capture.form");
 
 static const int16_t UI_AUDIO_INPUT_GAIN_OPTIONS[] = {-12, -6, 0, 6, 12, 18};
 

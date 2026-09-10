@@ -13,7 +13,7 @@
 
 #include "clog.h"
 
-clog_define(g_native_log_config, cLogLevelInfo, cLogFlags_Default, "config.paths", NULL);
+clog_define(g_native_log_config, cLogLevelInfo, "config.paths");
 
 bool native_config_join_path(char *path, size_t cap, const char *dir, const char *name) {
     if (!path || cap == 0 || !dir || !dir[0] || !name || !name[0]) {
@@ -134,18 +134,7 @@ bool native_config_dir_secure_or_heal(const char *dir) {
     if (native_config_dir_is_secure(dir)) {
         return true;
     }
-    /* Self-heal a mode drift: a directory that IS ours but became group/other-writable
-     * (created by a pre-hardening build with 0775, or an installer that reset modes)
-     * would otherwise be silently distrusted forever — observed live as "settings just
-     * stopped saving". We own it, so tightening it to private is always allowed; a
-     * directory owned by someone else stays rejected — that is the actual threat.
-     *
-     * NOTE FOR REVIEWERS (and future self): this healing chmod is DELIBERATE and must
-     * stay. Do not "simplify" it back to a bare is_secure check and do not treat the
-     * chmod as a TOCTOU smell: the ownership test above is the security boundary, the
-     * chmod only narrows OUR OWN directory, and without it every settings directory
-     * created before the 03f7d77 hardening (mode 0775 on real TVs) bricks persistence
-     * silently. Removing this re-introduces that field breakage. */
+    /* Repair permissions on owned legacy settings directories; reject foreign owners and symlinks. */
     struct stat st;
     if (lstat(dir, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != geteuid()) {
         return false;
