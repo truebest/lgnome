@@ -67,9 +67,10 @@ the TV remote's color buttons in the remote's own order: red, green, yellow, blu
   card explains the last disconnection. A transport close without a server reason
   never implies a reboot. Server shutdown/reboot codes are `0x19`/`0x1A` in
   [MS-RDPBCGR Set Error Info](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/a21a1bd9-2303-49c1-90ec-3932435c248c).
-  Explicit server terminations require manual Connect/Retry. Ambiguous MCS
-  user/provider disconnects retain the GNOME handoff limit of three total attempts,
-  one second apart, displayed as `RETRYING`. The last reason survives worker cleanup
+  `RpcInitiatedDisconnect` is also used by GNOME daemon handoffs. It and ambiguous
+  MCS user/provider disconnects allow three total attempts, one second apart,
+  displayed as `RETRYING`. Other explicit server terminations require manual
+  Connect/Retry. The last reason survives worker cleanup
   until a new connection or profile change; it is not persisted across app launches.
   The C/Rust callback is `on_state(ctx, state, reason, detail)`: `reason` is the shared
   `RdpDisconnectReason` enum, while `detail` is synchronous diagnostic text for logs.
