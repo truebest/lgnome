@@ -25,7 +25,9 @@ use super::transport::{
     install_rustls_provider, is_timeout, random_array, NoCertificateVerification, TlsStream,
     CONNECT_TIMEOUT, IO_POLL_TIMEOUT, WRITE_TIMEOUT,
 };
-use super::{rdpeai, rdpecam, rdpedisp, rdpsnd, NativeError, NativeWorker, RdpLogLevel};
+use super::{
+    rdpeai, rdpecam, rdpedisp, rdpsnd, NativeError, NativeWorker, RdpDisconnectReason, RdpLogLevel,
+};
 use crate::credssp::CredsspClient;
 
 impl NativeWorker {
@@ -306,7 +308,10 @@ impl NativeWorker {
 
     /// Consume the Early User Authorization Result PDU that a HYBRID_EX server
     /// sends after CredSSP ([MS-RDPBCGR] 2.2.10.2).
-    fn read_early_user_auth_result(&mut self, tls: &mut TlsStream) -> Result<(), NativeError> {
+    pub(super) fn read_early_user_auth_result<T: Read>(
+        &mut self,
+        stream: &mut T,
+    ) -> Result<(), NativeError> {
         const RESULT_LEN: usize = 4;
         const AUTHZ_SUCCESS: u32 = 0;
         const AUTHZ_ACCESS_DENIED: u32 = 5;
@@ -317,16 +322,19 @@ impl NativeWorker {
                     "early user authorization result: stopped",
                 ));
             }
-            self.read_more(tls, "early user authorization result")?;
+            self.read_more(stream, "early user authorization result")?;
         }
 
         let bytes: Vec<u8> = self.inbuf.drain(..RESULT_LEN).collect();
         let result = u32::from_le_bytes(bytes.try_into().expect("drained RESULT_LEN bytes"));
         match result {
             AUTHZ_SUCCESS => Ok(()),
-            AUTHZ_ACCESS_DENIED => Err(NativeError::protocol(
-                "the server authenticated the credentials but denied this account remote access",
-            )),
+            AUTHZ_ACCESS_DENIED => Err(NativeError {
+                reason: RdpDisconnectReason::AccessDenied,
+                ..NativeError::protocol(
+                    "the server authenticated the credentials but denied this account remote access",
+                )
+            }),
             other => Err(NativeError::protocol(format!(
                 "unexpected early user authorization result {other:#x}"
             ))),
