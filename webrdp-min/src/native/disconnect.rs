@@ -66,7 +66,10 @@ impl NativeError {
                 RdpState::ProtocolError
             },
             reason,
-            retry_handoff: false,
+            retry_handoff: matches!(
+                info,
+                ErrorInfo::ProtocolIndependentCode(Code::RpcInitiatedDisconnect)
+            ),
             message: format!("server error info {info:?}: {}", info.description()),
         }
     }
@@ -81,7 +84,6 @@ mod tests {
         use ProtocolIndependentCode as Code;
         use RdpDisconnectReason as Reason;
         for (code, reason) in [
-            (Code::RpcInitiatedDisconnect, Reason::AdminDisconnect),
             (Code::RpcInitiatedLogoff, Reason::AdminLogoff),
             (Code::IdleTimeout, Reason::IdleTimeout),
             (Code::LogonTimeout, Reason::SessionTimeout),
@@ -103,6 +105,26 @@ mod tests {
                 assert_eq!(result.reason, reason);
                 assert!(!result.retry_handoff);
             }
+        }
+    }
+
+    #[test]
+    fn rpc_handoff_retries_during_activation_and_active_session() {
+        let info =
+            ErrorInfo::ProtocolIndependentCode(ProtocolIndependentCode::RpcInitiatedDisconnect);
+        for result in [
+            NativeError::disconnect(GracefulDisconnectReason::ErrorInfo(info)),
+            NativeError::connector(ConnectorError::new(
+                "activation",
+                ConnectorErrorKind::ServerErrorInfo(info),
+            )),
+        ] {
+            assert_eq!(result.state, RdpState::Disconnected);
+            assert_eq!(result.reason, RdpDisconnectReason::AdminDisconnect);
+            assert!(result.should_retry(1, false));
+            assert!(result.should_retry(2, false));
+            assert!(!result.should_retry(3, false));
+            assert!(!result.should_retry(1, true));
         }
     }
 

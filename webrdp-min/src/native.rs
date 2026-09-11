@@ -457,6 +457,33 @@ mod tests {
     }
 
     #[test]
+    fn early_authorization_preserves_access_denial_and_buffered_data() {
+        for code in [0u32, 5, 42] {
+            let (mut worker, _tx) = test_worker();
+            let bytes = code.to_le_bytes();
+            worker.inbuf.extend_from_slice(&bytes[..2]);
+            let mut stream = std::io::Cursor::new([bytes[2], bytes[3], 0xaa]);
+            let result = worker.read_early_user_auth_result(&mut stream);
+            assert_eq!(worker.inbuf, [0xaa]);
+            if code == 0 {
+                result.unwrap();
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.state, RdpState::ProtocolError);
+                assert_eq!(
+                    error.reason,
+                    if code == 5 {
+                        RdpDisconnectReason::AccessDenied
+                    } else {
+                        RdpDisconnectReason::None
+                    }
+                );
+                assert!(!error.should_retry(1, false));
+            }
+        }
+    }
+
+    #[test]
     fn retry_folds_pending_suppress_into_latch() {
         let (mut worker, _tx) = test_worker();
         worker.inbuf.push(0);
