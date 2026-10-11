@@ -146,6 +146,8 @@ struct NativeAudioPipelineImpl {
 #ifdef LGNOME_AUDIO_PIPELINE_TESTING
     NativeAudioPipelineTestHook before_ring_read;
     void *before_ring_read_ctx;
+    NativeAudioPipelineTestHook after_queue_cursor;
+    void *after_queue_cursor_ctx;
 #endif
 };
 

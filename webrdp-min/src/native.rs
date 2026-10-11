@@ -39,7 +39,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ironrdp_connector::connection_activation::ConnectionActivationFactory;
 use ironrdp_connector::{ClientConnector, Sequence as _};
@@ -110,6 +110,10 @@ struct NativeWorker {
     audio_input: rdpeai::AudioInputBridge,
     gfx: Arc<Mutex<NativeGfxState>>,
     inbuf: Vec<u8>,
+    phase_deadline: Option<Instant>,
+    write_deadline: Arc<Mutex<Option<Instant>>>,
+    refresh_rect_support: bool,
+    suppress_output_support: bool,
     // Buffered PDUs retain the time of the read that completed them.
     last_read_at: Option<MonotonicInstant>,
     // Retained factory for server-initiated reactivation.
@@ -153,6 +157,10 @@ impl NativeWorker {
             audio_input,
             gfx: Arc::new(Mutex::new(NativeGfxState::default())),
             inbuf: Vec::new(),
+            phase_deadline: None,
+            write_deadline: Arc::new(Mutex::new(None)),
+            refresh_rect_support: false,
+            suppress_output_support: false,
             last_read_at: None,
             activation_factory: None,
             next_pts90k: 0,
@@ -192,6 +200,7 @@ impl NativeWorker {
         self.inbuf.clear();
         self.last_read_at = None;
         self.activation_factory = None;
+        self.phase_deadline = None;
         self.next_pts90k = 0;
         self.pending_input.clear();
         // Preserve the newest suppression state across retry; discard old-session refreshes.
@@ -208,6 +217,7 @@ impl NativeWorker {
     }
 
     fn run_session(&mut self) -> Result<(), NativeError> {
+        self.phase_deadline = Some(Instant::now() + transport::ESTABLISH_TIMEOUT);
         self.callbacks.emit_state(
             RdpState::Connecting,
             format!("connecting to {}:{}", self.config.host, self.config.port),
@@ -276,10 +286,16 @@ impl NativeWorker {
             if self.drain_commands() {
                 return Err(NativeError::network(format!("{label}: stopped")));
             }
+            self.check_phase_deadline(label)?;
             match hint
                 .find_size(&self.inbuf)
                 .map_err(|e| NativeError::protocol(format!("{label}: PDU size: {e}")))?
             {
+                Some((_matched, size)) if size > transport::MAX_TRANSPORT_BUFFER_SIZE => {
+                    return Err(NativeError::protocol(format!(
+                        "{label}: PDU exceeds the size limit"
+                    )))
+                }
                 Some((_matched, size)) if self.inbuf.len() >= size => {
                     return Ok(self.inbuf.drain(..size).collect())
                 }
@@ -288,12 +304,12 @@ impl NativeWorker {
         }
     }
 
-    fn read_ts_request(&mut self, stream: &mut TlsStream) -> Result<Vec<u8>, NativeError> {
+    fn read_ts_request<T: Read>(&mut self, stream: &mut T) -> Result<Vec<u8>, NativeError> {
         loop {
             if self.drain_commands() {
                 return Err(NativeError::network("CredSSP stopped"));
             }
-            if let Some(total) = ts_request_len(&self.inbuf) {
+            if let Some(total) = ts_request_len(&self.inbuf)? {
                 if self.inbuf.len() >= total {
                     return Ok(self.inbuf.drain(..total).collect());
                 }
@@ -303,6 +319,7 @@ impl NativeWorker {
     }
 
     fn read_more<T: Read>(&mut self, stream: &mut T, label: &str) -> Result<(), NativeError> {
+        self.check_phase_deadline(label)?;
         let mut buf = [0u8; 8192];
         match stream.read(&mut buf) {
             Ok(0) => Err(NativeError::network(format!(
@@ -310,12 +327,36 @@ impl NativeWorker {
             ))),
             Ok(n) => {
                 self.last_read_at = Some(monotonic_now());
-                self.inbuf.extend_from_slice(&buf[..n]);
+                self.append_input(&buf[..n])?;
                 Ok(())
             }
             Err(e) if is_timeout(&e) => Ok(()),
             Err(e) => Err(NativeError::network(format!("{label}: read: {e}"))),
         }
+    }
+
+    fn check_phase_deadline(&self, label: &str) -> Result<(), NativeError> {
+        if self.phase_deadline.is_some_and(|at| Instant::now() >= at) {
+            return Err(NativeError::network(format!(
+                "{label}: connection phase deadline exceeded"
+            )));
+        }
+        Ok(())
+    }
+
+    fn append_input(&mut self, bytes: &[u8]) -> Result<(), NativeError> {
+        if self
+            .inbuf
+            .len()
+            .checked_add(bytes.len())
+            .is_none_or(|size| size > transport::MAX_TRANSPORT_BUFFER_SIZE)
+        {
+            return Err(NativeError::protocol(
+                "incoming transport buffer exceeds the size limit",
+            ));
+        }
+        self.inbuf.extend_from_slice(bytes);
+        Ok(())
     }
 
     fn write_all<T: Write>(
@@ -327,12 +368,50 @@ impl NativeWorker {
         if bytes.is_empty() {
             return Ok(());
         }
-        stream
-            .write_all(bytes)
-            .map_err(|e| NativeError::network(format!("{label}: write: {e}")))?;
-        stream
-            .flush()
-            .map_err(|e| NativeError::network(format!("{label}: flush: {e}")))
+        let deadline = (Instant::now() + transport::WRITE_TIMEOUT).min(
+            self.phase_deadline
+                .unwrap_or_else(|| Instant::now() + transport::WRITE_TIMEOUT),
+        );
+        *self
+            .write_deadline
+            .lock()
+            .map_err(|_| NativeError::protocol("write deadline lock poisoned"))? = Some(deadline);
+        let result = (|| {
+            let mut pending = bytes;
+            loop {
+                if self.stop.load(Ordering::SeqCst) {
+                    return Err(NativeError::network(format!("{label}: stopped")));
+                }
+                if Instant::now() >= deadline {
+                    return Err(NativeError::network(format!(
+                        "{label}: write deadline exceeded"
+                    )));
+                }
+                let io_result = if pending.is_empty() {
+                    stream.flush().map(|()| 0)
+                } else {
+                    stream.write(pending)
+                };
+                match io_result {
+                    Ok(_) if pending.is_empty() => return Ok(()),
+                    Ok(0) => {
+                        return Err(NativeError::network(format!(
+                            "{label}: write returned zero"
+                        )))
+                    }
+                    Ok(n) => pending = &pending[n..],
+                    Err(e) if is_timeout(&e) => {}
+                    Err(e) => {
+                        return Err(NativeError::network(format!("{label}: write/flush: {e}")))
+                    }
+                }
+            }
+        })();
+        *self
+            .write_deadline
+            .lock()
+            .map_err(|_| NativeError::protocol("write deadline lock poisoned"))? = None;
+        result
     }
 
     /// Buffer commands without blocking; return true on stop.
@@ -426,7 +505,7 @@ mod tests {
     use ironrdp_pdu::x224::X224;
     use std::collections::VecDeque;
 
-    fn test_worker() -> (NativeWorker, std::sync::mpsc::SyncSender<WorkerCommand>) {
+    pub(super) fn test_worker() -> (NativeWorker, std::sync::mpsc::SyncSender<WorkerCommand>) {
         let (tx, rx) = std::sync::mpsc::sync_channel::<WorkerCommand>(4);
         let callbacks = RdpCallbacks::default();
         let config = NativeConfig {
@@ -625,5 +704,144 @@ mod tests {
             (1, (1024 + 8) + (512 + 8))
         );
         assert_eq!(stream.writes.len(), 2);
+    }
+    #[test]
+    fn invalid_credssp_is_rejected_before_reading_payload() {
+        for prefix in [
+            vec![0x31],
+            vec![0x30, 0x80],
+            vec![0x30, 0x84, 0xff, 0xff, 0xff, 0xff],
+        ] {
+            let (mut worker, _tx) = test_worker();
+            worker.inbuf = prefix;
+            let mut payload = std::io::Cursor::new([0; 16]);
+            assert_eq!(
+                worker.read_ts_request(&mut payload).unwrap_err().state,
+                RdpState::ProtocolError
+            );
+            assert_eq!(payload.position(), 0);
+        }
+    }
+
+    struct StalledStream;
+
+    impl Read for StalledStream {
+        fn read(&mut self, _bytes: &mut [u8]) -> std::io::Result<usize> {
+            thread::sleep(Duration::from_millis(1));
+            Err(std::io::ErrorKind::TimedOut.into())
+        }
+    }
+
+    #[test]
+    fn stalled_phase_reads_expire_and_stop_cancels_promptly() {
+        let (mut worker, _tx) = test_worker();
+        worker.phase_deadline = Some(Instant::now() + Duration::from_millis(15));
+        let started = Instant::now();
+        let error = worker.read_ts_request(&mut StalledStream).unwrap_err();
+        assert!(error.message.contains("deadline"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        worker.phase_deadline = Some(Instant::now() + Duration::from_secs(30));
+        worker.stop.store(true, Ordering::SeqCst);
+        let error = worker.read_ts_request(&mut StalledStream).unwrap_err();
+        assert!(error.message.contains("stopped"));
+    }
+
+    #[test]
+    fn writes_and_flushes_expire_despite_partial_progress() {
+        struct SlowWriter {
+            writes: usize,
+            flush_stalls: bool,
+        }
+        impl Write for SlowWriter {
+            fn write(&mut self, _bytes: &[u8]) -> std::io::Result<usize> {
+                self.writes += 1;
+                thread::sleep(Duration::from_millis(2));
+                Ok(1)
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                if self.flush_stalls {
+                    thread::sleep(Duration::from_millis(2));
+                    Err(std::io::ErrorKind::TimedOut.into())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+        for flush_stalls in [false, true] {
+            let (mut worker, _tx) = test_worker();
+            worker.phase_deadline = Some(Instant::now() + Duration::from_millis(15));
+            let mut stream = SlowWriter {
+                writes: 0,
+                flush_stalls,
+            };
+            let bytes = if flush_stalls {
+                &[0][..]
+            } else {
+                &[0; 100][..]
+            };
+            let error = worker
+                .write_all(&mut stream, bytes, "test slow peer")
+                .unwrap_err();
+            assert!(error.message.contains("deadline"));
+            assert!(stream.writes < 100);
+            assert_eq!(*worker.write_deadline.lock().unwrap(), None);
+        }
+        let (mut worker, _tx) = test_worker();
+        worker.stop.store(true, Ordering::SeqCst);
+        let mut stream = SlowWriter {
+            writes: 0,
+            flush_stalls: false,
+        };
+        assert!(worker
+            .write_all(&mut stream, &[0], "test")
+            .unwrap_err()
+            .message
+            .contains("stopped"));
+        assert_eq!(stream.writes, 0);
+    }
+    #[test]
+    fn stalled_tls_and_hinted_activation_inputs_have_absolute_deadlines() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (done, release) = std::sync::mpsc::channel();
+        let peer = thread::spawn(move || {
+            let (_connection, _) = listener.accept().unwrap();
+            release.recv().unwrap();
+        });
+        let (mut worker, _tx) = test_worker();
+        worker.config.host = "localhost".to_owned();
+        worker.phase_deadline = Some(Instant::now() + Duration::from_millis(25));
+        let socket = std::net::TcpStream::connect(address).unwrap();
+        socket
+            .set_read_timeout(Some(transport::IO_POLL_TIMEOUT))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(transport::IO_POLL_TIMEOUT))
+            .unwrap();
+        let error = match worker.upgrade_tls(socket) {
+            Err(error) => error,
+            Ok(_) => panic!("stalled TLS completed"),
+        };
+        assert!(error.message.contains("deadline"), "{error:?}");
+        done.send(()).unwrap();
+        peer.join().unwrap();
+        for label in ["X.224 negotiation response", "reactivation input"] {
+            worker.phase_deadline = Some(Instant::now() + Duration::from_millis(10));
+            assert!(worker
+                .read_hinted_pdu(&mut StalledStream, &ironrdp_pdu::X224_HINT, label)
+                .unwrap_err()
+                .message
+                .contains("deadline"));
+        }
+    }
+    #[test]
+    fn transport_buffer_rejects_append_beyond_budget() {
+        let (mut worker, _tx) = test_worker();
+        worker.inbuf.resize(transport::MAX_TRANSPORT_BUFFER_SIZE, 0);
+        assert_eq!(
+            worker.append_input(&[1]).unwrap_err().state,
+            RdpState::ProtocolError
+        );
+        assert_eq!(worker.inbuf.len(), transport::MAX_TRANSPORT_BUFFER_SIZE);
     }
 }

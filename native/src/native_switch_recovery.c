@@ -66,16 +66,13 @@ void native_background_slot(App *app, int index) {
  * Returns true if the decoder accepted the replay; resume output afterwards. */
 bool native_snapshot_replay(App *app, int target) {
     NativeSessionSlot *slot = &app->sessions[target];
-    if (!atomic_load(&slot->snapshot_idr_ready)) {
-        return false;
-    }
     NativeAuSnapshot snap;
     pthread_mutex_lock(&app->video_lock);
     snap = slot->snapshot; /* take ownership of the buffer */
     memset(&slot->snapshot, 0, sizeof(slot->snapshot));
-    pthread_mutex_unlock(&app->video_lock);
     atomic_store(&slot->snapshot_idr_ready, false);
     if (!native_au_snapshot_ready(&snap)) {
+        pthread_mutex_unlock(&app->video_lock);
         free(snap.buf);
         return false;
     }
@@ -83,6 +80,7 @@ bool native_snapshot_replay(App *app, int target) {
     if (since_last_au < NATIVE_SNAPSHOT_QUIET_MS) {
         clog(cLogLevelDebug, "%s streamed %ums ago, may still have AUs in flight; skipping replay",
              native_session_slot_name(target), (unsigned)since_last_au);
+        pthread_mutex_unlock(&app->video_lock);
         free(snap.buf);
         return false;
     }
@@ -91,11 +89,12 @@ bool native_snapshot_replay(App *app, int target) {
     unsigned baseline = atomic_load(&slot->video_ok_frames);
     for (unsigned i = 0; i < snap.count; i++) {
         const NativeAuSnapshotEntry *entry = &snap.entries[i];
-        native_video_ingest_au(slot, snap.buf + entry->offset, entry->len, entry->pts90k);
+        native_video_ingest_au_locked(slot, snap.buf + entry->offset, entry->len, entry->pts90k);
         if (!atomic_load(&app->running) || atomic_load(&slot->session_failed)) {
             break; /* a terminal feed error stopped the slot (or app); the drain owns it */
         }
     }
+    pthread_mutex_unlock(&app->video_lock);
     free(snap.buf);
     if (atomic_load(&slot->video_ok_frames) == baseline) {
         clog(cLogLevelWarning, "%s snapshot replay fed no frames; falling back",

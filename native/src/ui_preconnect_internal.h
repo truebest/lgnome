@@ -310,6 +310,7 @@ void ui_set_selected_desktop(NativePreconnectUi *ui, size_t index);
 void ui_desktop_changed(lv_event_t *event);
 void ui_set_fps_options(NativePreconnectUi *ui);
 bool ui_form_valid(NativePreconnectUi *ui);
+bool ui_form_credentials_fit(NativePreconnectUi *ui);
 void ui_set_hidden(lv_obj_t *obj, bool hidden);
 void ui_set_disabled(lv_obj_t *obj, bool disabled);
 bool ui_profile_action_pending(const NativePreconnectUi *ui);

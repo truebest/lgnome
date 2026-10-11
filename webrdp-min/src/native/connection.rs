@@ -22,8 +22,8 @@ use x509_cert::der::Decode as _;
 use super::egfx::NativeGfxHandler;
 use super::logging::LOG_TARGET_TRANSPORT;
 use super::transport::{
-    install_rustls_provider, is_timeout, random_array, NoCertificateVerification, TlsStream,
-    CONNECT_TIMEOUT, IO_POLL_TIMEOUT, WRITE_TIMEOUT,
+    install_rustls_provider, is_timeout, random_array, NoCertificateVerification, PollingSocket,
+    TlsStream, CONNECT_TIMEOUT, IO_POLL_TIMEOUT,
 };
 use super::{
     rdpeai, rdpecam, rdpedisp, rdpsnd, NativeError, NativeWorker, RdpDisconnectReason, RdpLogLevel,
@@ -54,10 +54,19 @@ impl NativeWorker {
 
         let mut last_error = None;
         for addr in addrs {
+            self.check_phase_deadline("TCP connect")?;
             if self.drain_commands() {
                 return Ok(None);
             }
-            match TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT) {
+            match TcpStream::connect_timeout(
+                &addr,
+                self.phase_deadline
+                    .map(|at| {
+                        at.saturating_duration_since(std::time::Instant::now())
+                            .min(CONNECT_TIMEOUT)
+                    })
+                    .unwrap_or(CONNECT_TIMEOUT),
+            ) {
                 Ok(stream) => {
                     stream
                         .set_nodelay(true)
@@ -66,7 +75,7 @@ impl NativeWorker {
                         .set_read_timeout(Some(IO_POLL_TIMEOUT))
                         .map_err(|e| NativeError::network(format!("set read timeout: {e}")))?;
                     stream
-                        .set_write_timeout(Some(WRITE_TIMEOUT))
+                        .set_write_timeout(Some(IO_POLL_TIMEOUT))
                         .map_err(|e| NativeError::network(format!("set write timeout: {e}")))?;
                     self.callbacks.log(
                         RdpLogLevel::Info,
@@ -227,9 +236,18 @@ impl NativeWorker {
             })?;
         let conn = rustls::ClientConnection::new(Arc::new(config), server_name)
             .map_err(|e| NativeError::network(format!("create TLS client: {e}")))?;
-        let mut tls = rustls::StreamOwned::new(conn, tcp);
+        let mut tls = rustls::StreamOwned::new(
+            conn,
+            PollingSocket {
+                socket: tcp,
+                stop: Arc::clone(&self.stop),
+                phase_deadline: self.phase_deadline,
+                write_deadline: Arc::clone(&self.write_deadline),
+            },
+        );
 
         while tls.conn.is_handshaking() {
+            self.check_phase_deadline("TLS handshake")?;
             if self.drain_commands() {
                 return Err(NativeError::network("TLS handshake stopped"));
             }
@@ -239,13 +257,11 @@ impl NativeWorker {
                 Err(e) => return Err(NativeError::network(format!("TLS handshake: {e}"))),
             }
         }
-        tls.flush()
-            .map_err(|e| NativeError::network(format!("TLS flush after handshake: {e}")))?;
 
         tracing::info!(target: LOG_TARGET_TRANSPORT,
             version = ?tls.conn.protocol_version(),
             cipher = ?tls.conn.negotiated_cipher_suite().map(|suite| suite.suite()),
-            "TLS handshake complete (server certificate verification disabled)");
+            "TLS handshake complete (self-signed certificates accepted; handshake signature verified)");
         let cert = tls
             .conn
             .peer_certificates()
@@ -347,6 +363,7 @@ impl NativeWorker {
         mut connector: ClientConnector,
     ) -> Result<ConnectionResult, NativeError> {
         loop {
+            self.check_phase_deadline("RDP activation")?;
             if self.drain_commands() {
                 return Err(NativeError::network("stopped before ActiveStage"));
             }

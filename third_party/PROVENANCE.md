@@ -21,8 +21,8 @@ and browser WASM bundle were removed and are not runtime dependencies of the nat
 
 - Path: `third_party/IronRDP` (git submodule — lgnome fork)
 - Fork: https://github.com/truebest/IronRDP.
-- Branch: `release/lgnome-0.5.4`.
-- Pinned commit: `3bec84e1ee1d5721905580e381e0b6fc1d0f5d98`
+- Branch: `fix/lgnome-egfx-drop-state-20261011`.
+- Pinned commit: `8bfef9fe62bd9d936ba5f253ed3fd0ccb668b49c`
 - Upstream: https://github.com/Devolutions/IronRDP
 - Upstream base: `1bec1d57f446a7ddef8f26b0c3c644059564cdc2` (2026-09-06).
 - Base commit and fork delta provenance: see `third_party/IronRDP/PROVENANCE.md`.

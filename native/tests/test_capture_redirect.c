@@ -44,6 +44,11 @@ static atomic_uint g_camera_errors[NATIVE_CAPTURE_REDIRECT_MAX_SLOTS];
 static atomic_uint g_camera_open_count;
 static atomic_uint g_camera_close_count;
 static atomic_uint g_camera_submit_failures;
+static atomic_bool g_camera_mailbox_full;
+static atomic_uint g_camera_mailbox_refusals;
+static unsigned g_reconnects[NATIVE_CAPTURE_REDIRECT_MAX_SLOTS];
+static uint16_t g_reconnect_fps[NATIVE_CAPTURE_REDIRECT_MAX_SLOTS];
+static bool g_reconnect_snapshot[NATIVE_CAPTURE_REDIRECT_MAX_SLOTS];
 static atomic_uint g_camera_acquire_recoveries;
 static atomic_uint g_camera_next_seed_delay;
 static atomic_bool g_camera_hold_delta;
@@ -154,6 +159,35 @@ void rdp_set_capture_active(RdpSession *session, bool active) {
     }
 }
 
+bool native_slot_connect(App *app, int index, bool arm_snapshot) {
+    g_reconnects[index]++;
+    g_reconnect_fps[index] = app->settings->camera_fps;
+    g_reconnect_snapshot[index] = arm_snapshot;
+    app->sessions[index].camera_width = app->settings->camera_width;
+    app->sessions[index].camera_height = app->settings->camera_height;
+    app->sessions[index].camera_fps = app->settings->camera_fps;
+    app->sessions[index].snapshot.armed = arm_snapshot;
+    return true;
+}
+
+void native_slot_report_terminal(NativeSessionSlot *slot, RdpState state, int exit_code) {
+    (void)slot;
+    (void)state;
+    (void)exit_code;
+    assert(false);
+}
+
+int rdp_state_exit_code(RdpState state) {
+    (void)state;
+    return 11;
+}
+
+void rdp_set_suppress_output(RdpSession *session, bool allow_output) {
+    (void)session;
+    (void)allow_output;
+    assert(false);
+}
+
 bool rdp_submit_camera_h264(RdpSession *session, uint64_t generation, const uint8_t *data, size_t len,
                             bool is_keyframe) {
     static uint64_t last_generation[NATIVE_CAPTURE_REDIRECT_MAX_SLOTS];
@@ -175,6 +209,10 @@ bool rdp_submit_camera_h264(RdpSession *session, uint64_t generation, const uint
     if (!atomic_load(&session->capture_active)) {
         return false;
     }
+    if (atomic_load(&g_camera_mailbox_full)) {
+        atomic_fetch_add(&g_camera_mailbox_refusals, 1u);
+        return false;
+    }
     unsigned failures = atomic_load(&g_camera_submit_failures);
     if (failures > 0u && atomic_compare_exchange_strong(&g_camera_submit_failures, &failures, failures - 1u)) {
         return false;
@@ -187,6 +225,10 @@ bool rdp_submit_camera_error(RdpSession *session, uint64_t generation) {
     (void)generation;
     assert(session);
     if (!atomic_load(&session->capture_active)) {
+        return false;
+    }
+    if (atomic_load(&g_camera_mailbox_full)) {
+        atomic_fetch_add(&g_camera_mailbox_refusals, 1u);
         return false;
     }
     atomic_fetch_add(&g_camera_errors[session->slot], 1u);
@@ -724,6 +766,103 @@ static void test_delayed_seed_fails_credit_without_reopen(void) {
     native_capture_redirect_destroy(&redirect);
 }
 
+static void test_open_before_session_registration(void) {
+    NativeCaptureRedirect redirect = {0};
+    NativeCaptureRedirectConfig config = test_config();
+    struct RdpSession red = {.slot = NATIVE_SESSION_SLOT_RED};
+    atomic_init(&red.capture_active, false);
+    atomic_init(&red.camera_available, false);
+    unsigned packets = atomic_load(&g_audio_packets[red.slot]);
+    assert(native_capture_redirect_init(&redirect, &config));
+    native_capture_redirect_audio_start(&redirect, red.slot, 500u, 44100u, 2u, 441u);
+    native_capture_redirect_set_slot(&redirect, red.slot, &red, false, true);
+    native_capture_redirect_set_foreground_slot(&redirect, red.slot);
+    assert(wait_for_counter(&g_audio_packets[red.slot], packets + 1u));
+
+    native_capture_redirect_set_slot(&redirect, red.slot, NULL, false, true);
+    packets = atomic_load(&g_audio_packets[red.slot]);
+    native_capture_redirect_set_slot(&redirect, red.slot, &red, false, true);
+    test_sleep_ms(100u);
+    assert(atomic_load(&g_audio_packets[red.slot]) == packets);
+    native_capture_redirect_audio_start(&redirect, red.slot, 501u, 44100u, 2u, 441u);
+    assert(wait_for_counter(&g_audio_packets[red.slot], packets + 1u));
+    native_capture_redirect_destroy(&redirect);
+}
+
+static void test_camera_credit_survives_full_mailbox(void) {
+    NativeCaptureRedirect redirect = {0};
+    NativeCaptureRedirectConfig config = test_config();
+    struct RdpSession red = {.slot = NATIVE_SESSION_SLOT_RED};
+    atomic_init(&red.capture_active, false);
+    atomic_init(&red.camera_available, false);
+    unsigned packets = atomic_load(&g_camera_packets[red.slot]);
+    unsigned refusals = atomic_load(&g_camera_mailbox_refusals);
+    atomic_store(&g_camera_frames_allowed, CAMERA_FRAMES_UNLIMITED);
+    atomic_store(&g_camera_mailbox_full, true);
+    assert(native_capture_redirect_init(&redirect, &config));
+    native_capture_redirect_set_slot(&redirect, red.slot, &red, true, false);
+    native_capture_redirect_set_foreground_slot(&redirect, red.slot);
+    native_capture_redirect_camera_start(&redirect, red.slot, 502u, 640u, 480u, 15u);
+    native_capture_redirect_camera_sample_request(&redirect, red.slot, 502u);
+    assert(wait_for_counter(&g_camera_mailbox_refusals, refusals + 2u));
+    atomic_store(&g_camera_mailbox_full, false);
+    assert(wait_for_counter(&g_camera_packets[red.slot], packets + 1u));
+    test_sleep_ms(100u);
+    assert(atomic_load(&g_camera_packets[red.slot]) == packets + 1u);
+    native_capture_redirect_destroy(&redirect);
+}
+
+static void test_mode_save_restarts_camera_connections(void) {
+    App app = {0};
+    NativeSettings settings = {0};
+    NativeCaptureRedirectConfig config = test_config();
+    struct RdpSession red = {.slot = NATIVE_SESSION_SLOT_RED};
+    struct RdpSession blue = {.slot = NATIVE_SESSION_SLOT_BLUE};
+    atomic_init(&red.capture_active, false);
+    atomic_init(&red.camera_available, false);
+    atomic_init(&blue.capture_active, false);
+    atomic_init(&blue.camera_available, false);
+    app.settings = &settings;
+    app.sessions[red.slot].rdp = &red;
+    app.sessions[blue.slot].rdp = &blue;
+    app.sessions[red.slot].config.camera_redirect = true;
+    app.sessions[blue.slot].config.camera_redirect = true;
+    app.sessions[red.slot].camera_width = app.sessions[blue.slot].camera_width = config.camera_width;
+    app.sessions[red.slot].camera_height = app.sessions[blue.slot].camera_height = config.camera_height;
+    app.sessions[red.slot].camera_fps = app.sessions[blue.slot].camera_fps = config.camera_fps;
+    settings.sessions[red.slot].camera_redirect = true;
+    settings.sessions[blue.slot].camera_redirect = true;
+    settings.camera_enabled = config.camera_enabled;
+    strcpy(settings.camera_device_id, config.camera_device_id);
+    settings.camera_width = config.camera_width;
+    settings.camera_height = config.camera_height;
+    settings.camera_fps = config.camera_fps;
+    strcpy(settings.audio_input_device_id, config.audio_input_device_id);
+    assert(pthread_mutex_init(&app.video_lock, NULL) == 0);
+    atomic_store(&app.sessions[red.slot].current_state, RDP_STATE_ACTIVE);
+    atomic_store(&app.sessions[blue.slot].current_state, RDP_STATE_ACTIVE);
+    native_reconfigure_capture_redirect(&app);
+    assert(g_reconnects[red.slot] == 0u && g_reconnects[blue.slot] == 0u);
+    NativeSettings candidate = settings;
+    candidate.camera_fps = 30u;
+    atomic_store(&app.sessions[red.slot].current_state, RDP_STATE_CONNECTING);
+    assert(native_capture_mode_save_is_connecting(&app, &candidate));
+    assert(!native_capture_mode_save_is_connecting(&app, &settings));
+    atomic_store(&app.sessions[red.slot].current_state, RDP_STATE_ACTIVE);
+    assert(!native_capture_mode_save_is_connecting(&app, &candidate));
+    app.capture_applied_valid = false;
+    settings.camera_fps = 30u;
+    native_reconfigure_capture_redirect(&app);
+    assert(g_reconnects[red.slot] == 1u && g_reconnects[blue.slot] == 1u);
+    assert(g_reconnect_fps[red.slot] == 30u && g_reconnect_fps[blue.slot] == 30u);
+    assert(!g_reconnect_snapshot[red.slot] && g_reconnect_snapshot[blue.slot]);
+    assert(app.sessions[blue.slot].snapshot_pending);
+    native_reconfigure_capture_redirect(&app);
+    assert(g_reconnects[red.slot] == 1u && g_reconnects[blue.slot] == 1u);
+    native_capture_redirect_destroy(&app.capture_redirect);
+    assert(pthread_mutex_destroy(&app.video_lock) == 0);
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && strcmp(argv[1], "--init-failure") == 0) {
         test_init_failures();
@@ -1005,5 +1144,8 @@ int main(int argc, char **argv) {
     assert(atomic_load(&g_audio_close_count) == atomic_load(&g_audio_open_count));
     /* No borrowed capture buffer may outlive the worker, whichever path it took. */
     assert(atomic_load(&g_camera_frames_held) == 0u);
+    test_open_before_session_registration();
+    test_camera_credit_survives_full_mailbox();
+    test_mode_save_restarts_camera_connections();
     return 0;
 }

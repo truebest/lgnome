@@ -89,6 +89,8 @@ void native_audio_pipeline_pump_stop(NativeAudioPipeline *pipeline);
 
 #ifdef LGNOME_AUDIO_PIPELINE_TESTING
 typedef void (*NativeAudioPipelineTestHook)(void *ctx, int source);
+void native_audio_pipeline_set_test_after_queue_cursor(NativeAudioPipeline *pipeline,
+                                                       NativeAudioPipelineTestHook hook, void *ctx);
 void native_audio_pipeline_set_test_before_ring_read(NativeAudioPipeline *pipeline,
                                                      NativeAudioPipelineTestHook hook, void *ctx);
 #endif

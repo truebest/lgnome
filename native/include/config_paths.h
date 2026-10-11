@@ -6,7 +6,7 @@
 
 #define NATIVE_PERSISTED_CONFIG_FILENAME "settings.json"
 #define NATIVE_PERSISTED_CONFIG_PATH_MAX 1024u
-#define NATIVE_PERSISTED_CONFIG_MAX_CANDIDATES 8u
+#define NATIVE_PERSISTED_CONFIG_MAX_CANDIDATES 11u
 
 /* Paths in priority order, without duplicates. Explicit environment paths are trusted for reads;
  * discovered paths require ownership/permission checks. Writes always require a secure directory. */

@@ -8,6 +8,12 @@ void native_event_queue_publish_before(NativeEventQueue *queue, uint64_t time_us
     queue->published_before_us = time_us;
 }
 
+void native_event_queue_reset(NativeEventQueue *queue) {
+    queue->head = 0;
+    queue->count = 0;
+    queue->reset_pending = true;
+}
+
 void native_event_queue_push(NativeEventQueue *queue, const NativeEvent *event) {
     /* Once history is incomplete, none of this sweep is safe to replay: a
      * later-read device can still contribute an old press whose release was
@@ -18,9 +24,7 @@ void native_event_queue_push(NativeEventQueue *queue, const NativeEvent *event) 
     if (queue->count == NATIVE_EVENT_QUEUE_CAPACITY) {
         /* Losing an arbitrary key/button release can strand the remote desktop.
          * Discard the incomplete history and release held input before replaying. */
-        queue->head = 0;
-        queue->count = 0;
-        queue->reset_pending = true;
+        native_event_queue_reset(queue);
         clog_limited(cLogLevelWarning, 2, 5000, "input queue overflow; resetting held input");
         return;
     }

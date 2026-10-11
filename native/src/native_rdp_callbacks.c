@@ -83,10 +83,14 @@ static void on_pointer_position(void *ctx, uint16_t x, uint16_t y) {
     }
 #ifdef LGNOME_TARGET_WEBOS
     App *app = slot->app;
-    atomic_store(&app->pointer_warp_x, (unsigned)x);
-    atomic_store(&app->pointer_warp_y, (unsigned)y);
-    atomic_store(&app->pointer_warp_slot, slot->index);
-    atomic_store(&app->pointer_warp_pending, true);
+    pthread_mutex_lock(&app->video_lock);
+    if (native_slot_is_active(slot) && atomic_load(&app->input.active)) {
+        atomic_store(&app->pointer_warp_x, (unsigned)x);
+        atomic_store(&app->pointer_warp_y, (unsigned)y);
+        atomic_store(&app->pointer_warp_slot, slot->index);
+        atomic_store(&app->pointer_warp_pending, true);
+    }
+    pthread_mutex_unlock(&app->video_lock);
 #else
     (void)x;
     (void)y;

@@ -34,7 +34,7 @@ static bool loop_arm_streaming_input(App *app) {
     NativeSessionSlot *active = native_active_slot(app);
     bool input_streaming = app->streaming_visible && active->rdp &&
                            atomic_load(&active->current_state) == (int)RDP_STATE_ACTIVE &&
-                           !app->mixer_overlay_visible;
+                           !app->mixer_overlay_visible && native_streaming_input_focused(app);
     native_input_set_active(&app->input, input_streaming);
     /* Input coordinate mapping follows the ACTIVE slot's desktop size, derived
      * here like the arming flag: workers only publish their own slot's atomics
@@ -65,7 +65,7 @@ void native_streaming_transition_tick(App *app, NativePreconnectUi *ui, NativeSe
                                       SDL_Window *window) {
     NativeSessionSlot *active = native_active_slot(app);
     int state = atomic_load(&active->current_state);
-    bool input_streaming = loop_arm_streaming_input(app);
+    (void)loop_arm_streaming_input(app);
     if (active->rdp && state != app->ui_last_state && state != (int)RDP_STATE_ACTIVE) {
         char status[64];
         (void)snprintf(status, sizeof(status), "%s...", rdp_state_name((RdpState)state));
@@ -99,29 +99,32 @@ void native_streaming_transition_tick(App *app, NativePreconnectUi *ui, NativeSe
         (void)native_config_save_persisted(settings);
         native_preconnect_ui_set_connecting(ui, atomic_load(&app->active_index), false, "");
         native_preconnect_ui_set_visible(ui, false);
-        app->window_unfocused = false; /* enter streaming focused, whatever fired during preconnect */
         /* Grab input now that streaming has started; the preconnect UI needs the SDL mouse,
          * so we don't grab earlier. Note any degradation on the (now hidden) preconnect
          * status so it shows if the session returns here; the loud log covers diagnosis. */
-        NativeInputStartResult input_result = native_start_streaming_input(app);
-        native_preconnect_ui_set_mouse_available(ui, native_evdev_input_mouse_active(&app->evdev_input));
-        switch (input_result) {
-        case NATIVE_INPUT_START_OK:
-            native_preconnect_ui_set_keyboard_available(ui, true);
-            break;
-        case NATIVE_INPUT_START_NO_KEYBOARD:
-            native_preconnect_ui_set_keyboard_available(ui, false);
-            break;
-        case NATIVE_INPUT_START_UNAVAILABLE:
-            native_preconnect_ui_set_input_unavailable(ui);
-            break;
+        if (native_streaming_input_focused(app)) {
+            NativeInputStartResult input_result = native_start_streaming_input(app);
+            native_preconnect_ui_set_mouse_available(ui, native_evdev_input_mouse_active(&app->evdev_input));
+            switch (input_result) {
+            case NATIVE_INPUT_START_OK:
+                native_preconnect_ui_set_keyboard_available(ui, true);
+                break;
+            case NATIVE_INPUT_START_NO_KEYBOARD:
+                native_preconnect_ui_set_keyboard_available(ui, false);
+                break;
+            case NATIVE_INPUT_START_UNAVAILABLE:
+                native_preconnect_ui_set_input_unavailable(ui);
+                break;
+            }
         }
         /* HUB and setup use the system arrow and can leave it at an unrelated UI
          * coordinate. Restore the server cursor and home the compositor pointer to
          * the last RDP position before input starts flowing again. */
-        native_cursor_reassert(&active->cursor);
-        app->cursor_reassert_pending = true;
-        SDL_WarpMouseInWindow(window, atomic_load(&app->virtual_mouse_x), atomic_load(&app->virtual_mouse_y));
+        if (native_streaming_input_focused(app)) {
+            native_cursor_reassert(&active->cursor);
+            app->cursor_reassert_pending = true;
+            SDL_WarpMouseInWindow(window, atomic_load(&app->virtual_mouse_x), atomic_load(&app->virtual_mouse_y));
+        }
         app->streaming_visible = true;
         app->hub_visible = false;
         native_system_volume_rebaseline(app);

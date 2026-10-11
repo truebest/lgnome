@@ -46,6 +46,9 @@ verify_package_root() {
   if [[ -d "$root/settings" && -n "$(find "$root/settings" -mindepth 1 -print -quit)" ]]; then
     fail "package must not contain saved settings"
   fi
+  if [[ -d "$root/settings" && "$(stat -c %a "$root/settings")" != 1777 ]]; then
+    fail "packaged settings directory must have mode 1777"
+  fi
   [[ -z "$(find "$root" \( -name settings.json -o -name config.local.json \) -print -quit)" ]] ||
     fail "package must not contain configuration files"
 
@@ -166,7 +169,7 @@ verify_ipk() (
   local data_tar
   data_tar="$(find "$cleanup/ar" -maxdepth 1 -type f -name 'data.tar*' -print -quit)"
   [[ -n "$data_tar" ]] || fail "no data.tar payload found in $ipk"
-  tar -xf "$data_tar" -C "$cleanup/root"
+  tar --same-permissions -xf "$data_tar" -C "$cleanup/root"
   local control_tar
   control_tar="$(find "$cleanup/ar" -maxdepth 1 -type f -name 'control.tar*' -print -quit)"
   if [[ -n "$control_tar" ]]; then
@@ -204,9 +207,14 @@ case "$rust_profile" in
     ;;
 esac
 
-rdp_ffi_lib="${RDP_FFI_LIB:-${NATIVE_RDP_FFI_LIB:-$repo_root/webrdp-min/target/$target/$cargo_profile_dir/libwebrdp_min.a}}"
 
 if [[ "$skip_build" != "1" ]]; then
+  rdp_ffi_lib="${RDP_FFI_LIB:-${NATIVE_RDP_FFI_LIB:-}}"
+  if [[ -z "$rdp_ffi_lib" ]]; then
+    cargo_target_dir="$(cargo metadata --manifest-path "$repo_root/webrdp-min/Cargo.toml" --locked --no-deps --format-version 1 |
+      python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
+    rdp_ffi_lib="$cargo_target_dir/$target/$cargo_profile_dir/libwebrdp_min.a"
+  fi
   toolchain="$(find_toolchain)"
   [[ -f "$toolchain" ]] || fail "webOS toolchain file not found: $toolchain (set WEBOS_TOOLCHAIN_FILE=/path/to/toolchainfile.cmake)"
   sdk="$(cd "$(dirname "$toolchain")/../.." && pwd)"
@@ -231,6 +239,7 @@ if [[ "$skip_build" != "1" ]]; then
     cargo build --manifest-path "$repo_root/webrdp-min/Cargo.toml" --features native --target "$target" "${cargo_profile_args[@]}"
   [[ -f "$rdp_ffi_lib" ]] || fail "Rust staticlib was not produced: $rdp_ffi_lib"
 
+  export CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL:-$(nproc)}"
   cmake \
     -S "$repo_root/native" \
     -B "$build_dir" \
@@ -279,5 +288,6 @@ if [[ $ares_status -ne 0 ]]; then
   echo "build-native-webos: warning: ares-package exited with status $ares_status after writing an .ipk; verifying output" >&2
 fi
 
+python3 "$repo_root/tools/fix-ipk-settings-mode.py" "$latest_ipk"
 verify_ipk "$latest_ipk"
 echo "build-native-webos: wrote $latest_ipk"

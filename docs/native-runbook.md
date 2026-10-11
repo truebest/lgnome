@@ -178,25 +178,33 @@ the TV remote's color buttons in the remote's own order: red, green, yellow, blu
   paced silence for the foreground consumer and retries in the background; background
   streams send no PCM. It never terminates video or an RDP session.
 - **Adaptive delay is always enabled and has no user control.** Every source starts at
-  60ms and ranges from 40–260ms. The target covers both the producer's block cadence
+  the greater of 60ms and its first decoded block's duration plus 20ms, capped at 260ms.
+  The adaptive range is 40–260ms. The target covers both the producer's block cadence
   and a rolling 10s histogram of relative arrival/capture-time variation
   (`max(block cadence, p95) + 20ms`, 5ms buckets). In the measured Windows session,
   PCM arrived in roughly 186ms blocks, compared with roughly 20ms Opus packets from
   gnome-remote-desktop. Even punctual 186ms blocks drain a shorter standing queue
   between arrivals; the 260ms ceiling leaves room for that cadence and headroom.
   RDPEA timestamp
-  wrap is handled; zero/repeated timestamps fall back to decoded duration. A gap over
-  500ms is a talkspurt boundary and re-primes at least 60ms rather than polluting the
-  jitter estimate. New peaks or a longer block cadence raise the target immediately;
+  wrap is handled; zero/repeated timestamps fall back to decoded duration, and shorter
+  timestamp steps never lower the cadence floor below the decoded block's duration.
+  A gap over 500ms is a talkspurt boundary and re-primes using the same first-block
+  rule rather than polluting the jitter estimate. New peaks or a longer block cadence
+  raise the target immediately;
   underruns postpone decay. Stable delivery can lower it by at most 10ms per five
   seconds, never below the cadence-derived floor or 40ms.
 - Queue error beyond 10ms changes each source's SRC ratio smoothly, capped at +/-0.5%
   by a 50ms error, with a slow drift term for mismatched producer/DAC clocks. A backlog
-  over target by 80ms fades out for 5ms, drops old frames to `target + 20ms`, resets the
-  converter, and fades in for 5ms. Underrun inserts silence and re-buffers only that
-  source. The 1.5s ring is an emergency limit, not normal latency; producer overflow
-  requests a consumer-side trim and never moves the consumer cursor.
-- The mixer overlay shows `queue/target ms` above every session. Detailed p95 jitter,
+  over target by `max(80ms, target)` fades out for 5ms, drops old frames to
+  `target + 20ms`, resets the converter, and fades in for 5ms. Underrun inserts silence
+  and re-buffers only that
+  source. This allows normal large-block refill swings: the trim threshold is 120ms
+  for a 40ms target and 412ms for a 206ms target. The approximately 1.37s ring at 48kHz
+  is an emergency limit, not normal latency; producer overflow requests a consumer-side
+  trim and never moves the consumer cursor.
+- The mixer overlay shows `queue/target ms` above every session: queued audio and the
+  adaptive target, excluding the TV audio sink's own delay. The target is not a hard
+  maximum queue length or an end-to-end latency measurement. Detailed p95 jitter,
   SRC ppm, underrun, hard-correction, and overflow counters are logged as one snapshot no
   more often than every three seconds.
 - A backgrounded session's graphics are paused server-side via TS_SUPPRESS_OUTPUT_PDU.
@@ -382,7 +390,7 @@ Targeted local loop:
 
 ```sh
 ./tools/syntax-check-native.sh
-cargo test --manifest-path webrdp-min/Cargo.toml --features native native::
+cargo test --manifest-path webrdp-min/Cargo.toml --features native --locked
 cmake -S native -B /tmp/lgnome-native-build-tests
 cmake --build /tmp/lgnome-native-build-tests
 ctest --test-dir /tmp/lgnome-native-build-tests --output-on-failure
@@ -436,7 +444,8 @@ stages the app, verifies the staged tree and IPK, and writes the package under
 
 Bitbucket `main` is the development history. The GitHub repo is an append-only chain of
 release snapshots — one commit per version, tags never moved — produced by
-`tools/release-github.sh <version>`. For any version:
+`tools/release-github.sh <version> /path/to/verified.ipk`. The script prepares a local
+candidate and checks that the requested version matches `main` and the IPK. For any version:
 
 1. Merge everything intended for the release and obtain a green `main`.
 2. If the `backend_ndl` pin has moved past the snapshot published on its mirror, release
@@ -449,8 +458,14 @@ release snapshots — one commit per version, tags never moved — produced by
    `README.md` describes the current client, so it does not accumulate a changelog.
 4. Build a fresh IPK from that exact `main`, record its SHA-256, deploy that same file,
    and repeat the smoke test.
-5. Publish the snapshot and tag with `tools/release-github.sh`, wait for GitHub CI, then
-   create the Release with that same verified IPK.
+5. Prepare the snapshot with `tools/release-github.sh <version> /path/to/verified.ipk`.
+   Verify the remote URL, push only `release/vX.Y.Z` with an explicit refspec, and open
+   a PR to GitHub `main`. Wait for the required PR checks and review of the
+   current head, and resolve valid findings.
+   Fixes belong in Bitbucket first; regenerate and retest the cumulative candidate.
+6. Squash merge the approved candidate, then tag the resulting GitHub `main` commit
+   and create the Release with that same verified IPK. Never tag the candidate before
+   merging or push directly to `main`.
 
 The GitHub remote must be reachable for a push; `RELEASE_REMOTE=<name>` selects a
 different one (for example an HTTPS remote when no SSH key is registered with GitHub).
@@ -460,6 +475,11 @@ Install and launch:
 ```sh
 ARES_DEVICE=<tv-device> ./tools/deploy-native-webos.sh --ipk /path/to/verified.ipk
 ```
+
+Saving a changed camera geometry/FPS reconnects affected live camera profiles so their
+RDPECAM media type matches the capture worker. Media pauses briefly during reconnect.
+The HUB rejects this save while an affected profile is still connecting; retry after
+connection completes. Device/permission edits with the same mode keep the connection.
 
 ### Local USB camera preview probe
 
@@ -500,7 +520,8 @@ the installed version. The CMake `webos-install-native` target likewise requires
 Choose at most one launch mode: `--connect-slot COLOR`, `--config FILE`,
 `--with-defaults`, or `--camera-preview`. These modes close a running instance before
 launching so startup parameters take effect. `--config` sends an explicit JSON object;
-it must be below 16 KiB and cannot contain launch-control keys. The app validates
+the file must be at most 128 KiB and compact launch parameters at most 120 KiB.
+Apostrophes and launch-control keys are rejected before installation or launch. The app validates
 settings fields. `--with-defaults` explicitly bypasses persisted profiles for a smoke
 check. Ordinary updates need neither option.
 

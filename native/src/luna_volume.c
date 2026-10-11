@@ -24,27 +24,25 @@ bool native_luna_volume_parse(const char *json, int *volume, bool *muted) {
     if (!json) {
         return false;
     }
-    /* Replies are single-line flat JSON from a system service; field scanning is enough
-     * (and keeps a JSON library out of the build). An explicit failure beats guessing. */
-    const char *status = native_json_find_value(json, "returnValue");
-    if (status && strncmp(status, "false", 5) == 0) {
+    bool status = true;
+    if (native_json_read_bool(json, "returnValue", &status) < 0 || !status) {
         return false;
     }
-    const char *field = native_json_find_value(json, "volume");
-    if (!field) {
-        return false;
+    const char *fields = native_json_find_value(json, "volumeStatus");
+    if (!fields) {
+        fields = json;
     }
-    char *end = NULL;
-    long value = strtol(field, &end, 10);
-    if (end == field || value < 0 || value > 100) {
+    uint16_t value = 0;
+    bool mute = false;
+    if (native_json_read_u16(fields, "volume", 0, 100, &value) != 1 ||
+        native_json_read_bool(fields, "muteStatus", &mute) < 0) {
         return false;
     }
     if (volume) {
         *volume = (int)value;
     }
     if (muted) {
-        const char *mute = native_json_find_value(json, "muteStatus");
-        *muted = mute && strncmp(mute, "true", 4) == 0;
+        *muted = mute;
     }
     return true;
 }
@@ -88,6 +86,9 @@ typedef struct NativeLunaVolumeImpl {
     gint64 set_issued_us;
     LSMessageToken get_token;
     LSMessageToken set_token;
+    pthread_mutex_t cache_lock;
+    unsigned edit_generation;
+    unsigned refresh_generation;
 } NativeLunaVolumeImpl;
 
 /* A reply never comes back for a lost call when the service hangs while staying
@@ -120,11 +121,16 @@ static bool luna_volume_get_reply_cb(LSHandle *sh, LSMessage *message, void *ctx
     int volume = -1;
     bool muted = false;
     if (payload && native_luna_volume_parse(payload, &volume, &muted)) {
-        atomic_store(&lv->volume_pct, volume);
-        atomic_store(&lv->muted, muted);
-        atomic_store(&lv->available, true);
-        /* After the stores: a reader that saw the bump also sees the fresh volume. */
-        atomic_fetch_add(&lv->reply_seq, 1u);
+        pthread_mutex_lock(&impl->cache_lock);
+        if (impl->refresh_generation == impl->edit_generation && !impl->set_in_flight &&
+            atomic_load(&impl->desired_pct) < 0) {
+            atomic_store(&lv->volume_pct, volume);
+            atomic_store(&lv->muted, muted);
+            atomic_store(&lv->available, true);
+            /* A reader that saw the bump also sees the fresh volume. */
+            atomic_fetch_add(&lv->reply_seq, 1u);
+        }
+        pthread_mutex_unlock(&impl->cache_lock);
     }
     return true;
 }
@@ -206,6 +212,12 @@ static gboolean luna_volume_refresh_cb(gpointer data) {
         impl->set_in_flight = false;
         luna_volume_send_set(impl);
     }
+    if (!impl->set_in_flight && atomic_load(&impl->desired_pct) >= 0) {
+        luna_volume_send_set(impl);
+    }
+    if (impl->set_in_flight || atomic_load(&impl->desired_pct) >= 0) {
+        return G_SOURCE_REMOVE;
+    }
     if (impl->refresh_in_flight) {
         if (now - impl->refresh_issued_us < LUNA_VOLUME_CALL_STALL_US) {
             return G_SOURCE_REMOVE; /* one outstanding get is enough; the poll re-arms after its reply */
@@ -218,6 +230,13 @@ static gboolean luna_volume_refresh_cb(gpointer data) {
     }
     LSError error;
     LSErrorInit(&error);
+    pthread_mutex_lock(&impl->cache_lock);
+    if (atomic_load(&impl->desired_pct) >= 0) {
+        pthread_mutex_unlock(&impl->cache_lock);
+        return G_SOURCE_REMOVE;
+    }
+    impl->refresh_generation = impl->edit_generation;
+    pthread_mutex_unlock(&impl->cache_lock);
     if (!LSCallOneReply(impl->handle, "luna://com.webos.audio/getVolume", "{}", luna_volume_get_reply_cb, impl,
                         &impl->get_token, &error)) {
         clog(cLogLevelWarning, "getVolume call failed: %s", error.message ? error.message : "?");
@@ -288,10 +307,15 @@ bool native_luna_volume_start(NativeLunaVolume *lv) {
         return false;
     }
     impl->owner = lv;
+    if (pthread_mutex_init(&impl->cache_lock, NULL) != 0) {
+        free(impl);
+        return false;
+    }
     atomic_init(&impl->desired_pct, -1);
     atomic_init(&impl->invoke_queued, false);
     atomic_init(&impl->loop_ready, false);
     if (pthread_create(&impl->thread, NULL, luna_volume_thread, impl) != 0) {
+        pthread_mutex_destroy(&impl->cache_lock);
         free(impl);
         return false;
     }
@@ -317,6 +341,7 @@ void native_luna_volume_stop(NativeLunaVolume *lv) {
         pthread_join(impl->thread, NULL);
         impl->thread_running = false;
     }
+    pthread_mutex_destroy(&impl->cache_lock);
     free(impl);
     lv->impl = NULL;
 }
@@ -352,9 +377,12 @@ void native_luna_volume_set(NativeLunaVolume *lv, int pct) {
         pct = 100;
     }
     /* Optimistic cache: the knob must track key presses immediately, not at bus pace. */
-    atomic_store(&lv->volume_pct, pct);
     NativeLunaVolumeImpl *impl = (NativeLunaVolumeImpl *)lv->impl;
+    pthread_mutex_lock(&impl->cache_lock);
+    impl->edit_generation++;
+    atomic_store(&lv->volume_pct, pct);
     atomic_store(&impl->desired_pct, pct);
+    pthread_mutex_unlock(&impl->cache_lock);
     if (!atomic_exchange(&impl->invoke_queued, true)) {
         if (!luna_volume_invoke(impl, luna_volume_dispatch_cb)) {
             atomic_store(&impl->invoke_queued, false); /* loop still booting: drop, retry on next set */

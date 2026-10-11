@@ -119,6 +119,7 @@ pub struct NtlmClient {
     server_challenge: [u8; 8],
     challenge_target_info: Vec<u8>,
     challenge_flags: u32,
+    key_exchange: bool,
     timestamp: u64,
     pub exported_session_key: [u8; 16],
     send_signing_key: [u8; 16],
@@ -143,6 +144,7 @@ impl NtlmClient {
             server_challenge: [0; 8],
             challenge_target_info: Vec::new(),
             challenge_flags: 0,
+            key_exchange: false,
             timestamp: 0,
             exported_session_key: [0; 16],
             send_signing_key: [0; 16],
@@ -318,6 +320,7 @@ impl NtlmClient {
 
         // Session security keys + RC4 handles.
         self.exported_session_key = session_key;
+        self.key_exchange = flags & KEY_EXCH != 0;
         self.send_signing_key = md5_with(&session_key, CLIENT_SIGN_MAGIC);
         self.recv_signing_key = md5_with(&session_key, SERVER_SIGN_MAGIC);
         self.send_sealing = Some(Rc4::new(&md5_with(&session_key, CLIENT_SEAL_MAGIC)));
@@ -337,7 +340,11 @@ impl NtlmClient {
         let digest = hmac_md5(&self.send_signing_key, &digest_input);
         let sealing = self.send_sealing.as_mut().ok_or("not authenticated")?;
         let sealed_data = sealing.process(plaintext);
-        let sealed_checksum = sealing.process(&digest[0..8]);
+        let sealed_checksum = if self.key_exchange {
+            sealing.process(&digest[..8])
+        } else {
+            digest[..8].to_vec()
+        };
         let mut out = Vec::with_capacity(16 + sealed_data.len());
         out.extend_from_slice(&1u32.to_le_bytes()); // version
         out.extend_from_slice(&sealed_checksum); // checksum (8)
@@ -360,7 +367,11 @@ impl NtlmClient {
         digest_input.extend_from_slice(&data);
         let digest = hmac_md5(&self.recv_signing_key, &digest_input);
         let sealing = self.recv_sealing.as_mut().ok_or("not authenticated")?;
-        let checksum = sealing.process(&digest[0..8]);
+        let checksum = if self.key_exchange {
+            sealing.process(&digest[..8])
+        } else {
+            digest[..8].to_vec()
+        };
         let mut expected = Vec::with_capacity(16);
         expected.extend_from_slice(&1u32.to_le_bytes());
         expected.extend_from_slice(&checksum);
@@ -378,6 +389,7 @@ impl NtlmClient {
         self.recv_signing_key = md5_with(session_key, CLIENT_SIGN_MAGIC);
         self.recv_sealing = Some(Rc4::new(&md5_with(session_key, CLIENT_SEAL_MAGIC)));
         self.recv_seq = 0;
+        self.key_exchange = true;
     }
 }
 
@@ -522,6 +534,7 @@ mod test {
         let sk = client.exported_session_key;
 
         let mut server = NtlmClient::new();
+        server.key_exchange = true;
         server.recv_signing_key = md5_with(&sk, CLIENT_SIGN_MAGIC);
         server.recv_sealing = Some(Rc4::new(&md5_with(&sk, CLIENT_SEAL_MAGIC)));
 
@@ -529,5 +542,68 @@ mod test {
         let sealed = client.encrypt(plaintext).unwrap();
         let recovered = server.decrypt(&sealed).unwrap();
         assert_eq!(recovered, plaintext);
+    }
+    #[test]
+    fn seal_vectors_follow_negotiated_key_exchange_and_rc4_position() {
+        // Fixed MS-NLMP 3.4.4.2 vectors independently generated with OpenSSL RC4 and HMAC-MD5.
+        let outgoing = [
+            [
+                "0100000069cc2547dfb780e100000000126be92005613f6b78af7e4087",
+                "0100000071a2c6e5ecca967b010000000f4596cfced09267c3e04b90a98e57eeb824",
+            ],
+            [
+                "0100000015ecd0e77f0332e500000000126be92005613f6b78af7e4087",
+                "01000000b78f59d4ba7da25a01000000c2e04c9aa99e1eeca63233e367e919ca76bb",
+            ],
+        ];
+        let incoming = [
+            [
+                "01000000dead4858a263c832000000003706adfec5f67b8c4bbc4992e4",
+                "01000000f3ab7cdbf91a1ccd0100000004b817d574d9bd11846de5eaa077ca9e12f0",
+            ],
+            [
+                "01000000a9703ce2b8de5540000000003706adfec5f67b8c4bbc4992e4",
+                "0100000003c43ac2765c320c01000000856de2e0a067839c0ce67a73b14c35ef9500",
+            ],
+        ];
+        let texts: [&[u8]; 2] = [b"first binding", b"second credentials"];
+        let session_key: [u8; 16] = core::array::from_fn(|i| i as u8);
+        for exchange in [false, true] {
+            let mut client = NtlmClient::new();
+            client.build_negotiate();
+            let mut challenge = sample_challenge();
+            if !exchange {
+                let flags = u32::from_le_bytes(challenge[20..24].try_into().unwrap()) & !KEY_EXCH;
+                challenge[20..24].copy_from_slice(&flags.to_le_bytes());
+            }
+            client.read_challenge(&challenge).unwrap();
+            client
+                .build_authenticate("user", "DOMAIN", "pass", [0xaa; 8], session_key)
+                .unwrap();
+            assert_eq!(client.key_exchange, exchange);
+            client.send_signing_key = md5_with(&session_key, CLIENT_SIGN_MAGIC);
+            client.recv_signing_key = md5_with(&session_key, SERVER_SIGN_MAGIC);
+            client.send_sealing = Some(Rc4::new(&md5_with(&session_key, CLIENT_SEAL_MAGIC)));
+            client.recv_sealing = Some(Rc4::new(&md5_with(&session_key, SERVER_SEAL_MAGIC)));
+            for (i, &text) in texts.iter().enumerate() {
+                assert_eq!(
+                    client.encrypt(text).unwrap(),
+                    unhex(outgoing[usize::from(exchange)][i])
+                );
+                assert_eq!(
+                    client
+                        .decrypt(&unhex(incoming[usize::from(exchange)][i]))
+                        .unwrap(),
+                    text
+                );
+            }
+        }
+        fn unhex(bytes: &str) -> Vec<u8> {
+            bytes
+                .as_bytes()
+                .chunks_exact(2)
+                .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+                .collect()
+        }
     }
 }

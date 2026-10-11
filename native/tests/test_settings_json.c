@@ -516,7 +516,75 @@ static void test_capture_gates_follow_remaining_profiles(void) {
     assert(!s.camera_enabled && !s.audio_input_enabled);
 }
 
+static void test_json_boundaries(void) {
+    NativeSettings s = make_defaults();
+    NativeSettings before = s;
+    const char *invalid[] = {
+        "", "garbage", "[]", "{\"sessions\":[]", "{\"sessions\":[]} trailing",
+        "{\"sessions\":[],}", "{\"fps\":6e1}", "{\"wheelStep\":1.5}",
+        "{\"audioInputGainDb\":1e1}", "{\"cameraEnabled\":truejunk}",
+        "{\"port\":+3389}", "{\"port\":03389}", "{\"name\":\"a\\u0000b\"}",
+        "{\"name\":\"\\ud800\"}", "{\"name\":\"\\udc00\"}", "{\"name\":\"\\u041\"}"
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        assert(!native_settings_apply_json(&s, invalid[i], "boundary"));
+        assert(memcmp(&s, &before, sizeof(s)) == 0);
+    }
+    assert(native_settings_apply_json(&s,
+        "{\"sessions\":[{\"slot\":\"red\",\"wheelStep\":1}],"
+        "\"unknown\":{\"wheelStep\":2},\"text\":\"\\\"wheelStep\\\":3\",\"wheelStep\":60}",
+        "scoped"));
+    assert(s.wheel_step == 60);
+    assert(native_settings_apply_json(&s, "{\"name\":\"caf\\u00e9 \\u0410 \\ud83d\\ude00\"}", "unicode"));
+    assert(strcmp(s.sessions[NATIVE_SESSION_SLOT_GREEN].name,
+                  "caf\xc3\xa9 \xd0\x90 \xf0\x9f\x98\x80") == 0);
+}
+
+static void test_maximum_escaped_round_trip(void) {
+    NativeSettings s = make_defaults();
+    for (int i = 0; i < NATIVE_SETTINGS_MAX_SESSIONS; i++) {
+        char *fields[] = {s.sessions[i].name, s.sessions[i].host, s.sessions[i].username,
+                          s.sessions[i].password, s.sessions[i].domain};
+        for (size_t j = 0; j < sizeof(fields) / sizeof(fields[0]); j++) {
+            memset(fields[j], '\x01', NATIVE_SETTINGS_STRING_MAX - 1);
+            fields[j][NATIVE_SETTINGS_STRING_MAX - 1] = '\0';
+        }
+    }
+    memset(s.camera_device_id, '\x01', sizeof(s.camera_device_id) - 1);
+    memset(s.audio_input_device_id, '\x01', sizeof(s.audio_input_device_id) - 1);
+    char path[] = "/tmp/lgnome-settings-max-XXXXXX";
+    int fd = mkstemp(path);
+    assert(fd >= 0);
+    close(fd);
+    assert(native_settings_save_file(&s, path));
+    NativeSettings loaded = make_defaults();
+    assert(native_config_load_file(&loaded, path, true));
+    assert(memcmp(&loaded, &s, sizeof(s)) == 0);
+    assert(unlink(path) == 0);
+}
+
+static void test_cli_values_and_selected_slot(void) {
+    NativeSettings s = make_defaults();
+    char *missing[] = {"lgnome", "--fps"};
+    char *config[] = {"lgnome", "--config"};
+    char *followed[] = {"lgnome", "--host", "--fps", "30"};
+    assert(!native_config_apply_cli(&s, 2, missing));
+    assert(!native_config_validate_cli(2, config));
+    assert(native_arg_exists(2, config, "--config"));
+    assert(!native_config_validate_cli(4, followed));
+    strcpy(s.sessions[NATIVE_SESSION_SLOT_RED].host, "192.0.2.1");
+    strcpy(s.sessions[NATIVE_SESSION_SLOT_RED].username, "test");
+    strcpy(s.sessions[NATIVE_SESSION_SLOT_RED].password, "test");
+    char *red[] = {"lgnome", "--connect-slot", "red"};
+    assert(native_config_validate(&s, native_connect_slot_requested(3, red)));
+    assert(!native_config_validate(&s, NATIVE_SESSION_SLOT_GREEN));
+    assert(!native_config_validate(&s, -1));
+}
+
 int main(void) {
+    test_json_boundaries();
+    test_maximum_escaped_round_trip();
+    test_cli_values_and_selected_slot();
     test_launch_controls();
     test_removed_options_are_ignored();
     test_capture_gates_follow_remaining_profiles();

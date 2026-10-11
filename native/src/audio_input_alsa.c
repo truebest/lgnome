@@ -311,6 +311,10 @@ long native_audio_input_capture_read(NativeAudioInputCapture *capture, int16_t *
     if (result == -EAGAIN) {
         return 0;
     }
+    /* ALSA suspend recovery can retry resume forever, even on a nonblocking PCM. */
+    if (result == -ESTRPIPE) {
+        return -1;
+    }
     int recovered = capture->api.pcm_recover(capture->pcm, (int)result, 1);
     if (recovered >= 0) {
         clog_limited(cLogLevelWarning, 2, 1000u, "recovered ALSA microphone xrun (%ld)", (long)result);
@@ -328,3 +332,18 @@ uint32_t native_audio_input_capture_rate(const NativeAudioInputCapture *capture)
 uint16_t native_audio_input_capture_channels(const NativeAudioInputCapture *capture) {
     return capture ? capture->channels : 0u;
 }
+
+#ifdef LGNOME_AUDIO_INPUT_ALSA_TESTING
+NativeAudioInputCapture *native_audio_input_capture_create_for_test(
+    snd_pcm_t *pcm, snd_pcm_readi_fn readi, snd_pcm_recover_fn recover,
+    snd_strerror_fn strerror_fn) {
+    NativeAudioInputCapture *capture = calloc(1u, sizeof(*capture));
+    if (capture) {
+        capture->pcm = pcm;
+        capture->api.pcm_readi = readi;
+        capture->api.pcm_recover = recover;
+        capture->api.strerror_fn = strerror_fn;
+    }
+    return capture;
+}
+#endif

@@ -265,6 +265,10 @@ void native_present_mixer_overlay_frame(App *app, SDL_Renderer *renderer) {
 
 void native_present_streaming_frame(App *app, SDL_Renderer *renderer, bool *logged) {
     if (native_present_rgba_frame(app, renderer, logged) != 0) {
+        if (app->mixer_overlay_visible) {
+            app->mixer_overlay_dragging = false;
+            native_mixer_overlay_hide(app);
+        }
         return;
     }
     if (app->switch_deadline_ticks != 0) {

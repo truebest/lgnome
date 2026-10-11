@@ -71,6 +71,7 @@ case "$mode" in
   --config)
     launch_params="$(python3 - "$value" <<'PY'
 import json
+import subprocess
 import sys
 
 def settings_object(fields):
@@ -80,19 +81,23 @@ def settings_object(fields):
 
 try:
     with open(sys.argv[1], "rb") as file:
-        raw = file.read(16384)
-    if len(raw) >= 16384:
+        raw = file.read(131073)
+    if len(raw) > 131072:
         raise ValueError()
     config = json.loads(raw, object_hook=settings_object)
     if not isinstance(config, dict):
         raise ValueError()
     params = json.dumps(config, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-    # ares-launch rewrites literal apostrophes before JSON parsing.
-    params = params.replace("'", r"\u0027")
-    if len(params.encode("utf-8")) >= 16384:
+    # Match ares-launch's JavaScript number formatting before checking size.
+    params = subprocess.check_output([
+        "node", "-e",
+        "process.stdout.write(JSON.stringify(JSON.parse(require('fs').readFileSync(0,'utf8'))))"
+    ], input=params.encode("utf-8"), stderr=subprocess.DEVNULL).decode("utf-8")
+    # Leave room for the CLI command envelope below Linux's per-argument limit.
+    if "'" in params or len(params.encode("utf-8")) > 122880:
         raise ValueError()
-except (OSError, ValueError, RecursionError):
-    raise SystemExit("config must be a JSON object below 16 KiB without launch-control keys")
+except (OSError, ValueError, RecursionError, subprocess.CalledProcessError):
+    raise SystemExit("config must be a JSON object up to 128 KiB (launch params up to 120 KiB) without apostrophes or launch-control keys")
 print(params)
 PY
 )" || fail "invalid explicit config"

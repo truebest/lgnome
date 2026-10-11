@@ -33,15 +33,31 @@ static const char native_config_app_id[] = "com.truebest.lgnome.native";
  *   missing file (open fails):            *existed=false, *out=NULL, returns true
  *   read/size error on an existing file:  *existed=true,  *out=NULL, returns false
  *   success:                              *existed=true,  *out=buffer (caller frees), returns true */
-static bool native_config_read_file(const char *path, char **out, bool *existed) {
+static bool native_config_read_file(const char *path, char **out, bool *existed, bool private_file) {
     *out = NULL;
     *existed = false;
 
-    FILE *file = fopen(path, "rb");
-    if (!file) {
+    int fd = open(path, O_RDONLY | (private_file ? O_NOFOLLOW | O_NONBLOCK : 0));
+    if (fd < 0) {
+        if (errno != ENOENT && errno != ENOTDIR) {
+            *existed = true;
+            return false;
+        }
         return true;
     }
     *existed = true;
+    struct stat st;
+    if (private_file &&
+        (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
+         (st.st_mode & (S_IWGRP | S_IWOTH)))) {
+        close(fd);
+        return false;
+    }
+    FILE *file = fdopen(fd, "rb");
+    if (!file) {
+        close(fd);
+        return false;
+    }
 
     if (fseek(file, 0, SEEK_END) != 0) {
         fclose(file);
@@ -65,7 +81,7 @@ static bool native_config_read_file(const char *path, char **out, bool *existed)
 
     size_t read_count = fread(json, 1, (size_t)size, file);
     fclose(file);
-    if (read_count != (size_t)size) {
+    if (read_count != (size_t)size || memchr(json, '\0', read_count)) {
         free(json);
         clog(cLogLevelError, "failed to read config file: %s", path);
         return false;
@@ -79,7 +95,7 @@ static bool native_config_load_file_internal(NativeSettings *settings, const cha
                                              bool log_missing) {
     char *json = NULL;
     bool existed = false;
-    if (!native_config_read_file(path, &json, &existed)) {
+    if (!native_config_read_file(path, &json, &existed, false)) {
         return false;
     }
     if (!existed) {
@@ -107,52 +123,58 @@ bool native_config_load_file(NativeSettings *settings, const char *path, bool re
     return native_config_load_file_internal(settings, path, required, true);
 }
 
-bool native_settings_save_file(const NativeSettings *settings, const char *path) {
-    char temp_path[NATIVE_PERSISTED_CONFIG_PATH_MAX + 16u];
-    int n = snprintf(temp_path, sizeof(temp_path), "%s.tmp", path);
-    if (n <= 0 || (size_t)n >= sizeof(temp_path)) {
-        clog(cLogLevelError, "persisted config path is too long");
-        return false;
-    }
+static bool native_settings_save_file_checked(const NativeSettings *settings, const char *path,
+                                              bool private_dir) {
+    char dir[NATIVE_PERSISTED_CONFIG_PATH_MAX];
+    if (!native_config_parent_dir(path, dir, sizeof(dir))) return false;
+    const char *name = strrchr(path, '/');
+    name = name ? name + 1 : path;
+    char temporary[NATIVE_PERSISTED_CONFIG_PATH_MAX];
+    int n = snprintf(temporary, sizeof(temporary), "%s.tmp", name);
+    if (n <= 0 || (size_t)n >= sizeof(temporary) || !name[0]) return false;
 
-    /* Create the temp file atomically at 0600 (before any secret is written) and refuse to
-     * follow a symlink or reuse an existing file at the predictable .tmp name, so a local
-     * attacker can neither read the plaintext password through an open window nor redirect
-     * the write to clobber another file. Clear our own stale temp from a prior crash first;
-     * O_EXCL|O_NOFOLLOW then fails safely if anyone raced a file/symlink into place. */
-    (void)unlink(temp_path);
-    int temp_fd = open(temp_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR);
-    if (temp_fd < 0) {
-        clog(cLogLevelError, "failed to create persisted config temp file %s for write: %s", temp_path,
-             strerror(errno));
+    int dir_fd = open(dir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+    if (dir_fd < 0) return false;
+    struct stat st;
+    if (private_dir &&
+        (fstat(dir_fd, &st) != 0 || st.st_uid != geteuid() ||
+         (st.st_mode & (S_IWGRP | S_IWOTH)))) {
+        close(dir_fd);
         return false;
     }
-    FILE *file = fdopen(temp_fd, "wb");
+    /* Pin the verified directory across creation and rename. */
+    (void)unlinkat(dir_fd, temporary, 0);
+    int fd = openat(dir_fd, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+        close(dir_fd);
+        return false;
+    }
+    FILE *file = fdopen(fd, "wb");
     if (!file) {
-        clog(cLogLevelError, "failed to open persisted config temp file %s for write: %s", temp_path,
-             strerror(errno));
-        close(temp_fd);
-        (void)unlink(temp_path);
+        close(fd);
+        (void)unlinkat(dir_fd, temporary, 0);
+        close(dir_fd);
         return false;
     }
-
     bool ok = native_settings_write_json(settings, file);
-    if (fclose(file) != 0) {
-        ok = false;
-    }
+    long size = ftell(file);
+    if (size < 0 || (unsigned long)size > NATIVE_CONFIG_MAX_FILE) ok = false;
+    if (ok && (fflush(file) != 0 || fsync(fd) != 0)) ok = false;
+    if (fclose(file) != 0) ok = false;
+    if (ok && renameat(dir_fd, temporary, dir_fd, name) != 0) ok = false;
+    if (ok && fsync(dir_fd) != 0) ok = false;
     if (!ok) {
-        remove(temp_path);
-        clog(cLogLevelError, "failed to write persisted config");
-        return false;
+        (void)unlinkat(dir_fd, temporary, 0);
+        clog(cLogLevelError, "failed to persist config at %s", path);
+    } else {
+        clog(cLogLevelInfo, "saved persisted config: %s", path);
     }
-    if (rename(temp_path, path) != 0) {
-        remove(temp_path);
-        clog(cLogLevelError, "failed to replace persisted config: %s", strerror(errno));
-        return false;
-    }
+    close(dir_fd);
+    return ok;
+}
 
-    clog(cLogLevelInfo, "saved persisted config: %s", path);
-    return true;
+bool native_settings_save_file(const NativeSettings *settings, const char *path) {
+    return native_settings_save_file_checked(settings, path, false);
 }
 
 #ifdef LGNOME_TARGET_WEBOS
@@ -220,24 +242,6 @@ static void native_config_collect_persisted_candidates(NativeConfigPathCandidate
     }
 }
 
-static bool native_config_get_persisted_save_path(char *path, size_t cap) {
-    NativeConfigPathCandidates candidates;
-    native_config_collect_persisted_candidates(&candidates);
-
-    size_t index = 0;
-    if (native_config_find_persisted_save_candidate(&candidates, &index)) {
-        if (!native_config_copy_path(path, cap, candidates.paths[index])) {
-            clog(cLogLevelError, "persisted config path is too long");
-            return false;
-        }
-        clog(cLogLevelInfo, "using persisted config path: %s", path);
-        return true;
-    }
-
-    clog(cLogLevelWarning, "no writable persisted config directory found");
-    return false;
-}
-
 typedef enum NativeConfigLoadOutcome {
     NATIVE_CONFIG_LOAD_MISSING, /* no file at this path */
     NATIVE_CONFIG_LOAD_INVALID, /* file exists but could not be read or parsed */
@@ -246,10 +250,11 @@ typedef enum NativeConfigLoadOutcome {
 
 /* Load one candidate with a single open, distinguishing "no file here" from "file is
  * corrupt" so the caller can fall through to lower-priority candidates in either case. */
-static NativeConfigLoadOutcome native_config_try_load_candidate(NativeSettings *settings, const char *path) {
+static NativeConfigLoadOutcome native_config_try_load_candidate(NativeSettings *settings, const char *path,
+                                                                bool private_file) {
     char *json = NULL;
     bool existed = false;
-    if (!native_config_read_file(path, &json, &existed)) {
+    if (!native_config_read_file(path, &json, &existed, private_file)) {
         return existed ? NATIVE_CONFIG_LOAD_INVALID : NATIVE_CONFIG_LOAD_MISSING;
     }
     if (!existed) {
@@ -300,7 +305,8 @@ bool native_config_load_persisted(NativeSettings *settings, bool force_ignore) {
             }
         }
 
-        NativeConfigLoadOutcome outcome = native_config_try_load_candidate(settings, candidates.paths[i]);
+        NativeConfigLoadOutcome outcome = native_config_try_load_candidate(
+            settings, candidates.paths[i], !candidates.from_env[i]);
         if (outcome == NATIVE_CONFIG_LOAD_MISSING) {
             continue;
         }
@@ -315,26 +321,33 @@ bool native_config_load_persisted(NativeSettings *settings, bool force_ignore) {
 }
 
 bool native_config_save_persisted(const NativeSettings *settings) {
-    /* The winning save path is normally constant for the process lifetime, so resolve it once
-     * (the resolution runs mkdir -p plus a write probe across several directories) and reuse it
-     * on every connect instead of re-probing the filesystem each time settings are saved. */
-    static char cached_path[NATIVE_PERSISTED_CONFIG_PATH_MAX];
-    static bool have_cached_path = false;
-
-    if (have_cached_path && native_settings_save_file(settings, cached_path)) {
-        return true;
-    }
-
-    /* Either nothing is cached yet, or the cached save just failed -- most likely because the
-     * directory was removed mid-session (e.g. a /tmp reaper). Re-resolve (which re-creates or
-     * re-selects a writable, secure directory) and write there in the SAME call, so a save that
-     * just captured the user's updated credentials is not lost until the next connect. */
-    have_cached_path = false;
-    if (!native_config_get_persisted_save_path(cached_path, sizeof(cached_path))) {
+    NativeConfigPathCandidates candidates;
+    native_config_collect_persisted_candidates(&candidates);
+    size_t save_index;
+    if (!native_config_find_persisted_save_candidate(&candidates, &save_index)) {
+        clog(cLogLevelWarning, "no writable persisted config directory found");
         return false;
     }
-    have_cached_path = true;
-    return native_settings_save_file(settings, cached_path);
+    for (size_t i = 0; i < candidates.count; i++) {
+        if (!candidates.from_env[i]) {
+            char dir[NATIVE_PERSISTED_CONFIG_PATH_MAX];
+            if (!native_config_parent_dir(candidates.paths[i], dir, sizeof(dir)) ||
+                !native_config_dir_secure_or_heal(dir)) {
+                continue;
+            }
+        }
+        NativeSettings existing = *settings;
+        if (native_config_try_load_candidate(&existing, candidates.paths[i],
+                                             !candidates.from_env[i]) == NATIVE_CONFIG_LOAD_OK) {
+            if (save_index > i) {
+                clog(cLogLevelError, "loaded settings location is not writable");
+                return false;
+            }
+            break;
+        }
+    }
+    clog(cLogLevelInfo, "using persisted config path: %s", candidates.paths[save_index]);
+    return native_settings_save_file_checked(settings, candidates.paths[save_index], true);
 }
 #else
 bool native_config_load_persisted(NativeSettings *settings, bool force_ignore) {

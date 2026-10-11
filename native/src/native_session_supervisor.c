@@ -53,11 +53,17 @@ void native_session_supervisor_tick(App *app, NativePreconnectUi *ui) {
                     survivor = j;
                 }
             }
+            bool switched = false;
             if (survivor >= 0 && app->streaming_visible) {
                 /* The session the user was WATCHING died: fall back to the survivor. */
                 clog(presentation.error ? cLogLevelWarning : cLogLevelInfo,
                      "%s; auto-switching video to the %s session", status, native_session_slot_name(survivor));
-                native_complete_session_switch(app, survivor);
+                switched = native_complete_session_switch(app, survivor);
+                if (!switched) {
+                    survivor = -1;
+                }
+            }
+            if (switched) {
                 native_stop_slot(app, i);
                 native_preconnect_ui_set_status(ui, status, presentation.error);
             } else if (survivor >= 0) {

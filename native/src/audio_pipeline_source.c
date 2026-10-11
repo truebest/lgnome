@@ -29,9 +29,16 @@ static uint32_t clamp_u32(uint32_t value, uint32_t low, uint32_t high) {
 }
 
 static unsigned source_available_frames(const NativeAudioSource *source) {
-    unsigned write = atomic_load_explicit(&source->write_cursor, memory_order_acquire);
     unsigned read = atomic_load_explicit(&source->read_cursor, memory_order_acquire);
-    return write - read;
+#ifdef LGNOME_AUDIO_PIPELINE_TESTING
+    if (source->pipeline->after_queue_cursor) {
+        source->pipeline->after_queue_cursor(source->pipeline->after_queue_cursor_ctx, source->index);
+    }
+#endif
+    unsigned write = atomic_load_explicit(&source->write_cursor, memory_order_acquire);
+    /* An observer can span a producer/consumer advance; telemetry stays bounded. */
+    unsigned available = write - read;
+    return available < NATIVE_AUDIO_PIPELINE_CAPACITY_FRAMES ? available : NATIVE_AUDIO_PIPELINE_CAPACITY_FRAMES;
 }
 
 uint32_t native_audio_source_queue_ms(const NativeAudioSource *source) {
@@ -345,26 +352,30 @@ static void source_finish_read(NativeSourceReadBlock *block, ma_uint64 frame_cou
 }
 
 static void source_mark_unavailable(NativeAudioSource *source) {
-    unsigned write = atomic_load_explicit(&source->write_cursor, memory_order_acquire);
-    atomic_store_explicit(&source->read_cursor, write, memory_order_release);
     source->live = false;
     source->rebuffering = true;
 }
 
 static bool source_prepare_playout(NativeAudioSource *source, uint32_t now_ms,
                                    bool *trim_requested_out) {
-    uint32_t target_ms = atomic_load_explicit(&source->target_delay_ms, memory_order_relaxed);
     uint32_t queue_ms = native_audio_source_queue_ms(source);
+    uint32_t target_ms = atomic_load_explicit(&source->target_delay_ms, memory_order_relaxed);
+    /* The target covers a producer block; allow its refill swing before trimming. */
+    uint32_t trim_margin_ms = target_ms > NATIVE_AUDIO_HARD_TRIM_ERROR_MS
+                                  ? target_ms : NATIVE_AUDIO_HARD_TRIM_ERROR_MS;
     bool trim_requested = atomic_load_explicit(&source->trim_requested, memory_order_relaxed);
-    bool excessive_backlog = queue_ms > target_ms + NATIVE_AUDIO_HARD_TRIM_ERROR_MS;
+    bool excessive_backlog = queue_ms > target_ms + trim_margin_ms;
 
     if (source->rebuffering && (trim_requested || excessive_backlog)) {
         if (source_trim_to_target(source) > 0) {
             source->fade_in_remaining = NATIVE_AUDIO_FADE_FRAMES;
         }
         queue_ms = native_audio_source_queue_ms(source);
+        target_ms = atomic_load_explicit(&source->target_delay_ms, memory_order_relaxed);
+        trim_margin_ms = target_ms > NATIVE_AUDIO_HARD_TRIM_ERROR_MS
+                             ? target_ms : NATIVE_AUDIO_HARD_TRIM_ERROR_MS;
         trim_requested = atomic_load_explicit(&source->trim_requested, memory_order_relaxed);
-        excessive_backlog = queue_ms > target_ms + NATIVE_AUDIO_HARD_TRIM_ERROR_MS;
+        excessive_backlog = queue_ms > target_ms + trim_margin_ms;
     }
 
     if (source->rebuffering) {
@@ -727,6 +738,15 @@ void native_audio_pipeline_set_test_before_ring_read(NativeAudioPipeline *pipeli
     NativeAudioPipelineImpl *impl = (NativeAudioPipelineImpl *)pipeline->impl;
     impl->before_ring_read = hook;
     impl->before_ring_read_ctx = ctx;
+}
+
+void native_audio_pipeline_set_test_after_queue_cursor(NativeAudioPipeline *pipeline,
+                                                       NativeAudioPipelineTestHook hook, void *ctx) {
+    if (pipeline && pipeline->impl) {
+        NativeAudioPipelineImpl *impl = (NativeAudioPipelineImpl *)pipeline->impl;
+        impl->after_queue_cursor = hook;
+        impl->after_queue_cursor_ctx = ctx;
+    }
 }
 #endif
 
