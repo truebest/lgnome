@@ -32,21 +32,22 @@ void native_handle_sdl_event(App *app, SDL_Window *window, SDL_Renderer *rendere
     case SDL_APP_WILLENTERBACKGROUND:
         clog(cLogLevelInfo, "SDL_APP_WILLENTERBACKGROUND; keeping native session running");
         app->app_backgrounded = true;
+        app->mixer_overlay_dragging = false;
         native_stop_streaming_input(app);
         break;
     case SDL_APP_DIDENTERBACKGROUND:
         clog(cLogLevelInfo, "SDL_APP_DIDENTERBACKGROUND; keeping native session running");
         app->app_backgrounded = true;
+        app->mixer_overlay_dragging = false;
         native_stop_streaming_input(app);
         break;
     case SDL_APP_WILLENTERFOREGROUND:
         clog(cLogLevelDebug, "SDL_APP_WILLENTERFOREGROUND");
-        app->app_backgrounded = false;
         break;
     case SDL_APP_DIDENTERFOREGROUND:
         clog(cLogLevelInfo, "SDL_APP_DIDENTERFOREGROUND");
         app->app_backgrounded = false;
-        app->window_unfocused = false;
+        app->window_unfocused = SDL_GetKeyboardFocus() != window;
         native_resume_streaming_input(app, window);
         break;
     case SDL_WINDOWEVENT:
@@ -73,6 +74,7 @@ void native_handle_sdl_event(App *app, SDL_Window *window, SDL_Renderer *rendere
                  * keep blocking closes after focus returns. Finishing an in-flight
                  * close is safe because input remains ungrabbed until focus returns. */
                 app->mixer_overlay_pointer_buttons = 0;
+                app->mixer_overlay_dragging = false;
                 if (app->mixer_overlay_dismiss_button != 0 || app->mixer_overlay_dismiss_pending) {
                     app->mixer_overlay_dismiss_button = 0;
                     app->mixer_overlay_dismiss_pending = false;
@@ -80,13 +82,14 @@ void native_handle_sdl_event(App *app, SDL_Window *window, SDL_Renderer *rendere
                 }
             }
             native_stop_streaming_input(app);
-        } else if (event->window.event == SDL_WINDOWEVENT_FOCUS_GAINED || event->window.event == SDL_WINDOWEVENT_RESTORED ||
-                   event->window.event == SDL_WINDOWEVENT_SHOWN) {
+        } else if (event->window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
             clog(cLogLevelInfo, "window gained focus (event %u); re-grabbing input",
                  (unsigned)event->window.event);
-            app->window_unfocused = false;
+            app->window_unfocused = SDL_GetKeyboardFocus() != window;
             native_resume_streaming_input(app, window);
-        } else if (event->window.event == SDL_WINDOWEVENT_EXPOSED) {
+        } else if (event->window.event == SDL_WINDOWEVENT_EXPOSED ||
+                   event->window.event == SDL_WINDOWEVENT_SHOWN ||
+                   event->window.event == SDL_WINDOWEVENT_RESTORED) {
             clog(cLogLevelTrace, "SDL window lifecycle event %u", (unsigned)event->window.event);
         }
         break;
@@ -94,7 +97,10 @@ void native_handle_sdl_event(App *app, SDL_Window *window, SDL_Renderer *rendere
         if (app->mixer_overlay_visible) {
             /* The pointer belongs to the overlay: the evdev grab is released while it is
              * up, so the system cursor is live and these are compositor coordinates. */
-            if (app->mixer_overlay_dragging) {
+            if (!(event->motion.state & SDL_BUTTON_LMASK)) {
+                app->mixer_overlay_dragging = false;
+            }
+            if (app->mixer_overlay_dragging && !app->window_unfocused && !app->app_backgrounded) {
                 int win_w = 0;
                 int win_h = 0;
                 SDL_GetWindowSize(window, &win_w, &win_h);

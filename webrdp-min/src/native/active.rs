@@ -4,7 +4,6 @@ use std::io::Read;
 use std::sync::atomic::Ordering;
 
 use ironrdp_connector::ConnectionResult;
-use ironrdp_graphics::image_processing::PixelFormat;
 use ironrdp_pdu::geometry::InclusiveRectangle;
 use ironrdp_pdu::geometry::Rectangle as _;
 use ironrdp_session::image::DecodedImage;
@@ -23,8 +22,13 @@ impl NativeWorker {
         mut tls: TlsStream,
         result: ConnectionResult,
     ) -> Result<(), NativeError> {
+        self.phase_deadline = None;
+        tls.sock.phase_deadline = None;
         let desktop_w = result.desktop_size.width;
         let desktop_h = result.desktop_size.height;
+        let mut image = super::active_io::new_image(desktop_w, desktop_h)?;
+        self.refresh_rect_support = result.refresh_rect_support;
+        self.suppress_output_support = result.suppress_output_support;
         tracing::info!(target: super::LOG_TARGET_SESSION,
             requested_width = self.config.width, requested_height = self.config.height,
             negotiated_width = desktop_w, negotiated_height = desktop_h,
@@ -49,7 +53,6 @@ impl NativeWorker {
             pointer_software_rendering: result.pointer_software_rendering,
         }
         .build();
-        let mut image = DecodedImage::new(PixelFormat::RgbA32, desktop_w, desktop_h);
 
         // Discard any input poll_stop buffered during the pre-connect phase; the C side does
         // not send input until the session is active, so this is normally empty, and replaying
@@ -90,6 +93,7 @@ impl NativeWorker {
                     .map_err(|e| NativeError::protocol(format!("active stage process: {e}")))?;
                 let deactivate = self.handle_active_outputs(&mut tls, &image, outputs)?;
                 self.drain_gfx()?;
+                self.recover_bitmap(&mut tls, &mut active, &image)?;
 
                 if deactivate {
                     self.drive_reactivation(&mut tls, &mut active, &mut image)?;
@@ -101,7 +105,7 @@ impl NativeWorker {
                 Ok(0) => return Err(NativeError::network("RDP server closed the TLS stream")),
                 Ok(n) => {
                     self.last_read_at = Some(monotonic_now());
-                    self.inbuf.extend_from_slice(&buf[..n]);
+                    self.append_input(&buf[..n])?;
                 }
                 Err(e) if is_timeout(&e) => {}
                 Err(e) => return Err(NativeError::network(format!("active read: {e}"))),

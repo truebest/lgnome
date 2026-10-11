@@ -1,35 +1,58 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Publishes the local `main` tree to the GitHub release remote as ONE new release commit
-# on top of the previous release commit. Development history stays only in the Bitbucket
-# repo (origin); the GitHub history is an append-only chain of release snapshots, one
-# commit per version. GitHub history is NEVER rewritten: pushes are fast-forward only and
-# existing tags are never moved.
-#
-# Usage:            tools/release-github.sh <version>        e.g. tools/release-github.sh 0.1.2
-# Remote override:  RELEASE_REMOTE=<name> (default: github)
-# Branch override:  RELEASE_BRANCH=<name> (default: main)
-#
-# This script only pushes the tag/commit. It does NOT create the GitHub Releases entry
-# (Releases page, release notes, .ipk asset) — that's a separate manual step:
-#   gh release create vX.Y.Z --repo truebest/lgnome --title "lgnome X.Y.Z" \
-#     --notes "..." dist/native-webos/com.truebest.lgnome.native_X.Y.Z_arm.ipk
+# Prepare one cumulative release commit on the previous GitHub release.
+# Push the candidate through a PR; tag the merged main commit only after CI and review.
+# Usage: tools/release-github.sh <version> /path/to/verified.ipk
 
-version="${1:?usage: tools/release-github.sh <version>   e.g. 0.1.2}"
+version="${1:?usage: tools/release-github.sh <version> /path/to/verified.ipk}"
+ipk="${2:?usage: tools/release-github.sh <version> /path/to/verified.ipk}"
 remote="${RELEASE_REMOTE:-github}"
 branch="${RELEASE_BRANCH:-main}"
 tag="v${version}"
+candidate="release/$tag"
 
 fail() {
   echo "release-github: $*" >&2
   exit 2
 }
 
+[[ $# == 2 && "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || fail "expected a version X.Y.Z and a verified IPK"
+[[ -f "$ipk" ]] || fail "IPK does not exist: $ipk"
+git check-ref-format "refs/heads/$candidate" || fail "invalid candidate branch"
 git diff --quiet && git diff --cached --quiet || fail "working tree is dirty; commit or stash first"
 git rev-parse --verify main >/dev/null 2>&1 || fail "local main branch not found"
 git remote get-url "$remote" >/dev/null 2>&1 || fail "remote '$remote' is not configured"
 git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null && fail "tag $tag already exists locally; bump the version"
+
+git show-ref --verify --quiet "refs/heads/$candidate" && fail "candidate $candidate already exists"
+remote_tags="$(git ls-remote --tags "$remote" "refs/tags/$tag")" || fail "cannot inspect release tags"
+[[ -z "$remote_tags" ]] || fail "tag $tag already exists remotely; bump the version"
+
+python3 - "$version" "$ipk" <<'PY_VERSION'
+import io
+import json
+import subprocess
+import sys
+import tarfile
+
+version, ipk = sys.argv[1:]
+app_id = "com.truebest.lgnome.native"
+source = json.loads(subprocess.check_output(["git", "show", "main:native/deploy/webos/appinfo.json"]))
+members = subprocess.check_output(["ar", "t", ipk], text=True).splitlines()
+payloads = [name for name in members if name.startswith("data.tar")]
+if len(payloads) != 1:
+    raise SystemExit("release-github: expected one IPK data payload")
+with tarfile.open(fileobj=io.BytesIO(subprocess.check_output(["ar", "p", ipk, payloads[0]]))) as archive:
+    paths = [entry for entry in archive if entry.name.lstrip("./") ==
+             f"usr/palm/applications/{app_id}/appinfo.json" and entry.isfile()]
+    if len(paths) != 1:
+        raise SystemExit("release-github: missing or ambiguous IPK appinfo.json")
+    packaged = json.load(archive.extractfile(paths[0]))
+if any(info.get("id") != app_id or info.get("version") != version for info in (source, packaged)):
+    raise SystemExit("release-github: requested version/identity differs from main or IPK appinfo.json")
+PY_VERSION
+"$(dirname "${BASH_SOURCE[0]}")/build-native-webos.sh" --verify-ipk "$ipk"
 
 tree="$(git rev-parse "main^{tree}")"
 
@@ -61,17 +84,12 @@ GIT_INDEX_FILE="$release_index" git update-index --cacheinfo "100644,$gitmodules
 GIT_INDEX_FILE="$release_index" git update-index --cacheinfo "160000,$ndl_mirror_head,third_party/backend_ndl"
 tree="$(GIT_INDEX_FILE="$release_index" git write-tree)"
 
-parent_args=()
-if git fetch --quiet "$remote" "$branch" 2>/dev/null; then
-  parent="$(git rev-parse FETCH_HEAD)"
-  parent_args=(-p "$parent")
-  [ "$(git rev-parse "$parent^{tree}")" = "$tree" ] && fail "tree is identical to the latest published release; nothing to release"
-fi
-
-commit="$(git commit-tree "$tree" "${parent_args[@]}" -m "lgnome ${version}")"
-
-git tag "$tag" "$commit" >/dev/null
-git push "$remote" "$commit:refs/heads/$branch" "refs/tags/$tag"
-echo "release-github: published release commit $commit as $remote/$branch ($tag)"
-echo "release-github: tag pushed, but the GitHub Releases entry is NOT created yet — run:" >&2
-echo "  gh release create $tag --repo truebest/lgnome --title \"lgnome $version\" --notes \"...\" dist/native-webos/com.truebest.lgnome.native_${version}_arm.ipk" >&2
+git fetch --quiet "$remote" "$branch" || fail "cannot fetch the previous release branch"
+parent="$(git rev-parse FETCH_HEAD)"
+[ "$(git rev-parse "$parent^{tree}")" = "$tree" ] && fail "tree is identical to the latest published release; nothing to release"
+commit="$(git commit-tree "$tree" -p "$parent" -m "lgnome ${version}")"
+git branch "$candidate" "$commit"
+echo "release-github: prepared $candidate ($commit), parent $parent"
+echo "release-github: verified IPK SHA-256: $(sha256sum "$ipk" | cut -d ' ' -f 1)"
+echo "release-github: push $candidate to $remote with an explicit refspec, open a PR to $branch, and wait for CI and review of the current head."
+echo "release-github: after squash merge, tag the resulting $branch commit $tag and create the Release with this IPK."

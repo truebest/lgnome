@@ -5,18 +5,17 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Minimal field scanner for the flat, trusted-ish JSON this app actually
- * meets: the persisted settings file, webOS launch parameters, and Luna
- * service replies. It scans for `"key" :` and reads one scalar; it does not
- * validate documents, handle nesting, or allocate. Deliberately log-free:
- * callers own the tri-state result and the error report.
+/* Allocation-free object scanner for settings, launch parameters and Luna
+ * replies. Lookup reads immediate fields; validation bounds nesting to 32.
+ * Callers own the tri-state result and error report.
  *
  * native_json_read_* return 1 = read, 0 = key absent, -1 = present but
  * invalid (out of range, wrong type, bad escape). */
 
 const char *native_json_skip_ws(const char *p);
+bool native_json_validate_object(const char *json);
 
-/* Pointer to the first non-space byte of the value for `key`, or NULL. */
+/* Immediate object field only; nested objects require explicit lookup. */
 const char *native_json_find_value(const char *json, const char *key);
 
 int native_json_read_string(const char *json, const char *key, char *out, size_t cap);

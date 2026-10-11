@@ -476,8 +476,85 @@ if(BUILD_TESTING)
   )
   target_include_directories(test-settings-json PRIVATE include)
   add_test(NAME settings-json COMMAND test-settings-json)
+  add_executable(test-config-storage
+    tests/test_config_storage.c
+    src/native_config.c
+    src/native_settings.c
+    src/settings_json.c
+    src/native_json.c
+    src/config_paths.c
+  )
+  target_compile_definitions(test-config-storage PRIVATE LGNOME_TARGET_WEBOS=1)
+  target_include_directories(test-config-storage PRIVATE tests/support/fake_sdl include)
+  target_link_options(test-config-storage PRIVATE -Wl,--wrap=fopen)
+  target_link_libraries(test-config-storage PRIVATE category-log)
+  add_test(NAME config-storage COMMAND test-config-storage)
+  add_executable(test-native-logging tests/test_native_logging.c src/native_lifecycle.c)
+  target_include_directories(test-native-logging PRIVATE include)
+  target_link_libraries(test-native-logging PRIVATE category-log)
+  add_test(NAME native-logging COMMAND test-native-logging)
+  add_executable(test-native-runtime
+    tests/test_native_runtime.c
+    src/native_input_route.c
+    src/native_sdl_events.c
+    src/native_streaming_transition.c
+    src/native_session_supervisor.c
+    src/native_switch_handoff.c
+    src/native_presentation.c
+    src/native_rdp_state.c
+    src/native_settings.c
+  )
+  target_include_directories(test-native-runtime PRIVATE tests/support/fake_runtime include src)
+  target_compile_definitions(test-native-runtime PRIVATE LGNOME_TARGET_WEBOS=1 _POSIX_C_SOURCE=200809L)
+  target_compile_options(test-native-runtime PRIVATE -ffunction-sections -fdata-sections)
+  target_link_options(test-native-runtime PRIVATE -Wl,--gc-sections -Wl,--wrap=native_complete_session_switch)
+  target_link_libraries(test-native-runtime PRIVATE category-log Threads::Threads)
+  add_test(NAME native-runtime COMMAND test-native-runtime)
+  add_executable(test-native-snapshot-replay
+    tests/test_native_snapshot_replay.c src/native_switch_recovery.c
+    src/native_rdp_video.c src/au_snapshot.c src/h264_annexb.c)
+  target_include_directories(test-native-snapshot-replay PRIVATE tests/support/fake_runtime include src)
+  target_compile_definitions(test-native-snapshot-replay PRIVATE LGNOME_TARGET_WEBOS=1 _POSIX_C_SOURCE=200809L)
+  target_compile_options(test-native-snapshot-replay PRIVATE -ffunction-sections -fdata-sections)
+  target_link_options(test-native-snapshot-replay PRIVATE -Wl,--gc-sections -Wl,--wrap=native_h264_scan_au)
+  target_link_libraries(test-native-snapshot-replay PRIVATE category-log Threads::Threads)
+  add_test(NAME native-snapshot-replay COMMAND test-native-snapshot-replay)
+
+  add_executable(test-input-evdev-disconnect tests/test_input_evdev_disconnect.c src/input_event_queue.c)
+  target_include_directories(test-input-evdev-disconnect PRIVATE tests/support/fake_evdev include)
+  target_link_libraries(test-input-evdev-disconnect PRIVATE category-log Threads::Threads)
+  add_test(NAME input-evdev-disconnect COMMAND test-input-evdev-disconnect)
+
+  add_executable(test-luna-volume-order tests/test_luna_volume_order.c src/native_json.c)
+  target_include_directories(test-luna-volume-order PRIVATE tests/support/fake_luna include)
+  target_compile_definitions(test-luna-volume-order PRIVATE LGNOME_TARGET_WEBOS=1)
+  target_compile_options(test-luna-volume-order PRIVATE -ffunction-sections -fdata-sections)
+  target_link_options(test-luna-volume-order PRIVATE -Wl,--gc-sections)
+  target_link_libraries(test-luna-volume-order PRIVATE category-log Threads::Threads)
+  add_test(NAME luna-volume-order COMMAND test-luna-volume-order)
+
+  add_executable(test-native-pointer-control tests/test_native_pointer_control.c src/native_pointer.c)
+  target_include_directories(test-native-pointer-control PRIVATE tests/support/fake_pointer include)
+  target_compile_definitions(test-native-pointer-control PRIVATE LGNOME_TARGET_WEBOS=1 _POSIX_C_SOURCE=200809L)
+  target_compile_options(test-native-pointer-control PRIVATE -ffunction-sections -fdata-sections)
+  target_link_options(test-native-pointer-control PRIVATE -Wl,--gc-sections)
+  target_link_libraries(test-native-pointer-control PRIVATE category-log Threads::Threads)
+  add_test(NAME native-pointer-control COMMAND test-native-pointer-control)
+
+  file(GLOB_RECURSE LVGL_TEST_SOURCES "${LGNOME_LVGL_SOURCE_DIR}/src/*.c")
+  list(FILTER LVGL_TEST_SOURCES EXCLUDE REGEX "/draw/sdl/")
+  add_executable(test-ui-preconnect-input tests/test_ui_preconnect_input.c src/ui_key_queue.c ${LVGL_TEST_SOURCES})
+  target_include_directories(test-ui-preconnect-input PRIVATE tests/support/fake_ui include src
+    "${LGNOME_LVGL_SOURCE_DIR}" "${LGNOME_LVGL_SOURCE_DIR}/src")
+  target_compile_definitions(test-ui-preconnect-input PRIVATE LGNOME_TARGET_WEBOS=1 LV_CONF_INCLUDE_SIMPLE=1)
+  target_compile_options(test-ui-preconnect-input PRIVATE -ffunction-sections -fdata-sections)
+  target_link_options(test-ui-preconnect-input PRIVATE -Wl,--gc-sections)
+  target_link_libraries(test-ui-preconnect-input PRIVATE category-log Threads::Threads m)
+  add_test(NAME ui-preconnect-input COMMAND test-ui-preconnect-input)
+
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
   add_test(NAME deploy-webos COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../tools/test-deploy-native-webos.py")
+  add_test(NAME release-github COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../tools/test-release-github.py")
 
   add_executable(test-native-rdp-video
     tests/test_native_rdp_video.c
@@ -490,6 +567,7 @@ if(BUILD_TESTING)
     src/native_settings.c
   )
   target_include_directories(test-native-rdp-video PRIVATE include src)
+  target_link_options(test-native-rdp-video PRIVATE -Wl,--wrap=pthread_mutex_lock)
   target_link_libraries(test-native-rdp-video PRIVATE category-log Threads::Threads)
   add_test(NAME native-rdp-video COMMAND test-native-rdp-video)
 

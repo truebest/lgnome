@@ -45,6 +45,9 @@ int main(int argc, char **argv) {
     NativeSettings native_settings;
     native_settings_defaults(&native_settings);
 
+    if (!native_config_validate_cli(argc, argv)) {
+        return 2;
+    }
     const char *config_path = native_arg_value(argc, argv, "--config", NATIVE_CONFIG_PATH);
     bool config_required = native_arg_exists(argc, argv, "--config");
     if (!native_config_load_file(&native_settings, config_path, config_required) ||
@@ -74,7 +77,9 @@ int main(int argc, char **argv) {
         return 2;
     }
 #else
-    if (!native_config_validate(&native_settings)) {
+    int startup_slot = native_connect_slot_requested(argc, argv);
+    if (startup_slot < 0) startup_slot = NATIVE_SESSION_SLOT_GREEN;
+    if (!native_config_validate(&native_settings, startup_slot)) {
         native_shutdown_sdl_runtime();
         return 2;
     }
@@ -218,8 +223,6 @@ int main(int argc, char **argv) {
     }
 
 #ifndef LGNOME_TARGET_WEBOS
-    int startup_slot = app.debug_connect_slot >= 0 ? app.debug_connect_slot
-                                                   : NATIVE_SESSION_SLOT_GREEN;
     atomic_store(&app.active_index, startup_slot);
     native_duck_retarget(&app);
     app.sessions[startup_slot].config = native_settings.sessions[startup_slot];

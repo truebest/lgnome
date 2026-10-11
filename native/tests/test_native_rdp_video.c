@@ -43,6 +43,15 @@ NativeVideoResult native_video_feed(NativeVideo *video, const uint8_t *data, siz
 
 static RdpCallbacks callbacks;
 static uint32_t now_ms;
+static App *demote_on_lock;
+int __real_pthread_mutex_lock(pthread_mutex_t *lock);
+int __wrap_pthread_mutex_lock(pthread_mutex_t *lock) {
+    if (demote_on_lock && lock == &demote_on_lock->video_lock) {
+        atomic_store(&demote_on_lock->active_index,1);
+        demote_on_lock=NULL;
+    }
+    return __real_pthread_mutex_lock(lock);
+}
 
 int clock_gettime(clockid_t clock_id, struct timespec *time) {
     (void)clock_id;
@@ -175,10 +184,58 @@ static void test_refinement_hold_across_clock_wrap(void) {
     teardown(&app);
 }
 
+static void test_background_refinement_keeps_h264_classification(void) {
+    App app;
+    setup(&app);
+    NativeSessionSlot *slot = &app.sessions[1];
+    assert(native_au_snapshot_arm(&slot->snapshot));
+    now_ms = UINT32_MAX - 99u;
+    video(&app, 1);
+    assert(native_au_snapshot_ready(&slot->snapshot));
+    now_ms += 100u;
+    bitmap(&app, 1);
+    assert(!atomic_load(&slot->video_via_bitmap));
+    assert(native_au_snapshot_ready(&slot->snapshot));
+    now_ms += 1500u;
+    bitmap(&app, 1);
+    assert(atomic_load(&slot->video_via_bitmap));
+    video(&app, 1);
+    atomic_fetch_add(&slot->connect_epoch, 1u);
+    bitmap(&app, 1);
+    assert(atomic_load(&slot->video_via_bitmap));
+    bitmap(&app, 2);
+    assert(atomic_load(&app.sessions[2].video_via_bitmap));
+    native_au_snapshot_reset(&slot->snapshot);
+    teardown(&app);
+}
+
+static void test_refinement_overlapping_demotion(void) {
+    App app; setup(&app); video(&app,0);
+    NativeVideo *decoder=app.video;
+    demote_on_lock=&app;
+    bitmap(&app,0);
+    assert(app.video==decoder && !app.rgba && !atomic_load(&app.sessions[0].video_via_bitmap));
+    teardown(&app);
+}
+
+static void test_armed_snapshot_blocks_active_refinement(void) {
+    App app; setup(&app); video(&app,0);
+    NativeVideo *decoder=app.video;
+    NativeSessionSlot *slot=&app.sessions[1];
+    assert(native_au_snapshot_arm(&slot->snapshot)); video(&app,1);
+    atomic_store(&app.active_index,1); bitmap(&app,1);
+    assert(app.video==decoder && !app.rgba && !atomic_load(&slot->video_via_bitmap));
+    assert(native_au_snapshot_ready(&slot->snapshot));
+    native_au_snapshot_reset(&slot->snapshot); teardown(&app);
+}
+
 int main(void) {
     test_refinement_hold_requires_same_slot_and_epoch();
     test_handoffs_do_not_trip_codec_flip_limit();
     test_same_connection_still_limits_codec_flips();
     test_refinement_hold_across_clock_wrap();
+    test_background_refinement_keeps_h264_classification();
+    test_refinement_overlapping_demotion();
+    test_armed_snapshot_blocks_active_refinement();
     return 0;
 }

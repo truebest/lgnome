@@ -73,28 +73,25 @@ static void on_bitmap_update(void *ctx, uint16_t surface_id, uint32_t left, uint
         return;
     }
     App *app = slot->app;
-    /* Classify background bitmap streams too: they cannot use AU snapshot switching. */
-    atomic_store(&slot->video_via_bitmap, true);
-    if (!native_slot_is_active(slot)) {
-        /* Background session: only the active slot may touch the shared presentation. */
+    pthread_mutex_lock(&app->video_lock);
+    bool recent_h264 = slot->h264_seen && slot->h264_epoch == atomic_load(&slot->connect_epoch) &&
+                       native_monotonic_ms() - slot->h264_last_au_ms < NATIVE_H264_PATH_HOLD_MS;
+    if (!native_slot_is_active(slot) || (slot->snapshot.armed && recent_h264)) {
+        atomic_store(&slot->video_via_bitmap, !recent_h264);
+        pthread_mutex_unlock(&app->video_lock);
         return;
     }
+    atomic_store(&slot->video_via_bitmap, true);
     if (!rgba || len == 0 || width == 0 || height == 0) {
         app->decoder_errors++;
         native_slot_report_terminal(slot, RDP_STATE_DECODER_ERROR,
                                     rdp_state_exit_code(RDP_STATE_DECODER_ERROR));
+        pthread_mutex_unlock(&app->video_lock);
         return;
     }
     uint16_t desktop_width = (uint16_t)atomic_load(&slot->desktop_width);
     uint16_t desktop_height = (uint16_t)atomic_load(&slot->desktop_height);
 
-    pthread_mutex_lock(&app->video_lock);
-    if (!native_slot_is_active(slot)) {
-        /* Demoted between the gate above and the lock: a switch tore the video path down
-         * meanwhile, and this in-flight update must not resurrect it. */
-        pthread_mutex_unlock(&app->video_lock);
-        return;
-    }
     unsigned owner_epoch = atomic_load(&slot->connect_epoch);
     if (app->rgba && !native_rgba_owner_matches(app, slot->index, owner_epoch)) {
         /* Dirty rectangles must not inherit another slot/epoch's pixels. */
@@ -159,8 +156,16 @@ static void on_bitmap_update(void *ctx, uint16_t surface_id, uint32_t left, uint
     }
 }
 
+static void native_note_h264_stream(NativeSessionSlot *slot, bool valid_au) {
+    if (valid_au) {
+        slot->h264_seen = true;
+        slot->h264_last_au_ms = native_monotonic_ms();
+        slot->h264_epoch = atomic_load(&slot->connect_epoch);
+    }
+}
+
 /* Shared ingest for live callbacks and snapshot replay. */
-void native_video_ingest_au(NativeSessionSlot *slot, const uint8_t *data, size_t len, uint64_t pts90k) {
+void native_video_ingest_au_locked(NativeSessionSlot *slot, const uint8_t *data, size_t len, uint64_t pts90k) {
     if (!slot) {
         return;
     }
@@ -171,26 +176,20 @@ void native_video_ingest_au(NativeSessionSlot *slot, const uint8_t *data, size_t
     /* This stream feeds H.264 AUs: snapshot switching applies. Stamped before any
      * routing so a backgrounded stream classifies its slot too. */
     atomic_store(&slot->video_via_bitmap, false);
-    if (!native_slot_is_active(slot)) {
-        pthread_mutex_lock(&app->video_lock);
-        if (native_slot_is_active(slot)) {
-            /* The slot became active while waiting for video_lock; feed this AU live. */
-            pthread_mutex_unlock(&app->video_lock);
-        } else {
-            if (slot->snapshot.armed) {
-                if (!native_au_snapshot_append(&slot->snapshot, data, len, valid_au, decoder_seed,
-                                               pts90k)) {
-                    clog(cLogLevelWarning,
-                         "%s AU snapshot invalidated (overflow or malformed AU); switch-to will reconnect",
-                         native_session_slot_name(slot->index));
-                }
-                /* Publish arrival time before readiness so replay cannot mistake this AU for a quiet stream. */
-                atomic_store(&slot->snapshot_last_au_ms, native_monotonic_ms());
-                atomic_store(&slot->snapshot_idr_ready, native_au_snapshot_ready(&slot->snapshot));
-            }
-            pthread_mutex_unlock(&app->video_lock);
-            return;
+    native_note_h264_stream(slot, valid_au);
+    /* Armed caches remain the handoff barrier after active_index is published. */
+    if (slot->snapshot.armed) {
+        if (!native_au_snapshot_append(&slot->snapshot, data, len, valid_au, decoder_seed, pts90k)) {
+            clog(cLogLevelWarning,
+                 "%s AU snapshot invalidated (overflow or malformed AU); switch-to will reconnect",
+                 native_session_slot_name(slot->index));
         }
+        atomic_store(&slot->snapshot_last_au_ms, native_monotonic_ms());
+        atomic_store(&slot->snapshot_idr_ready, native_au_snapshot_ready(&slot->snapshot));
+        return;
+    }
+    if (!native_slot_is_active(slot)) {
+        return;
     }
     if (!data || len == 0) {
         app->decoder_errors++;
@@ -202,17 +201,10 @@ void native_video_ingest_au(NativeSessionSlot *slot, const uint8_t *data, size_t
     /* Use the latest ResetGraphics size, which may differ from the connection handshake. */
     uint16_t desktop_width = (uint16_t)atomic_load(&slot->desktop_width);
     uint16_t desktop_height = (uint16_t)atomic_load(&slot->desktop_height);
-    pthread_mutex_lock(&app->video_lock);
-    if (!native_slot_is_active(slot)) {
-        /* Demoted between the gate above and the lock (see on_bitmap_update). */
-        pthread_mutex_unlock(&app->video_lock);
-        return;
-    }
     if (app->rgba) {
         bool same_owner = native_rgba_owner_matches(app, slot->index, atomic_load(&slot->connect_epoch));
         native_close_rgba_locked(app, true);
         if (same_owner && native_note_graphics_path_switch(app, slot, "from native RemoteFX RGBA to NDL/H.264")) {
-            pthread_mutex_unlock(&app->video_lock);
             return;
         }
     }
@@ -220,7 +212,6 @@ void native_video_ingest_au(NativeSessionSlot *slot, const uint8_t *data, size_t
                        app->video_owner_epoch != atomic_load(&slot->connect_epoch))) {
         /* Keep the old picture until the new decoder owner supplies a keyframe. */
         if (!decoder_seed) {
-            pthread_mutex_unlock(&app->video_lock);
             unsigned waited = atomic_fetch_add(&slot->keyframe_wait_drops, 1u) + 1u;
             if (waited % 60u == 1u) {
                 clog(cLogLevelDebug,
@@ -277,7 +268,6 @@ void native_video_ingest_au(NativeSessionSlot *slot, const uint8_t *data, size_t
             }
         }
         if (!app->video) {
-            pthread_mutex_unlock(&app->video_lock);
             app->decoder_errors++;
             clog(cLogLevelError,
                  "terminal native error: DecoderError; hardware decoder unavailable");
@@ -306,7 +296,6 @@ void native_video_ingest_au(NativeSessionSlot *slot, const uint8_t *data, size_t
             app->decoder_keyframe_pending = true;
             atomic_store(&app->video_refresh_needed, true);
         }
-        pthread_mutex_unlock(&app->video_lock);
         return;
     }
     if (result == NATIVE_VIDEO_OK) {
@@ -314,10 +303,8 @@ void native_video_ingest_au(NativeSessionSlot *slot, const uint8_t *data, size_t
         /* Signals the SDL thread that the freshly switched-to stream is decoding. */
         atomic_fetch_add(&slot->video_ok_frames, 1u);
         native_note_video_frame(app, slot, len, feed_finished_ms);
-        pthread_mutex_unlock(&app->video_lock);
         return;
     }
-    pthread_mutex_unlock(&app->video_lock);
     if (result == NATIVE_VIDEO_DROPPED) {
         /* DROPPED does not count as decoded progress for replay or the switch watchdog. */
         return;
@@ -327,6 +314,15 @@ void native_video_ingest_au(NativeSessionSlot *slot, const uint8_t *data, size_t
     clog(cLogLevelError, "terminal native error: DecoderError; decoder feed result=%d", (int)result);
     native_slot_report_terminal(slot, RDP_STATE_DECODER_ERROR,
                                 rdp_state_exit_code(RDP_STATE_DECODER_ERROR));
+}
+
+void native_video_ingest_au(NativeSessionSlot *slot, const uint8_t *data, size_t len, uint64_t pts90k) {
+    if (!slot) {
+        return;
+    }
+    pthread_mutex_lock(&slot->app->video_lock);
+    native_video_ingest_au_locked(slot, data, len, pts90k);
+    pthread_mutex_unlock(&slot->app->video_lock);
 }
 
 static void on_video_au(void *ctx, const uint8_t *data, size_t len, uint64_t pts90k) {

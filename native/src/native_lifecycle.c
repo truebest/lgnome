@@ -9,6 +9,7 @@
 #include "native_lifecycle.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -44,9 +45,13 @@ void native_prepare_webos_logging(void) {
     if (!path || !path[0]) {
         path = "/tmp/lgnome-native.log";
     }
-    if (freopen(path, "w", stderr)) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd >= 0 && dup2(fd, STDERR_FILENO) >= 0) {
         setvbuf(stderr, NULL, _IOLBF, 0);
+    } else {
+        clog(cLogLevelWarning, "failed to open native log: %s", strerror(errno));
     }
+    if (fd >= 0 && fd != STDERR_FILENO) close(fd);
 }
 
 /* webOS keeps the DirectMedia pipeline acquired until NDL_DirectMediaQuit, so a

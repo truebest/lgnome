@@ -32,5 +32,7 @@ int SDL_RenderCopy(SDL_Renderer *renderer, SDL_Texture *texture, const SDL_Rect 
                    const SDL_Rect *dst);
 void SDL_RenderPresent(SDL_Renderer *renderer);
 const char *SDL_GetError(void);
+char *SDL_GetPrefPath(const char *org, const char *app);
+void SDL_free(void *ptr);
 
 #endif

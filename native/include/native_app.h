@@ -65,6 +65,10 @@ typedef struct NativeSessionSlot {
     int index; /* NATIVE_SESSION_SLOT_* */
     RdpSession *rdp;
     NativeSessionConfig config;
+    /* Capture mode passed to this connection; SDL thread only. */
+    uint16_t camera_width;
+    uint16_t camera_height;
+    uint16_t camera_fps;
     /* Codec flips within this connection only; guarded by App.video_lock. */
     int graphics_path_switches;
     atomic_int current_state;
@@ -118,6 +122,10 @@ typedef struct NativeSessionSlot {
     bool snapshot_retry_used;
     /* Worker publishes the graphics path; bitmap streams cannot use AU snapshots. */
     atomic_bool video_via_bitmap;
+    /* video_lock protects the recent-H.264 classification for background slots. */
+    bool h264_seen;
+    uint32_t h264_last_au_ms;
+    unsigned h264_epoch;
 } NativeSessionSlot;
 
 typedef struct App {

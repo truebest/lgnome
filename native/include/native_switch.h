@@ -5,12 +5,13 @@
 #ifdef LGNOME_TARGET_WEBOS
 
 #include <stdint.h>
+#include <stdbool.h>
 
 typedef struct App App;
 typedef struct NativeSessionSlot NativeSessionSlot;
 
 void native_background_slot(App *app, int index);
-void native_complete_session_switch(App *app, int target);
+bool native_complete_session_switch(App *app, int target);
 void native_show_hub(App *app);
 void native_show_slot_configurator(App *app, int target);
 void native_request_session_switch(App *app, int target);

@@ -22,8 +22,9 @@ void capture_camera_fail_credit_locked(NativeCaptureRedirectImpl *impl, int slot
     }
     if (!state->session || !rdp_submit_camera_error(state->session, state->camera_generation)) {
         clog_limited(cLogLevelDebug, 4, 5000,
-                     "camera SampleError for slot %d generation %llu could not enter the closing mailbox", slot,
+                     "camera SampleError for slot %d generation %llu could not enter the mailbox", slot,
                      (unsigned long long)generation);
+        return;
     }
     state->camera_credit = 0u;
 }
@@ -91,7 +92,8 @@ void native_capture_redirect_set_slot(NativeCaptureRedirect *redirect, int slot,
         state->camera_streaming = false;
         state->camera_credit = 0u;
     }
-    if (session_changed || !audio_input_allowed) {
+    /* The worker may negotiate OPEN before rdp_session_start returns its handle. */
+    if (!audio_input_allowed || (session_changed && (state->session || !session))) {
         state->audio_streaming = false;
         state->audio_frames_per_packet = 0u;
     }

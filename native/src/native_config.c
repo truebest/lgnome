@@ -116,9 +116,9 @@ bool native_session_config_validate_connect(const NativeSessionConfig *session, 
     return ok;
 }
 
-bool native_config_validate(const NativeSettings *settings) {
-    return native_session_config_validate_connect(&settings->sessions[NATIVE_SESSION_SLOT_GREEN],
-                                                  NATIVE_SESSION_SLOT_GREEN, NULL, 0) &&
+bool native_config_validate(const NativeSettings *settings, int slot) {
+    return slot >= 0 && slot < NATIVE_SETTINGS_MAX_SESSIONS &&
+           native_session_config_validate_connect(&settings->sessions[slot], slot, NULL, 0) &&
            native_config_validate_runtime(settings);
 }
 

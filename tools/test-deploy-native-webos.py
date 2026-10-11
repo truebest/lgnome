@@ -85,11 +85,27 @@ def main():
         ):
             commands = run("--no-install", option)
             assert json.loads(commands[-1][1][-1]) == expected
-        document = {"password": "secret 'x' $(false)", "name": "Юрий", "sessions": []}
+        document = {"password": "secret $(false)", "name": "Юрий", "sessions": []}
         config.write_text(json.dumps(document))
         commands = run("--no-install", "--config", config)
         params = commands[-1][1][-1]
         assert "'" not in params and json.loads(params) == document
+        for apostrophe in ("O'Reilly", "secret 'x'"):
+            config.write_text(json.dumps({"username": apostrophe}))
+            assert run("--ipk", ipk, "--config", config, ok=False) == []
+
+        config.write_text(r'{"username":"\u0027"}')
+        assert run("--ipk", ipk, "--config", config, ok=False) == []
+
+        boundary = json.dumps({"extra": "x" * (122881 - len('{"extra":""}'))}, separators=(",", ":"))
+        assert len(boundary.encode()) == 122881
+        config.write_text(boundary)
+        assert run("--ipk", ipk, "--config", config, ok=False) == []
+
+        config.write_text(json.dumps({"extra": [1e-6] * 19000}, separators=(",", ":")))
+        assert run("--ipk", ipk, "--config", config, ok=False) == []
+        config.write_text('{"extra":1e-6}')
+        assert json.loads(run("--no-install", "--config", config)[-1][1][-1]) == {"extra": 1e-6}
 
         for arguments in (
             (), ("--no-install", "--no-launch"),
@@ -102,9 +118,9 @@ def main():
             assert run(*arguments, ok=False) == []
         for raw in ('[]', '{"password":"secret",}', '{"ignoreSavedConfig":false}',
                     '{"params":{}}', '{"cameraPreview":true}', '{"connectSlot":"red"}',
-                    '{"launchParams":"{}"}', '{"fps":NaN}', " " * 16384,
+                    '{"launchParams":"{}"}', '{"fps":NaN}', " " * 131073,
                     '{"sessions":[{"ignoreSavedConfig":true}]}',
-                    '{"extra":{"cameraPreview":true}}', '{"password":"' + "é" * 9000 + '"}'):
+                    '{"extra":{"cameraPreview":true}}', '{"password":"' + "é" * 70000 + '"}'):
             config.write_text(raw)
             assert run("--ipk", ipk, "--config", config, ok=False) == []
         for failure, expected in (
@@ -118,7 +134,8 @@ def main():
             assert [c[0] for c in commands] == expected
 
         # Exercise the real verifier's rejection paths without a toolchain or device.
-        for issue in ("identity", "saved settings", "configuration files", "settings directory"):
+        for issue in ("identity", "saved settings", "configuration files", "settings directory",
+                      "settings directory must have mode"):
             payload = root / "data.tar.gz"
             package_root = f"usr/palm/applications/{APP_ID}/"
             files = {"appinfo.json": json.dumps({"id": "wrong.id"}).encode(),
@@ -132,6 +149,11 @@ def main():
             if issue == "configuration files":
                 files["config.local.json"] = b"{}"
             with tarfile.open(payload, "w:gz") as archive:
+                if issue == "settings directory must have mode":
+                    item = tarfile.TarInfo(package_root + "settings")
+                    item.type = tarfile.DIRTYPE
+                    item.mode = 0o777
+                    archive.addfile(item)
                 if issue == "settings directory":
                     item = tarfile.TarInfo(package_root + "settings")
                     item.type = tarfile.SYMTYPE
@@ -148,6 +170,40 @@ def main():
                 capture_output=True, text=True)
             assert result.returncode != 0
             assert (issue if issue != "identity" else "expected 'com.truebest.lgnome.native'") in result.stderr
+        subprocess.run(["python3", str(REPO / "tools/fix-ipk-settings-mode.py"), str(ipk)], check=True)
+        repaired = root / "repaired"
+        repaired.mkdir()
+        subprocess.run(["ar", "x", str(ipk)], cwd=repaired, check=True)
+        with tarfile.open(repaired / "data.tar.gz") as archive:
+            assert archive.getmember(package_root + "settings").mode == 0o1777
+            assert archive.extractfile(package_root + "icon.png").read() == b""
+
+        def raw_member(name, data):
+            header = (f"{name:<16}{1791734055:<12}{0:<6}{0:<6}"
+                      f"{'100644':<8}{len(data):<10}`\n").encode("ascii")
+            assert len(header) == 60
+            return header, header + data + (b"\n" if len(data) % 2 else b"")
+
+        # ares-package uses exact names; GNU ar's trailing slashes break TV installation.
+        _, debian = raw_member("debian-binary", b"2.0\n")
+        _, control = raw_member("control.tar.gz", b"control-payload")
+        original_payload = payload.read_bytes()
+        data_header, data_member = raw_member("data.tar.gz", original_payload)
+        _, suffix = raw_member("extra-metadata", b"metadata-payload!")
+        prefix = b"!<arch>\n" + debian + control
+        ipk.write_bytes(prefix + data_member + suffix)
+        subprocess.run(["python3", str(REPO / "tools/fix-ipk-settings-mode.py"), str(ipk)], check=True)
+        updated = ipk.read_bytes()
+        assert updated.startswith(prefix)
+        assert updated.endswith(suffix)
+        offset = len(prefix)
+        assert updated[offset:offset + 48] == data_header[:48]
+        assert updated[offset + 58:offset + 60] == data_header[58:]
+        size = int(updated[offset + 48:offset + 58])
+        assert len(updated) == len(prefix) + 60 + size + size % 2 + len(suffix)
+        with tarfile.open(fileobj=io.BytesIO(updated[offset + 60:offset + 60 + size])) as archive:
+            assert archive.getmember(package_root + "settings").mode == 0o1777
+            assert archive.extractfile(package_root + "icon.png").read() == b""
     print("deploy-webos: all checks passed")
 
 

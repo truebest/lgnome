@@ -173,15 +173,39 @@ const char *native_arg_value(int argc, char **argv, const char *name, const char
         if (strncmp(argv[i], name, n) == 0 && argv[i][n] == '=') {
             return argv[i] + n + 1;
         }
-        if (strcmp(argv[i], name) == 0 && i + 1 < argc) {
-            return argv[i + 1];
+        if (strcmp(argv[i], name) == 0) {
+            return i + 1 < argc ? argv[i + 1] : NULL;
         }
     }
     return fallback;
 }
 
 bool native_arg_exists(int argc, char **argv, const char *name) {
-    return native_arg_value(argc, argv, name, NULL) != NULL;
+    size_t n = strlen(name);
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], name) == 0 ||
+            (strncmp(argv[i], name, n) == 0 && argv[i][n] == '=')) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool native_config_validate_cli(int argc, char **argv) {
+    static const char *options[] = {
+        "--config", "--connect-slot", "--host", "--user", "--username", "--password",
+        "--domain", "--port", "--fps", "--wheel-step", "--wheel-scroll-divisor", "--audio-codec"
+    };
+    for (int i = 1; i < argc; i++) {
+        for (size_t j = 0; j < sizeof(options) / sizeof(options[0]); j++) {
+            if (strcmp(argv[i], options[j]) == 0 &&
+                (i + 1 == argc || strncmp(argv[i + 1], "--", 2) == 0)) {
+                clog(cLogLevelError, "%s requires a value", options[j]);
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 int native_connect_slot_requested(int argc, char **argv) {
@@ -260,6 +284,9 @@ static bool apply_cli_audio_codec(int argc, char **argv, NativeSettings *setting
 }
 
 bool native_config_apply_cli(NativeSettings *settings, int argc, char **argv) {
+    if (!native_config_validate_cli(argc, argv)) {
+        return false;
+    }
     /* Flat CLI flags target the GREEN slot; the yellow
      * slot is configured via the settings file, launch JSON ("sessions" array) or UI. */
     NativeSessionConfig *green = &settings->sessions[NATIVE_SESSION_SLOT_GREEN];

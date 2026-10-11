@@ -34,7 +34,8 @@ jobs:
       - name: Rust format and tests
         run: |
           cargo fmt --manifest-path webrdp-min/Cargo.toml --check
-          cargo test --manifest-path webrdp-min/Cargo.toml --features native --locked native::
+          cargo test --manifest-path webrdp-min/Cargo.toml --features native --locked
+          cargo test --manifest-path third_party/IronRDP/Cargo.toml -p ironrdp-dvc -p ironrdp-svc -p ironrdp-egfx -p ironrdp-capture-replay --locked --lib
 
       - name: Native C syntax check
         run: ./tools/syntax-check-native.sh

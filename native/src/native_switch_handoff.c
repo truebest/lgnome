@@ -23,19 +23,19 @@ clog_define(g_native_log_switch_handoff, cLogLevelInfo, "native");
 /* Finalizes a switch to `target`, which must already be connected. Retargets input,
  * cursor, and the shared video path while the mixed audio track stays attached, then
  * asks the servers to pause/resume their graphics. */
-void native_complete_session_switch(App *app, int target) {
+bool native_complete_session_switch(App *app, int target) {
     int old_index = atomic_load(&app->active_index);
     NativeSessionSlot *target_slot = &app->sessions[target];
     /* A cache-allocation fallback can intentionally reach here while a fresh worker is
      * still CONNECTING and before snapshot_pending is set, so this boundary is looser
      * than native_slot_is_live_stream_target; a terminal failure is never switchable. */
     if (!target_slot->rdp || atomic_load(&target_slot->session_failed)) {
-        return;
+        return false;
     }
     if (old_index == target) {
         native_preconnect_ui_select_slot(app->preconnect_ui, target);
         native_show_session_indicator(app, target);
-        return;
+        return true;
     }
     clog(cLogLevelNotice, "switching video %s -> %s", native_session_slot_name(old_index),
          native_session_slot_name(target));
@@ -57,6 +57,13 @@ void native_complete_session_switch(App *app, int target) {
      * old slot's Rust payload gate before active_index can describe it as background. */
     native_capture_pause_for_active_slot_change(app);
     pthread_mutex_lock(&app->video_lock);
+    bool snapshot_pending = target_slot->snapshot_pending;
+    if (snapshot_pending) {
+        /* A hidden reconnect must send its next IDR directly to the active decoder. */
+        target_slot->snapshot_pending = false;
+        native_au_snapshot_reset(&target_slot->snapshot);
+        atomic_store(&target_slot->snapshot_idr_ready, false);
+    }
     /* Change owner and clear stale refresh under video_lock, shared with on_video_au publication. */
     unsigned target_epoch = atomic_load(&target_slot->connect_epoch);
     if (app->hub_return_rgba && app->hub_return_rgba_owner_slot == target) {
@@ -92,14 +99,7 @@ void native_complete_session_switch(App *app, int target) {
     native_cursor_reassert(&target_slot->cursor);
 
     native_background_slot(app, old_index);
-    if (target_slot->snapshot_pending) {
-        /* An in-flight hidden reconnect can deliver its IDR directly after activation. */
-        target_slot->snapshot_pending = false;
-        pthread_mutex_lock(&app->video_lock);
-        native_au_snapshot_reset(&target_slot->snapshot);
-        pthread_mutex_unlock(&app->video_lock);
-        atomic_store(&target_slot->snapshot_idr_ready, false);
-    } else if (target_slot->suppressed) {
+    if (!snapshot_pending && target_slot->suppressed) {
         target_slot->suppressed = false;
         if (native_snapshot_replay(app, target)) {
             /* Decoder state rebuilt from the cached connect IDR: resume plainly — the
@@ -133,6 +133,7 @@ void native_complete_session_switch(App *app, int target) {
     app->switch_reconnect_used = false;
 
     native_show_session_indicator(app, target);
+    return true;
 }
 
 #endif

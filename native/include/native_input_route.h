@@ -18,6 +18,7 @@ typedef enum NativeInputStartResult {
 } NativeInputStartResult;
 
 NativeInputStartResult native_start_streaming_input(App *app);
+bool native_streaming_input_focused(const App *app);
 void native_stop_streaming_input(App *app);
 void native_resume_streaming_input(App *app, SDL_Window *window);
 

@@ -60,6 +60,7 @@ typedef struct NativeEventQueue {
  * preserve arrival order. Motion is coalesced only later, within ordered mouse runs. */
 /* Only events older than a completed sweep's starting time are visible. */
 void native_event_queue_publish_before(NativeEventQueue *queue, uint64_t time_us);
+void native_event_queue_reset(NativeEventQueue *queue);
 void native_event_queue_push(NativeEventQueue *queue, const NativeEvent *event);
 NativeEventKind native_event_queue_next_kind(const NativeEventQueue *queue);
 bool native_event_queue_pop(NativeEventQueue *queue, NativeEventKind kind, NativeEvent *event);

@@ -116,7 +116,7 @@ Local checks before committing native changes (these mirror CI):
 
 ```sh
 ./tools/syntax-check-native.sh
-cargo test --manifest-path webrdp-min/Cargo.toml --features native --locked native::
+cargo test --manifest-path webrdp-min/Cargo.toml --features native --locked
 cmake -S native -B /tmp/lgnome-native-build && cmake --build /tmp/lgnome-native-build
 ctest --test-dir /tmp/lgnome-native-build --output-on-failure
 ```
@@ -180,7 +180,8 @@ webOS. Toolchain default
   self-hosted runners. `main` is protected — land changes via `bkt pr` (create → `bkt pr checks
   --wait` → `bkt pr merge`), not direct pushes.
 - GitHub (`truebest/lgnome`) is an append-only, releases-only mirror: one snapshot commit +
-  `vX.Y.Z` tag per version, published with `tools/release-github.sh <version>`. Never
+  `vX.Y.Z` tag per version. Prepare with `tools/release-github.sh <version> /path/to/verified.ipk`,
+  merge the candidate through a reviewed PR, then tag the merged commit. Never
   force-push or move tags there.
 - Bump `native/deploy/webos/appinfo.json` `version` for a release. Never add Claude/AI
   attribution trailers to commit messages.
