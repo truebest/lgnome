@@ -164,6 +164,14 @@ void ui_set_fps_options(NativePreconnectUi *ui) {
     lv_dropdown_set_options(ui->fps_dropdown, options);
 }
 
+bool ui_form_credentials_fit(NativePreconnectUi *ui) {
+    const char *username = lv_textarea_get_text(ui->username_input);
+    const char *domain = lv_textarea_get_text(ui->domain_input);
+    const char *password = lv_textarea_get_text(ui->password_input);
+    return username && strlen(username) < UI_USERNAME_MAX && domain && strlen(domain) < UI_DOMAIN_MAX &&
+           password && strlen(password) < UI_PASSWORD_MAX;
+}
+
 bool ui_form_valid(NativePreconnectUi *ui) {
     uint16_t port = 0;
     const char *host = lv_textarea_get_text(ui->host_input);
@@ -171,7 +179,7 @@ bool ui_form_valid(NativePreconnectUi *ui) {
     const char *username = lv_textarea_get_text(ui->username_input);
     const char *password = lv_textarea_get_text(ui->password_input);
     return ui_host_valid(host) && port_text && ui_parse_port(port_text, &port) && username && username[0] && password &&
-           password[0];
+           password[0] && ui_form_credentials_fit(ui);
 }
 
 void ui_set_hidden(lv_obj_t *obj, bool hidden) {

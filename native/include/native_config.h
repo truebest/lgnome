@@ -11,7 +11,7 @@
 #define NATIVE_RDP_INITIAL_DESKTOP_HEIGHT 2160u
 
 #define NATIVE_CONFIG_PATH "native/config.local.json"
-#define NATIVE_CONFIG_MAX_FILE (16u * 1024u)
+#define NATIVE_CONFIG_MAX_FILE (128u * 1024u)
 
 /* Pure settings operations and validation: config diffs, derived capture
  * gates, and effective-config diagnostics. */
@@ -28,7 +28,7 @@ void native_settings_recompute_capture_gates(NativeSettings *settings);
  * user-facing reason on failure. */
 bool native_session_config_validate_connect(const NativeSessionConfig *session, int slot, char *message,
                                             size_t cap);
-bool native_config_validate(const NativeSettings *settings);
+bool native_config_validate(const NativeSettings *settings, int slot);
 /* Relaxed variant for preconnect-UI builds: incomplete profiles are fine, the
  * form collects the rest. */
 bool native_config_validate_runtime(const NativeSettings *settings);

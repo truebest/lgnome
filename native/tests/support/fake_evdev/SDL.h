@@ -1,0 +1,8 @@
+#ifndef LGNOME_TEST_EVDEV_SDL_H
+#define LGNOME_TEST_EVDEV_SDL_H
+#define SDL_BUTTON_LEFT 1
+#define SDL_BUTTON_MIDDLE 2
+#define SDL_BUTTON_RIGHT 3
+#define SDL_BUTTON_X1 4
+#define SDL_BUTTON_X2 5
+#endif

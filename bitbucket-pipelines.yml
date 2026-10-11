@@ -13,8 +13,8 @@ pipelines:
   default:
     - step:
         name: Native webOS build and IPK
-        # Self-hosted workspace runners: no Bitbucket build minutes consumed.
-        # (`size` is a cloud-runner option and is intentionally absent.)
+        # Give Rust LTO 8 GB on the self-hosted Docker runner.
+        size: 2x
         runs-on:
           - "self.hosted"
           - "linux"
@@ -23,7 +23,8 @@ pipelines:
           - git submodule update --init third_party/backend_ndl third_party/IronRDP third_party/lvgl third_party/miniaudio
           - cargo fmt --manifest-path webrdp-min/Cargo.toml --check
           # Quoted: a plain YAML scalar ending in ':' parses as a mapping key.
-          - "cargo test --manifest-path webrdp-min/Cargo.toml --features native --locked native::"
+          - "cargo test --manifest-path webrdp-min/Cargo.toml --features native --locked"
+          - cargo test --manifest-path third_party/IronRDP/Cargo.toml -p ironrdp-dvc -p ironrdp-svc -p ironrdp-egfx -p ironrdp-capture-replay --locked --lib
           - ./tools/syntax-check-native.sh
           - cmake -S native -B /tmp/lgnome-native-build
           - cmake --build /tmp/lgnome-native-build

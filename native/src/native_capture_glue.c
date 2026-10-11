@@ -7,6 +7,8 @@
 #include <string.h>
 
 #include "native_app.h"
+#include "native_rdp_state.h"
+#include "native_session.h"
 
 #include "clog.h"
 
@@ -40,6 +42,21 @@ void native_capture_follow_active_slot(App *app) {
 }
 
 #if defined(LGNOME_TARGET_WEBOS) || defined(LGNOME_CAPTURE_REDIRECT_TESTING)
+static bool capture_mode_changed(const NativeSessionSlot *slot, uint16_t width, uint16_t height, uint16_t fps) {
+    return slot->camera_width != width || slot->camera_height != height || slot->camera_fps != fps;
+}
+
+bool native_capture_mode_save_is_connecting(const App *app, const NativeSettings *candidate) {
+    for (int i = 0; i < NATIVE_SETTINGS_MAX_SESSIONS; i++) {
+        const NativeSessionSlot *slot = &app->sessions[i];
+        if (slot->config.camera_redirect && native_session_is_still_connecting(slot) &&
+            capture_mode_changed(slot, candidate->camera_width, candidate->camera_height, candidate->camera_fps)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void native_reconfigure_capture_redirect(App *app) {
     if (!app || !app->settings || app->camera_preview) {
         return;
@@ -93,6 +110,26 @@ void native_reconfigure_capture_redirect(App *app) {
     }
     for (int i = 0; i < NATIVE_SETTINGS_MAX_SESSIONS; i++) {
         NativeSessionSlot *slot = &app->sessions[i];
+        if (slot->rdp && slot->config.camera_redirect &&
+            capture_mode_changed(slot, config.camera_width, config.camera_height, config.camera_fps)) {
+            /* RDPECAM formats belong to the connection's immutable Rust config. */
+            bool background = i != atomic_load(&app->active_index);
+            if (!native_slot_connect(app, i, background)) {
+                native_slot_report_terminal(slot, RDP_STATE_NETWORK_ERROR,
+                                            rdp_state_exit_code(RDP_STATE_NETWORK_ERROR));
+            } else if (background) {
+                pthread_mutex_lock(&app->video_lock);
+                bool armed = slot->snapshot.armed;
+                pthread_mutex_unlock(&app->video_lock);
+                if (armed) {
+                    slot->snapshot_pending = true;
+                    slot->snapshot_deadline_ticks = 0;
+                } else {
+                    rdp_set_suppress_output(slot->rdp, false);
+                    slot->suppressed = true;
+                }
+            }
+        }
         native_capture_redirect_set_slot(
             &app->capture_redirect, i, slot->rdp,
             settings->camera_enabled &&

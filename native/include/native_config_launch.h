@@ -12,6 +12,7 @@ bool native_arg_exists(int argc, char **argv, const char *name);
 /* Apply webOS launch JSON and flat host CLI overrides. Flat settings target
  * the GREEN profile; launch-only controls never become persisted settings. */
 bool native_config_apply_launch_params(NativeSettings *settings, int argc, char **argv);
+bool native_config_validate_cli(int argc, char **argv);
 bool native_config_apply_cli(NativeSettings *settings, int argc, char **argv);
 bool native_config_launch_ignores_saved_config(int argc, char **argv);
 bool native_camera_preview_requested(int argc, char **argv);

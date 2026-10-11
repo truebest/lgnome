@@ -396,9 +396,13 @@ void native_wait_for_loop_tick(App *app, uint32_t delay_ms) {
     SDL_Delay((Uint32)timeout_ms);
 }
 
+bool native_streaming_input_focused(const App *app) {
+    return app && !app->window_unfocused && !app->app_backgrounded && SDL_GetKeyboardFocus() != NULL;
+}
+
 /* Mouse has an SDL fallback; keyboard does not. Distinguish absent devices from reader failure. */
 NativeInputStartResult native_start_streaming_input(App *app) {
-    if (!app) {
+    if (!native_streaming_input_focused(app)) {
         return NATIVE_INPUT_START_UNAVAILABLE;
     }
     if (!native_evdev_input_start(&app->evdev_input)) {
@@ -432,6 +436,10 @@ void native_stop_streaming_input(App *app) {
     /* Flush releases for anything held BEFORE dropping the grab: once the grab is gone the
      * up-events go to the overlay, not RDP, and the server would keep the drag/key stuck. */
     native_flush_held_inputs(app);
+    pthread_mutex_lock(&app->video_lock);
+    native_input_set_active(&app->input, false);
+    atomic_store(&app->pointer_warp_pending, false);
+    pthread_mutex_unlock(&app->video_lock);
     app->hub_open_key_held = false;
     app->hub_open_button_held = false;
     native_evdev_input_stop_with_buttons(&app->evdev_input,
@@ -439,7 +447,8 @@ void native_stop_streaming_input(App *app) {
 }
 
 void native_resume_streaming_input(App *app, SDL_Window *window) {
-    if (!app || !app->streaming_visible ||
+    if (!native_streaming_input_focused(app) || (window && SDL_GetKeyboardFocus() != window) ||
+        !app->streaming_visible ||
         atomic_load(&native_active_slot(app)->current_state) != (int)RDP_STATE_ACTIVE) {
         return;
     }

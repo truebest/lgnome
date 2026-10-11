@@ -113,12 +113,18 @@ NativeAudioJitterUpdate native_audio_jitter_update(NativeAudioJitterController *
     if (duration_ms == 0) {
         duration_ms = 1;
     }
+    uint32_t cadence_target = clamp_u32(duration_ms + NATIVE_AUDIO_JITTER_TARGET_HEADROOM_MS,
+                                        NATIVE_AUDIO_JITTER_TARGET_MIN_MS, NATIVE_AUDIO_JITTER_TARGET_MAX_MS);
 
     if (!controller->have_arrival) {
         controller->have_arrival = true;
         controller->last_arrival_ms = now_ms;
         controller->last_timestamp_ms = timestamp_ms;
         controller->last_target_change_ms = now_ms;
+        if (cadence_target > current_target_ms) {
+            update.target_delay_ms = cadence_target;
+            update.target_action = NATIVE_AUDIO_JITTER_TARGET_RAISE;
+        }
         return update;
     }
 
@@ -126,7 +132,8 @@ NativeAudioJitterUpdate native_audio_jitter_update(NativeAudioJitterController *
     if (arrival_delta > NATIVE_AUDIO_JITTER_LONG_GAP_MS) {
         jitter_samples_clear(controller);
         update.jitter_p95_ms = 0;
-        update.target_delay_ms = NATIVE_AUDIO_JITTER_TARGET_INITIAL_MS;
+        update.target_delay_ms = cadence_target > NATIVE_AUDIO_JITTER_TARGET_INITIAL_MS
+                                     ? cadence_target : NATIVE_AUDIO_JITTER_TARGET_INITIAL_MS;
         update.target_action = NATIVE_AUDIO_JITTER_TARGET_SET;
         update.talkspurt = true;
         controller->last_target_change_ms = now_ms;
@@ -150,8 +157,10 @@ NativeAudioJitterUpdate native_audio_jitter_update(NativeAudioJitterController *
         controller->last_target_change_ms = now_ms;
     }
 
-    uint32_t cadence_target = clamp_u32(expected_ms + NATIVE_AUDIO_JITTER_TARGET_HEADROOM_MS,
-                                        NATIVE_AUDIO_JITTER_TARGET_MIN_MS, NATIVE_AUDIO_JITTER_TARGET_MAX_MS);
+    if (expected_ms > duration_ms) {
+        cadence_target = clamp_u32(expected_ms + NATIVE_AUDIO_JITTER_TARGET_HEADROOM_MS,
+                                   NATIVE_AUDIO_JITTER_TARGET_MIN_MS, NATIVE_AUDIO_JITTER_TARGET_MAX_MS);
+    }
     uint32_t peak_target = clamp_u32(variation_ms + NATIVE_AUDIO_JITTER_TARGET_HEADROOM_MS,
                                      NATIVE_AUDIO_JITTER_TARGET_MIN_MS, NATIVE_AUDIO_JITTER_TARGET_MAX_MS);
     if (cadence_target > peak_target) {

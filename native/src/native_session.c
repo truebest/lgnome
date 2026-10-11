@@ -100,6 +100,8 @@ void native_stop_slot(App *app, int index) {
                                          false);
         rdp_session_stop(slot->rdp);
         slot->rdp = NULL;
+        /* A final OPEN callback can arrive between detach and the worker join. */
+        native_capture_redirect_set_slot(&app->capture_redirect, index, NULL, false, false);
     }
     pthread_mutex_lock(&app->video_lock);
     native_audio_pipeline_close_source(&app->audio_pipeline, index);
@@ -110,6 +112,8 @@ void native_stop_slot(App *app, int index) {
     slot->audio_incompatible_logged = false;
     /* Whatever the cache held belongs to the connection that just died. */
     native_au_snapshot_reset(&slot->snapshot);
+    slot->h264_seen = false;
+    atomic_store(&slot->video_via_bitmap, false);
     pthread_mutex_unlock(&app->video_lock);
     native_publish_effective_solo_mask(app);
     atomic_store(&slot->snapshot_idr_ready, false);
@@ -207,6 +211,9 @@ bool native_slot_connect(App *app, int index, bool arm_snapshot) {
         }
     }
 
+    slot->camera_width = app->settings->camera_width;
+    slot->camera_height = app->settings->camera_height;
+    slot->camera_fps = app->settings->camera_fps;
     RdpConfig config = {
         .host = slot->config.host,
         .port = slot->config.port,
@@ -225,9 +232,9 @@ bool native_slot_connect(App *app, int index, bool arm_snapshot) {
                 ? 1
                 : 0,
         .reserved0 = 0,
-        .camera_width = app->settings->camera_width,
-        .camera_height = app->settings->camera_height,
-        .camera_fps = app->settings->camera_fps,
+        .camera_width = slot->camera_width,
+        .camera_height = slot->camera_height,
+        .camera_fps = slot->camera_fps,
     };
     RdpCallbacks callbacks = native_rdp_callbacks(slot);
 

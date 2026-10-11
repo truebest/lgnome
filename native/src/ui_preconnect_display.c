@@ -45,7 +45,9 @@ void native_ui_preconnect_display_clear(lv_disp_drv_t *drv, uint8_t *buf, uint32
 void native_ui_preconnect_pointer_read(lv_indev_drv_t *drv, lv_indev_data_t *data) {
     NativePreconnectUi *ui = (NativePreconnectUi *)drv->user_data;
     SDL_Event event;
-    data->continue_reading = SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_MOUSEMOTION, SDL_MOUSEBUTTONUP) > 0;
+    data->continue_reading = SDL_PeepEvents(&event, 1, SDL_PEEKEVENT, SDL_KEYDOWN, SDL_MOUSEBUTTONUP) > 0 &&
+                             event.type >= SDL_MOUSEMOTION &&
+                             SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_KEYDOWN, SDL_MOUSEBUTTONUP) > 0;
     if (data->continue_reading) {
         switch (event.type) {
         case SDL_MOUSEMOTION:
@@ -145,8 +147,12 @@ static bool text_key_from_sdl(const SDL_KeyboardEvent *event, uint32_t *key) {
         *key = (uint8_t)(shift ? shifted_digits[sym - SDLK_0] : (char)('0' + (sym - SDLK_0)));
         return true;
     }
-    if (sym >= SDLK_KP_0 && sym <= SDLK_KP_9) {
-        *key = (uint8_t)('0' + (sym - SDLK_KP_0));
+    if (sym == SDLK_KP_0) {
+        *key = '0';
+        return true;
+    }
+    if (sym >= SDLK_KP_1 && sym <= SDLK_KP_9) {
+        *key = (uint8_t)('1' + (sym - SDLK_KP_1));
         return true;
     }
 
@@ -265,57 +271,43 @@ static void enqueue_text(NativePreconnectKeyDriver *state, const char *value) {
     }
 }
 
-static bool event_batch_has_textinput(const SDL_Event *events, int count) {
-    for (int i = 0; i < count; i++) {
-        if (events[i].type == SDL_TEXTINPUT) {
-            return true;
-        }
-    }
-    return false;
-}
-
 static void drain_sdl_key_events(NativePreconnectUi *ui) {
     NativePreconnectKeyDriver *state = &ui->key_drv;
-    SDL_Event events[64];
-    for (;;) {
-        int count = SDL_PeepEvents(events, (int)(sizeof(events) / sizeof(events[0])), SDL_GETEVENT, SDL_KEYDOWN,
-                                   SDL_TEXTINPUT);
-        if (count <= 0) {
-            break;
-        }
-
-        bool text_input_pending = event_batch_has_textinput(events, count) || SDL_HasEvent(SDL_TEXTINPUT);
-        for (int i = 0; i < count; i++) {
-            uint32_t key = 0;
-            switch (events[i].type) {
-            case SDL_TEXTINPUT:
-                if (!ui->connecting && !ui->hub_closing && !state->back_pressed) {
-                    enqueue_text(state, events[i].text.text);
-                }
-                break;
-            case SDL_KEYDOWN:
-            case SDL_KEYUP:
-                if (key_from_sdl(&events[i].key, &key)) {
-                    if (key == LV_KEY_ESC) {
-                        bool down = events[i].type == SDL_KEYDOWN;
-                        if (down && !events[i].key.repeat && !state->back_pressed) {
-                            native_ui_preconnect_back(ui);
-                            native_ui_preconnect_reset_input_state(ui);
-                        }
-                        state->back_pressed = down;
-                    } else if (!ui->connecting && !ui->hub_closing && !state->back_pressed) {
-                        enqueue_key(state, key, events[i].type == SDL_KEYDOWN
-                                                    ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED);
-                    }
-                } else if (!ui->connecting && !ui->hub_closing && !state->back_pressed &&
-                           events[i].type == SDL_KEYDOWN && !text_input_pending &&
-                           text_key_from_sdl(&events[i].key, &key)) {
-                    enqueue_tap(state, key);
-                }
-                break;
-            default:
-                break;
+    SDL_Event event;
+    bool text_input_pending = SDL_HasEvent(SDL_TEXTINPUT);
+    /* Each device stops at the other device's next event so focus changes precede text. */
+    while (SDL_PeepEvents(&event, 1, SDL_PEEKEVENT, SDL_KEYDOWN, SDL_MOUSEBUTTONUP) > 0 &&
+           event.type < SDL_MOUSEMOTION &&
+           SDL_PeepEvents(&event, 1, SDL_GETEVENT, SDL_KEYDOWN, SDL_MOUSEBUTTONUP) > 0) {
+        uint32_t key = 0;
+        switch (event.type) {
+        case SDL_TEXTINPUT:
+            if (!ui->connecting && !ui->hub_closing && !state->back_pressed) {
+                enqueue_text(state, event.text.text);
             }
+            break;
+        case SDL_KEYDOWN:
+        case SDL_KEYUP:
+            if (key_from_sdl(&event.key, &key)) {
+                if (key == LV_KEY_ESC) {
+                    bool down = event.type == SDL_KEYDOWN;
+                    if (down && !event.key.repeat && !state->back_pressed) {
+                        native_ui_preconnect_back(ui);
+                        native_ui_preconnect_reset_input_state(ui);
+                    }
+                    state->back_pressed = down;
+                } else if (!ui->connecting && !ui->hub_closing && !state->back_pressed) {
+                    enqueue_key(state, key, event.type == SDL_KEYDOWN
+                                                ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED);
+                }
+            } else if (!ui->connecting && !ui->hub_closing && !state->back_pressed &&
+                       event.type == SDL_KEYDOWN && !text_input_pending &&
+                       text_key_from_sdl(&event.key, &key)) {
+                enqueue_tap(state, key);
+            }
+            break;
+        default:
+            break;
         }
     }
 }

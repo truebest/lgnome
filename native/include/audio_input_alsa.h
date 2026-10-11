@@ -24,6 +24,12 @@ uint32_t native_audio_input_capture_rate(const NativeAudioInputCapture *capture)
 uint16_t native_audio_input_capture_channels(const NativeAudioInputCapture *capture);
 
 #ifdef LGNOME_AUDIO_INPUT_ALSA_TESTING
+struct snd_pcm_t;
+NativeAudioInputCapture *native_audio_input_capture_create_for_test(
+    struct snd_pcm_t *pcm,
+    long (*readi)(struct snd_pcm_t *, void *, unsigned long),
+    int (*recover)(struct snd_pcm_t *, int, int),
+    const char *(*strerror_fn)(int));
 bool native_audio_input_candidate_name_for_test(const char *stable_id,
                                                 const NativeAudioInputDeviceInfo *devices,
                                                 size_t device_count, size_t index,

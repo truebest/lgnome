@@ -26,22 +26,23 @@ bool native_hub_actions_drain_profiles(NativeHubActionsContext *context) {
     if (native_preconnect_ui_take_capture_save(ui)) {
         handled = true;
         NativeSettings candidate = *settings;
-        bool saved =
-            native_preconnect_ui_get_capture_values(ui, &candidate) &&
-            native_config_save_persisted(&candidate);
+        bool valid = native_preconnect_ui_get_capture_values(ui, &candidate);
+        bool connecting = valid && native_capture_mode_save_is_connecting(app, &candidate);
+        bool saved = valid && !connecting && native_config_save_persisted(&candidate);
         if (saved) {
             *settings = candidate;
             native_reconfigure_capture_redirect(app);
             clog(cLogLevelInfo,
                  "saved HUB camera/microphone device settings");
-        } else {
+        } else if (!connecting) {
             clog(cLogLevelError,
                  "failed to persist HUB camera/microphone device settings");
         }
         native_preconnect_ui_finish_capture_save(
             ui, saved,
             saved ? "Camera and microphone settings saved."
-                  : "Could not save settings on this TV. Check storage and retry.");
+                  : connecting ? "Camera sessions are still connecting. Try saving again when connected."
+                               : "Could not save settings on this TV. Check storage and retry.");
     }
 
     int saved_slot = -1;

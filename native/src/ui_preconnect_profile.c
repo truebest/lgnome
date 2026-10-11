@@ -21,7 +21,7 @@ bool ui_slot_configured(const NativeSessionConfig *values) {
 }
 
 static void ui_store_form_to_slot(NativePreconnectUi *ui, int slot) {
-    if (slot < 0 || slot >= NATIVE_SETTINGS_MAX_SESSIONS) {
+    if (slot < 0 || slot >= NATIVE_SETTINGS_MAX_SESSIONS || !ui_form_credentials_fit(ui)) {
         return;
     }
     NativeSessionConfig *values = &ui->slot_values[slot];

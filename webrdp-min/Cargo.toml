@@ -57,7 +57,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["r
 x509-cert = { version = "0.3", default-features = false, features = ["std"] }
 
 # Native-only direct TCP/TLS RDP transport.
-rustls = { version = "0.23", default-features = false, features = ["std", "ring"], optional = true }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"], optional = true }
 
 [profile.release]
 opt-level = "s"

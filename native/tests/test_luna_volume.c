@@ -35,6 +35,9 @@ int main(void) {
     assert(!native_luna_volume_parse("{\"returnValue\":true,\"volume\":101}", &volume, &muted));
     assert(!native_luna_volume_parse("{\"returnValue\":true,\"volume\":-3}", &volume, &muted));
     assert(!native_luna_volume_parse("", &volume, &muted));
+    assert(!native_luna_volume_parse("{\"volume\":51.5}", &volume, &muted));
+    assert(!native_luna_volume_parse("{\"volumeStatus\":false,\"volume\":52}", &volume, &muted));
+    assert(!native_luna_volume_parse("{\"unrelated\":{\"volume\":52}}", &volume, &muted));
     assert(!native_luna_volume_parse(NULL, &volume, &muted));
 
     printf("luna-volume: OK\n");

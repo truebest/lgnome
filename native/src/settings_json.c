@@ -310,6 +310,10 @@ bool native_settings_json_has_rdp_key(const char *json) {
 }
 
 bool native_settings_apply_json(NativeSettings *settings, const char *json, const char *source) {
+    if (!native_json_validate_object(json)) {
+        clog(cLogLevelError, "invalid JSON document in %s", source);
+        return false;
+    }
     NativeSettings updated = *settings;
 
     const char *sessions_value = native_json_find_value(json, "sessions");

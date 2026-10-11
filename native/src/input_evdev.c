@@ -358,6 +358,7 @@ static void evdev_remove_device(NativeEvdevInput *input, NativeEvdevBackend *bac
         return;
     }
     NativeEvdevDevice removed = backend->devices[index];
+    native_event_queue_reset(&input->queue);
     clog(cLogLevelNotice, "removing %s fd %d after disconnect/error", evdev_device_kind_name(&removed),
          removed.fd);
     evdev_close_device(&removed);
@@ -562,7 +563,11 @@ static void *evdev_thread(void *arg) {
                 clog(cLogLevelWarning, "too many consecutive poll failures; stopping evdev reader");
                 /* Hand the devices back to the compositor before quitting, otherwise they stay
                  * EVIOCGRAB-captured and the SDL fallback would have nothing to read. */
+                pthread_mutex_lock(&input->lock);
+                native_event_queue_reset(&input->queue);
                 evdev_release_devices(input, backend);
+                pthread_mutex_unlock(&input->lock);
+                evdev_notify_main(input);
                 atomic_store(&input->running, false);
                 break;
             }

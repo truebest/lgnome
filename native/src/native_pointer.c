@@ -8,6 +8,7 @@
 #include "native_pointer.h"
 
 #include <stdatomic.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 #include "native_app.h"
@@ -152,18 +153,26 @@ void native_drain_pointer_clamp(App *app) {
 }
 
 void native_drain_pointer_warp(App *app, SDL_Window *window) {
-    if (!app || !window || !atomic_exchange(&app->pointer_warp_pending, false)) {
+    if (!app || !window || !atomic_load(&app->pointer_warp_pending)) {
         return;
     }
-    if (atomic_load(&app->pointer_warp_slot) != atomic_load(&app->active_index)) {
+    pthread_mutex_lock(&app->video_lock);
+    bool pending = atomic_exchange(&app->pointer_warp_pending, false);
+    int slot = atomic_load(&app->pointer_warp_slot);
+    unsigned x = atomic_load(&app->pointer_warp_x);
+    unsigned y = atomic_load(&app->pointer_warp_y);
+    pthread_mutex_unlock(&app->video_lock);
+    if (!pending || !app->streaming_visible || app->mixer_overlay_visible || app->window_unfocused ||
+        app->app_backgrounded) {
+        return;
+    }
+    if (slot != atomic_load(&app->active_index)) {
         return; /* the outgoing session's warp, published across a switch: stale */
     }
     uint16_t dw = (uint16_t)atomic_load(&app->input.desktop_width);
     uint16_t dh = (uint16_t)atomic_load(&app->input.desktop_height);
     uint16_t ww = (uint16_t)atomic_load(&app->input.window_width);
     uint16_t wh = (uint16_t)atomic_load(&app->input.window_height);
-    unsigned x = atomic_load(&app->pointer_warp_x);
-    unsigned y = atomic_load(&app->pointer_warp_y);
     int wx = (dw != 0 && ww != 0) ? (int)((x * (unsigned)ww) / (unsigned)dw) : (int)x;
     int wy = (dh != 0 && wh != 0) ? (int)((y * (unsigned)wh) / (unsigned)dh) : (int)y;
     /* The mouse is read from grabbed evdev, so there is no SDL_MOUSEMOTION echo to update
@@ -176,7 +185,8 @@ void native_drain_pointer_warp(App *app, SDL_Window *window) {
 
 /* Apply pending server cursor shape/visibility on the SDL thread (cheap when idle). */
 void native_cursor_tick(App *app) {
-    if (!app) {
+    if (!app || !app->streaming_visible || app->mixer_overlay_visible || app->window_unfocused ||
+        app->app_backgrounded) {
         return;
     }
     native_cursor_apply(&native_active_slot(app)->cursor, (uint16_t)atomic_load(&app->input.desktop_width),
