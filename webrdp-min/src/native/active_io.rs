@@ -277,7 +277,12 @@ impl NativeWorker {
             }
             ControlCommand::RequestRefresh => {
                 // Layout resubmission forces a grd IDR when Display Control is available; also try Refresh Rect.
-                let layout_messages = rdpedisp::encode_refresh_layout(active, width, height)?;
+                let layout_messages = rdpedisp::encode_refresh_layout(
+                    active,
+                    width,
+                    height,
+                    self.config.desktop_scale_factor,
+                )?;
                 if let Some(messages) = layout_messages {
                     let frame = active.encode_dvc_messages(messages).map_err(|e| {
                         NativeError::protocol(format!("refresh layout DVC encode: {e}"))
@@ -466,7 +471,7 @@ impl NativeWorker {
         for unit in video_units {
             let pts = self.next_pts90k;
             self.next_pts90k = self.next_pts90k.wrapping_add(self.frame_pts_step.max(1));
-            self.callbacks.video_au(&unit, pts);
+            self.callbacks.video_au(unit.codec, &unit.data, pts);
         }
         Ok(())
     }
@@ -475,6 +480,53 @@ impl NativeWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drain_preserves_codec_per_au_across_a_batch() {
+        use super::super::abi::{RDP_VIDEO_CODEC_H264, RDP_VIDEO_CODEC_H265};
+        use super::super::egfx::NativeVideoUnit;
+        use std::sync::Mutex;
+
+        extern "C" fn video(
+            ctx: *mut core::ffi::c_void,
+            codec: u32,
+            _data: *const u8,
+            _len: usize,
+            _pts: u64,
+        ) {
+            let seen = unsafe { &*ctx.cast::<Mutex<Vec<u32>>>() };
+            seen.lock().unwrap().push(codec);
+        }
+
+        let (mut worker, _tx) = super::super::tests::test_worker();
+        let seen = Mutex::new(Vec::<u32>::new());
+        worker.callbacks.callbacks.ctx = (&seen as *const Mutex<Vec<u32>>).cast_mut().cast();
+        worker.callbacks.callbacks.on_video_au = Some(video);
+        for codec in [
+            RDP_VIDEO_CODEC_H265,
+            RDP_VIDEO_CODEC_H264,
+            RDP_VIDEO_CODEC_H265,
+        ] {
+            worker
+                .gfx
+                .lock()
+                .unwrap()
+                .pending_video
+                .push(NativeVideoUnit {
+                    codec,
+                    data: vec![1],
+                });
+        }
+        worker.drain_gfx().unwrap();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [
+                RDP_VIDEO_CODEC_H265,
+                RDP_VIDEO_CODEC_H264,
+                RDP_VIDEO_CODEC_H265
+            ]
+        );
+    }
     use ironrdp_core::decode;
     use ironrdp_pdu::rdp::headers::{ShareControlHeader, ShareControlPdu};
     use ironrdp_pdu::{
@@ -615,72 +667,81 @@ mod tests {
         };
         use ironrdp_dvc::{DrdynvcClient, DvcProcessor};
         use ironrdp_svc::SvcProcessor;
-        let (mut worker, _tx) = super::super::tests::test_worker();
-        let mut display = DisplayControlClient::new(|_| Ok(Vec::new()));
-        let caps: DisplayControlPdu = DisplayControlCapabilities::new(1, 8192, 8192)
-            .unwrap()
-            .into();
-        display.process(7, &encode_vec(&caps).unwrap()).unwrap();
-        let mut dvc = DrdynvcClient::new().with_dynamic_channel(display);
-        dvc.process(
-            &encode_vec(&DrdynvcServerPdu::Create(CreateRequestPdu::new(
-                7,
-                ironrdp_displaycontrol::CHANNEL_NAME.to_owned(),
-            )))
-            .unwrap(),
-        )
-        .unwrap();
-        let mut channels = ironrdp_svc::StaticChannelSet::new();
-        channels.insert(dvc);
-        channels.attach_channel_id(core::any::TypeId::of::<DrdynvcClient>(), 1005);
-        let mut stage = ironrdp_session::ActiveStageBuilder {
-            static_channels: channels,
-            user_channel_id: 1001,
-            io_channel_id: 1003,
-            message_channel_id: None,
-            share_id: 1,
-            compression_type: None,
-            enable_server_pointer: false,
-            pointer_software_rendering: false,
-        }
-        .build();
-        let mut image = new_image(1280, 720).unwrap();
-        {
-            let mut gfx = worker.gfx.lock().unwrap();
-            gfx.graphics_width = 1920;
-            gfx.graphics_height = 1080;
-        }
-        let mut wire = Vec::new();
-        worker
-            .dispatch_control(
-                &mut wire,
-                &mut stage,
-                &mut image,
-                ControlCommand::RequestRefresh,
+        for scale in [100, 150, 200] {
+            let (mut worker, _tx) = super::super::tests::test_worker();
+            worker.config.desktop_scale_factor = scale;
+            let mut display = DisplayControlClient::new(|_| Ok(Vec::new()));
+            let caps: DisplayControlPdu = DisplayControlCapabilities::new(1, 8192, 8192)
+                .unwrap()
+                .into();
+            display.process(7, &encode_vec(&caps).unwrap()).unwrap();
+            let mut dvc = DrdynvcClient::new().with_dynamic_channel(display);
+            dvc.process(
+                &encode_vec(&DrdynvcServerPdu::Create(CreateRequestPdu::new(
+                    7,
+                    ironrdp_displaycontrol::CHANNEL_NAME.to_owned(),
+                )))
+                .unwrap(),
             )
             .unwrap();
-        let info = ironrdp_pdu::find_size(&wire).unwrap().unwrap();
-        let X224(McsMessage::SendDataRequest(data)) = decode(&wire[..info.length]).unwrap() else {
-            panic!("MCS request expected")
-        };
-        let DrdynvcClientPdu::Data(DrdynvcDataPdu::Data(data)) =
-            decode(&data.user_data[8..]).unwrap()
-        else {
-            panic!("DVC data expected")
-        };
-        let DisplayControlPdu::MonitorLayout(layout) = decode(data.data()).unwrap() else {
-            panic!("monitor layout expected")
-        };
-        assert_eq!(layout.monitors()[0].dimensions(), (1920, 1080));
-        let ShareDataPdu::RefreshRectangle(refresh) = share_data(&wire[info.length..]) else {
-            panic!("refresh rect expected")
-        };
-        assert_eq!(
-            (
-                refresh.areas_to_refresh[0].right,
-                refresh.areas_to_refresh[0].bottom
-            ),
-            (1919, 1079)
-        );
+            let mut channels = ironrdp_svc::StaticChannelSet::new();
+            channels.insert(dvc);
+            channels.attach_channel_id(core::any::TypeId::of::<DrdynvcClient>(), 1005);
+            let mut stage = ironrdp_session::ActiveStageBuilder {
+                static_channels: channels,
+                user_channel_id: 1001,
+                io_channel_id: 1003,
+                message_channel_id: None,
+                share_id: 1,
+                compression_type: None,
+                enable_server_pointer: false,
+                pointer_software_rendering: false,
+            }
+            .build();
+            let mut image = new_image(1280, 720).unwrap();
+            {
+                let mut gfx = worker.gfx.lock().unwrap();
+                gfx.graphics_width = 1920;
+                gfx.graphics_height = 1080;
+            }
+            let mut wire = Vec::new();
+            worker
+                .dispatch_control(
+                    &mut wire,
+                    &mut stage,
+                    &mut image,
+                    ControlCommand::RequestRefresh,
+                )
+                .unwrap();
+            let info = ironrdp_pdu::find_size(&wire).unwrap().unwrap();
+            let X224(McsMessage::SendDataRequest(data)) = decode(&wire[..info.length]).unwrap()
+            else {
+                panic!("MCS request expected")
+            };
+            let DrdynvcClientPdu::Data(DrdynvcDataPdu::Data(data)) =
+                decode(&data.user_data[8..]).unwrap()
+            else {
+                panic!("DVC data expected")
+            };
+            let DisplayControlPdu::MonitorLayout(layout) = decode(data.data()).unwrap() else {
+                panic!("monitor layout expected")
+            };
+            assert_eq!(layout.monitors()[0].dimensions(), (1920, 1080));
+            assert_eq!(layout.monitors()[0].desktop_scale_factor(), Some(scale));
+            assert_eq!(
+                layout.monitors()[0].device_scale_factor().unwrap().value(),
+                100
+            );
+            let ShareDataPdu::RefreshRectangle(refresh) = share_data(&wire[info.length..]) else {
+                panic!("refresh rect expected")
+            };
+            assert_eq!(
+                (
+                    refresh.areas_to_refresh[0].right,
+                    refresh.areas_to_refresh[0].bottom
+                ),
+                (1919, 1079)
+            );
+        }
     }
 }

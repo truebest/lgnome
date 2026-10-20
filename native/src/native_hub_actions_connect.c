@@ -80,6 +80,7 @@ bool native_hub_actions_drain_connect(NativeHubActionsContext *context) {
                 (void)snprintf(session->name, sizeof(session->name), "%s", edited.name);
                 session->desktop_width = edited.desktop_width;
                 session->desktop_height = edited.desktop_height;
+                session->desktop_scale_factor = edited.desktop_scale_factor;
                 session->camera_redirect = edited.camera_redirect;
                 session->audio_input_redirect =
                     edited.audio_input_redirect;

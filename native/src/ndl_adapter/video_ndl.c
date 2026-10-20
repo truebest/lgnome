@@ -12,10 +12,20 @@
 
 clog_define(g_native_log_video, cLogLevelInfo, "video.ndl");
 
+bool native_video_supports_hevc(void) {
+#ifdef LGNOME_WITH_NDL
+    const char *disabled = getenv("LGNOME_HEVC");
+    return !disabled || strcmp(disabled, "0") != 0;
+#else
+    return false;
+#endif
+}
+
 struct NativeVideo {
     uint16_t width;
     uint16_t height;
     uint16_t fps;
+    NativeVideoCodec codec;
     uint8_t *annexb;
     size_t annexb_cap;
     bool terminal_error;
@@ -38,7 +48,7 @@ struct NativeVideo {
  * opened lazily on the first config IDR, exactly like the pipeline load itself. */
 static NativeVideoResult native_video_open_stream(NativeVideo *video) {
     BackendNdlVideoInfo info = {
-        .codec = BACKEND_NDL_VIDEO_H264,
+        .codec = video->codec == NATIVE_VIDEO_CODEC_H265 ? BACKEND_NDL_VIDEO_H265 : BACKEND_NDL_VIDEO_H264,
         .width = video->width,
         .height = video->height,
     };
@@ -50,11 +60,11 @@ static NativeVideoResult native_video_open_stream(NativeVideo *video) {
             return NATIVE_VIDEO_OK;
         case BACKEND_NDL_UNSUPPORTED:
             video->terminal_error = true;
-            clog(cLogLevelError, "NDL rejected H.264 stream as unsupported");
+            clog(cLogLevelError, "NDL rejected video codec %u as unsupported", (unsigned)video->codec);
             return NATIVE_VIDEO_UNSUPPORTED;
         default:
             video->terminal_error = true;
-            clog(cLogLevelError, "NDL failed to open H.264 stream");
+            clog(cLogLevelError, "NDL failed to open video codec %u", (unsigned)video->codec);
             return NATIVE_VIDEO_ERROR;
     }
 }
@@ -90,16 +100,18 @@ static void native_video_log_invalid_h264(const uint8_t *data, size_t len) {
     clog(cLogLevelError, "unsupported H.264 access unit framing len=%zu first=%s", len, head);
 }
 
-NativeVideo *native_video_open(NativeMedia *media, uint16_t width, uint16_t height, uint16_t fps) {
+NativeVideo *native_video_open(NativeMedia *media, uint16_t width, uint16_t height, uint16_t fps,
+                               NativeVideoCodec codec) {
 #ifndef LGNOME_WITH_NDL
     (void)media;
     (void)width;
     (void)height;
     (void)fps;
+    (void)codec;
     clog(cLogLevelError, "NDL backend is not linked; native decoder unavailable");
     return NULL;
 #else
-    if (width == 0 || height == 0) {
+    if ((codec != NATIVE_VIDEO_CODEC_H264 && codec != NATIVE_VIDEO_CODEC_H265) || width == 0 || height == 0) {
         clog(cLogLevelError, "invalid video size %ux%u", (unsigned)width, (unsigned)height);
         return NULL;
     }
@@ -116,10 +128,15 @@ NativeVideo *native_video_open(NativeMedia *media, uint16_t width, uint16_t heig
     video->width = width;
     video->height = height;
     video->fps = fps ? fps : 60;
+    video->codec = codec;
     video->media = media;
     video->backend = backend;
     return video;
 #endif
+}
+
+NativeVideoCodec native_video_codec(const NativeVideo *video) {
+    return video ? video->codec : NATIVE_VIDEO_CODEC_H264;
 }
 
 uint16_t native_video_width(const NativeVideo *video) {
@@ -144,6 +161,8 @@ void native_video_close(NativeVideo *video) {
     free(video);
 }
 
+static NativeVideoResult native_video_feed_backend(NativeVideo *video, size_t annexb_len, bool decoder_seed);
+
 NativeVideoResult native_video_feed(NativeVideo *video, const uint8_t *data, size_t len, uint64_t pts90k) {
     (void)pts90k;
     if (!video || !data || len == 0) {
@@ -153,14 +172,25 @@ NativeVideoResult native_video_feed(NativeVideo *video, const uint8_t *data, siz
         return NATIVE_VIDEO_ERROR;
     }
     if (len > NATIVE_VIDEO_MAX_AU_BYTES) {
-        clog(cLogLevelError, "AVC access unit %zu bytes exceeds %zu byte cap", len,
+        clog(cLogLevelError, "video access unit %zu bytes exceeds %zu byte cap", len,
              (size_t)NATIVE_VIDEO_MAX_AU_BYTES);
         video->terminal_error = true;
         return NATIVE_VIDEO_ERROR;
     }
 
-    NativeH264Info info;
     size_t annexb_len = 0;
+    if (video->codec == NATIVE_VIDEO_CODEC_H265) {
+        NativeHevcInfo info;
+        if (native_hevc_scan_annexb(data, len, &info) != NATIVE_HEVC_OK ||
+            !native_video_reserve_annexb(video, len)) {
+            video->terminal_error = true;
+            return NATIVE_VIDEO_ERROR;
+        }
+        memcpy(video->annexb, data, len);
+        return native_video_feed_backend(video, len, info.can_seed_decoder);
+    }
+
+    NativeH264Info info;
     NativeH264Result avc_result = native_h264_avc_annexb_size(data, len, &info, &annexb_len);
     if (avc_result == NATIVE_H264_OK) {
         if (annexb_len > NATIVE_VIDEO_MAX_AU_BYTES) {
@@ -190,15 +220,16 @@ NativeVideoResult native_video_feed(NativeVideo *video, const uint8_t *data, siz
         return NATIVE_VIDEO_ERROR;
     }
 
+    return native_video_feed_backend(video, annexb_len, info.can_seed_decoder);
+}
+
+static NativeVideoResult native_video_feed_backend(NativeVideo *video, size_t annexb_len, bool decoder_seed) {
 #ifndef LGNOME_WITH_NDL
-    (void)info;
+    (void)video;
     (void)annexb_len;
+    (void)decoder_seed;
     return NATIVE_VIDEO_UNSUPPORTED;
 #else
-    bool decoder_seed = info.can_seed_decoder;
-    /* Only an IDR preceded by SPS and PPS clears the backend's after-reload gate.
-     * This adapter classifies the exact bytes normalized and fed below; a config-only
-     * or IDR-before-config AU is dropped as NEED_KEYFRAME. */
     bool backend_keyframe = decoder_seed;
 
     if (!video->video_opened) {

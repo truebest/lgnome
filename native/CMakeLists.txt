@@ -105,6 +105,7 @@ add_executable(lgnome-native
   src/audio_jitter.c
   src/audio_opus.c
   src/h264_annexb.c
+  src/hevc_annexb.c
   src/input_sdl.c
   src/cursor_sdl.c
   src/camera_preview.c
@@ -384,6 +385,10 @@ if(BUILD_TESTING)
   target_include_directories(test-rdp-log PRIVATE include)
   add_test(NAME rdp-log COMMAND test-rdp-log)
 
+  add_executable(test-hevc-annexb tests/test_hevc_annexb.c src/hevc_annexb.c)
+  target_include_directories(test-hevc-annexb PRIVATE include)
+  add_test(NAME hevc-annexb COMMAND test-hevc-annexb)
+
   add_executable(test-h264-annexb
     tests/test_h264_annexb.c
     src/h264_annexb.c
@@ -510,9 +515,16 @@ if(BUILD_TESTING)
   target_link_options(test-native-runtime PRIVATE -Wl,--gc-sections -Wl,--wrap=native_complete_session_switch)
   target_link_libraries(test-native-runtime PRIVATE category-log Threads::Threads)
   add_test(NAME native-runtime COMMAND test-native-runtime)
+  add_executable(test-mixer-settings tests/test_mixer_settings.c src/native_mixer_overlay.c)
+  target_include_directories(test-mixer-settings PRIVATE tests/support/fake_runtime include src)
+  target_compile_definitions(test-mixer-settings PRIVATE LGNOME_TARGET_WEBOS=1 _POSIX_C_SOURCE=200809L)
+  target_compile_options(test-mixer-settings PRIVATE -ffunction-sections -fdata-sections)
+  target_link_options(test-mixer-settings PRIVATE -Wl,--gc-sections)
+  target_link_libraries(test-mixer-settings PRIVATE category-log Threads::Threads)
+  add_test(NAME mixer-settings COMMAND test-mixer-settings)
   add_executable(test-native-snapshot-replay
     tests/test_native_snapshot_replay.c src/native_switch_recovery.c
-    src/native_rdp_video.c src/au_snapshot.c src/h264_annexb.c)
+    src/native_rdp_video.c src/au_snapshot.c src/h264_annexb.c src/hevc_annexb.c)
   target_include_directories(test-native-snapshot-replay PRIVATE tests/support/fake_runtime include src)
   target_compile_definitions(test-native-snapshot-replay PRIVATE LGNOME_TARGET_WEBOS=1 _POSIX_C_SOURCE=200809L)
   target_compile_options(test-native-snapshot-replay PRIVATE -ffunction-sections -fdata-sections)
@@ -562,7 +574,7 @@ if(BUILD_TESTING)
     src/native_rdp_state.c
     src/native_rgba_owner.c
     src/video_rgba_sdl.c
-    src/h264_annexb.c
+    src/h264_annexb.c src/hevc_annexb.c
     src/au_snapshot.c
     src/native_settings.c
   )
@@ -586,7 +598,7 @@ if(BUILD_TESTING)
   add_executable(test-video-ndl
     tests/test_video_ndl.c
     src/ndl_adapter/video_ndl.c
-    src/h264_annexb.c
+    src/h264_annexb.c src/hevc_annexb.c
   )
   target_compile_definitions(test-video-ndl PRIVATE LGNOME_WITH_NDL=1)
   target_include_directories(test-video-ndl PRIVATE include src/ndl_adapter)
@@ -729,7 +741,7 @@ if(BUILD_TESTING)
   endif()
 
   foreach(native_test_target IN ITEMS
-      test-rdp-ffi-layout test-h264-annexb test-video-rgba-sdl test-input-sdl
+      test-rdp-ffi-layout test-hevc-annexb test-h264-annexb test-video-rgba-sdl test-input-sdl
       test-cursor-sdl test-config-paths test-settings-json test-au-snapshot
       test-ui-mixer-geometry test-luna-volume test-webos-platform test-camera-v4l2
       test-native-rdp-state

@@ -12,6 +12,7 @@
 struct NativeVideo {
     uint16_t width;
     uint16_t height;
+    NativeVideoCodec codec;
 };
 
 NativeMedia *native_ensure_media_locked(App *app) {
@@ -22,14 +23,16 @@ void native_open_speculative_audio_locked(App *app) {
     (void)app;
 }
 
-NativeVideo *native_video_open(NativeMedia *media, uint16_t width, uint16_t height, uint16_t fps) {
+NativeVideo *native_video_open(NativeMedia *media, uint16_t width, uint16_t height, uint16_t fps, NativeVideoCodec codec) {
     (void)media;
     (void)fps;
     NativeVideo *video = malloc(sizeof(*video));
     assert(video);
-    *video = (NativeVideo){width, height};
+    *video = (NativeVideo){width, height, codec};
     return video;
 }
+
+NativeVideoCodec native_video_codec(const NativeVideo *video) { return video->codec; }
 
 void native_video_close(NativeVideo *video) { free(video); }
 uint16_t native_video_width(const NativeVideo *video) { return video->width; }
@@ -86,7 +89,7 @@ static void teardown(App *app) {
 
 static void video(App *app, int index) {
     static const uint8_t seed[] = {0, 0, 1, 0x67, 1, 0, 0, 1, 0x68, 1, 0, 0, 1, 0x65, 1};
-    callbacks.on_video_au(&app->sessions[index], seed, sizeof(seed), 0);
+    callbacks.on_video_au(&app->sessions[index], RDP_VIDEO_CODEC_H264, seed, sizeof(seed), 0);
 }
 
 static void bitmap(App *app, int index) {
@@ -229,6 +232,37 @@ static void test_armed_snapshot_blocks_active_refinement(void) {
     native_au_snapshot_reset(&slot->snapshot); teardown(&app);
 }
 
+static void test_hevc_switch_and_snapshot_codec(void) {
+    App app;
+    setup(&app);
+    video(&app, 0);
+    NativeVideo *previous = app.video;
+    const uint8_t delta[] = {0, 0, 1, 2, 1};
+    const uint8_t seed[] = {0, 0, 1, 64, 1, 0, 0, 1, 66, 1,
+                            0, 0, 1, 68, 1, 0, 0, 1, 38, 1};
+    NativeSessionSlot *slot = &app.sessions[1];
+    atomic_store(&app.active_index, 1);
+    callbacks.on_video_au(slot, RDP_VIDEO_CODEC_H265, delta, sizeof(delta), 0);
+    assert(app.video == previous && native_video_codec(app.video) == NATIVE_VIDEO_CODEC_H264);
+    callbacks.on_video_au(slot, RDP_VIDEO_CODEC_H265, seed, sizeof(seed), 1);
+    assert(native_video_codec(app.video) == NATIVE_VIDEO_CODEC_H265);
+    assert(app.video_owner_slot == 1);
+    video(&app, 1);
+    assert(native_video_codec(app.video) == NATIVE_VIDEO_CODEC_H264);
+
+    assert(native_au_snapshot_arm(&slot->snapshot));
+    video(&app, 1);
+    assert(native_au_snapshot_ready(&slot->snapshot));
+    callbacks.on_video_au(slot, RDP_VIDEO_CODEC_H265, delta, sizeof(delta), 2);
+    assert(!native_au_snapshot_ready(&slot->snapshot));
+    assert(!atomic_load(&slot->snapshot_idr_ready));
+    callbacks.on_video_au(slot, RDP_VIDEO_CODEC_H265, seed, sizeof(seed), 3);
+    assert(native_au_snapshot_ready(&slot->snapshot) && slot->snapshot.count == 1);
+    assert(slot->video_codec == NATIVE_VIDEO_CODEC_H265);
+    native_au_snapshot_reset(&slot->snapshot);
+    teardown(&app);
+}
+
 int main(void) {
     test_refinement_hold_requires_same_slot_and_epoch();
     test_handoffs_do_not_trip_codec_flip_limit();
@@ -237,5 +271,6 @@ int main(void) {
     test_background_refinement_keeps_h264_classification();
     test_refinement_overlapping_demotion();
     test_armed_snapshot_blocks_active_refinement();
+    test_hevc_switch_and_snapshot_codec();
     return 0;
 }

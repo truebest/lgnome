@@ -87,9 +87,33 @@ static bool apply_json_bool(const char *json, const char *key, bool *dest,
     return true;
 }
 
+static bool apply_mixer_gain_json(NativeSessionConfig *session, const char *json, const char *source) {
+    if (!apply_json_i16(json, "mixerGainDb", NATIVE_SETTINGS_MIXER_MIN_DB,
+                        NATIVE_SETTINGS_MIXER_MAX_DB, &session->mixer_gain_db, source)) {
+        return false;
+    }
+    if (session->mixer_gain_db % NATIVE_SETTINGS_MIXER_STEP_DB != 0) {
+        clog(cLogLevelError, "mixerGainDb must use 3 dB steps in %s", source);
+        return false;
+    }
+    return true;
+}
+
+static bool apply_desktop_scale_json(NativeSessionConfig *session, const char *json, const char *source) {
+    if (!apply_json_u16(json, "desktopScaleFactor", 100, 200, &session->desktop_scale_factor, source)) {
+        return false;
+    }
+    if (!native_desktop_scale_valid(session->desktop_scale_factor)) {
+        clog(cLogLevelError, "desktopScaleFactor must be 100, 150 or 200 in %s", source);
+        return false;
+    }
+    return true;
+}
+
 /* Session-object fields shared by the legacy flat format and session-array entries. */
 static bool apply_session_json(NativeSessionConfig *session, const char *json, const char *source) {
     return apply_session_name_json(session, json, source) &&
+           apply_desktop_scale_json(session, json, source) &&
            apply_json_string(json, "host", session->host, sizeof(session->host), source) &&
            apply_json_string(json, "username", session->username, sizeof(session->username), source) &&
            apply_json_string(json, "password", session->password, sizeof(session->password), source) &&
@@ -103,6 +127,9 @@ static bool apply_session_json(NativeSessionConfig *session, const char *json, c
            apply_json_u16(json, "duckTriggers", 0,
                           NATIVE_SETTINGS_DUCK_MASK_ALL, &session->duck_mask,
                           source) &&
+           apply_mixer_gain_json(session, json, source) &&
+           apply_json_bool(json, "mixerMuted", &session->mixer_muted, source) &&
+           apply_json_bool(json, "mixerSolo", &session->mixer_solo, source) &&
            apply_json_bool(json, "cameraRedirect", &session->camera_redirect,
                            source) &&
            apply_json_bool(json, "audioInputRedirect",
@@ -290,9 +317,10 @@ static bool apply_sessions_array(NativeSettings *settings, const char *json, con
 bool native_settings_json_has_rdp_key(const char *json) {
     static const char *keys[] = {"sessions",          "host",       "username",   "password",
                                  "domain",            "port",
-                                 "fps",               "desktopWidth", "desktopHeight",
+                                 "fps",               "desktopWidth", "desktopHeight", "desktopScaleFactor",
                                  "wheelStep",  "wheelScrollDivisor",
                                  "audioCodec", "duckTriggers",
+                                 "mixerGainDb", "mixerMuted", "mixerSolo",
                                  "cameraEnabled", "cameraDeviceId", "cameraWidth",
                                  "cameraHeight", "cameraFps", "cameraRedirect",
                                  "audioInputEnabled", "audioInputDeviceId",
@@ -411,11 +439,15 @@ static bool write_session_json(const NativeSessionConfig *session, int slot, FIL
            write_json_string(file, session->password) && fprintf(file, ", \"domain\": ") >= 0 &&
            write_json_string(file, session->domain) &&
            fprintf(file,
-                   ", \"fps\": %u, \"desktopWidth\": %u, \"desktopHeight\": %u, "
+                   ", \"fps\": %u, \"desktopWidth\": %u, \"desktopHeight\": %u, \"desktopScaleFactor\": %u, "
                    "\"duckTriggers\": %u, "
+                   "\"mixerGainDb\": %d, \"mixerMuted\": %s, \"mixerSolo\": %s, "
                    "\"cameraRedirect\": %s, \"audioInputRedirect\": %s }",
                    (unsigned)session->fps, (unsigned)session->desktop_width,
-                   (unsigned)session->desktop_height, (unsigned)session->duck_mask,
+                   (unsigned)session->desktop_height, (unsigned)session->desktop_scale_factor, (unsigned)session->duck_mask,
+                   (int)session->mixer_gain_db,
+                   session->mixer_muted ? "true" : "false",
+                   session->mixer_solo ? "true" : "false",
                    session->camera_redirect ? "true" : "false",
                    session->audio_input_redirect ? "true" : "false") >= 0;
 }

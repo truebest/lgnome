@@ -53,6 +53,7 @@ static void ui_store_form_to_slot(NativePreconnectUi *ui, int slot) {
     values->fps = ui->selected_fps;
     values->desktop_width = ui->selected_desktop_width;
     values->desktop_height = ui->selected_desktop_height;
+    values->desktop_scale_factor = 100 + 50 * lv_dropdown_get_selected(ui->desktop_scale_dropdown);
     ui_store_profile_capture_toggles(ui, slot);
     native_ui_mixer_set_profiles(ui->mixer, ui->slot_values);
 }
@@ -111,6 +112,7 @@ void ui_load_slot_into_form(NativePreconnectUi *ui, int slot) {
     ui_set_selected_fps(ui, fps_index);
     ui_set_desktop_options(ui);
     ui_set_selected_desktop(ui, ui_desktop_option_index(values->desktop_width, values->desktop_height));
+    lv_dropdown_set_selected(ui->desktop_scale_dropdown, (values->desktop_scale_factor - 100) / 50);
     if (values->camera_redirect) {
         lv_obj_add_state(ui->profile_camera_checkbox, LV_STATE_CHECKED);
     } else {
@@ -587,6 +589,7 @@ void native_preconnect_ui_set_connecting(NativePreconnectUi *ui, int slot, bool 
             lv_obj_add_state(ui->domain_input, LV_STATE_DISABLED);
             lv_obj_add_state(ui->password_input, LV_STATE_DISABLED);
             lv_obj_add_state(ui->fps_dropdown, LV_STATE_DISABLED);
+            lv_obj_add_state(ui->desktop_scale_dropdown, LV_STATE_DISABLED);
             lv_obj_add_state(ui->audio_codec_dropdown, LV_STATE_DISABLED);
             lv_obj_add_state(ui->profile_camera_checkbox, LV_STATE_DISABLED);
             lv_obj_add_state(ui->profile_audio_input_checkbox, LV_STATE_DISABLED);
@@ -598,6 +601,7 @@ void native_preconnect_ui_set_connecting(NativePreconnectUi *ui, int slot, bool 
             lv_obj_clear_state(ui->domain_input, LV_STATE_DISABLED);
             lv_obj_clear_state(ui->password_input, LV_STATE_DISABLED);
             lv_obj_clear_state(ui->fps_dropdown, LV_STATE_DISABLED);
+            lv_obj_clear_state(ui->desktop_scale_dropdown, LV_STATE_DISABLED);
             lv_obj_clear_state(ui->audio_codec_dropdown, LV_STATE_DISABLED);
             lv_obj_clear_state(ui->profile_camera_checkbox, LV_STATE_DISABLED);
             lv_obj_clear_state(ui->profile_audio_input_checkbox, LV_STATE_DISABLED);

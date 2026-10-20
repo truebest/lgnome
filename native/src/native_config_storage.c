@@ -47,6 +47,7 @@ static bool native_config_read_file(const char *path, char **out, bool *existed,
     }
     *existed = true;
     struct stat st;
+    /* chmod cannot revoke another process's existing writable descriptor. */
     if (private_file &&
         (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
          (st.st_mode & (S_IWGRP | S_IWOTH)))) {

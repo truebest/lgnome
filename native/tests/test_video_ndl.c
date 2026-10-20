@@ -150,7 +150,7 @@ static int test_open_gating_and_stream_open(void) {
     fake_reset();
     struct NativeMedia media = {.backend = open_fake_backend()};
 
-    NativeVideo *video = native_video_open(&media, 1920, 1080, 60);
+    NativeVideo *video = native_video_open(&media, 1920, 1080, 60, NATIVE_VIDEO_CODEC_H264);
     failures += expect_true(video != NULL, "video open");
     failures += expect_true(native_video_width(video) == 1920 && native_video_height(video) == 1080,
                             "width/height accessors");
@@ -202,7 +202,7 @@ static int test_reload_keyframe_recovery(void) {
     int failures = 0;
     fake_reset();
     struct NativeMedia media = {.backend = open_fake_backend()};
-    NativeVideo *video = native_video_open(&media, 1280, 720, 60);
+    NativeVideo *video = native_video_open(&media, 1280, 720, 60, NATIVE_VIDEO_CODEC_H264);
 
     uint8_t idr[32];
     size_t idr_len = build_avc(idr, k_config_idr_nals, 3);
@@ -257,7 +257,7 @@ static int test_terminal_errors(void) {
     int failures = 0;
     fake_reset();
     struct NativeMedia media = {.backend = open_fake_backend()};
-    NativeVideo *video = native_video_open(&media, 1920, 1080, 60);
+    NativeVideo *video = native_video_open(&media, 1920, 1080, 60, NATIVE_VIDEO_CODEC_H264);
 
     uint8_t idr[32];
     size_t idr_len = build_avc(idr, k_config_idr_nals, 3);
@@ -276,7 +276,7 @@ static int test_terminal_errors(void) {
 
     fake_reset();
     media.backend = open_fake_backend();
-    video = native_video_open(&media, 1920, 1080, 60);
+    video = native_video_open(&media, 1920, 1080, 60, NATIVE_VIDEO_CODEC_H264);
     const uint8_t garbage[] = {'a', 'b', 'c', 'd'};
     failures += expect_true(native_video_feed(video, garbage, sizeof(garbage), 0) == NATIVE_VIDEO_ERROR,
                             "unparseable framing is ERROR");
@@ -288,11 +288,35 @@ static int test_terminal_errors(void) {
 
     fake_reset();
     media.backend = open_fake_backend();
-    video = native_video_open(&media, 1920, 1080, 60);
+    video = native_video_open(&media, 1920, 1080, 60, NATIVE_VIDEO_CODEC_H264);
     static const uint8_t tiny[1] = {0};
     failures += expect_true(native_video_feed(video, tiny, NATIVE_VIDEO_MAX_AU_BYTES + 1, 0) ==
                             NATIVE_VIDEO_ERROR,
                             "oversized AU is ERROR");
+    native_video_close(video);
+    backend_ndl_close(media.backend);
+    return failures;
+}
+
+static int test_hevc_decoder_and_keyframe_gate(void) {
+    int failures = 0;
+    fake_reset();
+    NativeMedia media = {.backend = open_fake_backend()};
+    NativeVideo *video = native_video_open(&media, 3840, 2160, 60, NATIVE_VIDEO_CODEC_H265);
+    failures += expect_true(video && native_video_codec(video) == NATIVE_VIDEO_CODEC_H265,
+                            "HEVC decoder selected");
+    const uint8_t delta[] = {0, 0, 1, 2, 1};
+    const uint8_t seed[] = {0, 0, 1, 64, 1, 0, 0, 1, 66, 1,
+                            0, 0, 1, 68, 1, 0, 0, 1, 38, 1};
+    failures += expect_true(native_video_feed(video, delta, sizeof(delta), 0) == NATIVE_VIDEO_NEED_KEYFRAME,
+                            "HEVC delta cannot open decoder");
+    failures += expect_true(g_fake.load_calls == 0, "HEVC delta does not load pipeline");
+    failures += expect_true(native_video_feed(video, seed, sizeof(seed), 0) == NATIVE_VIDEO_OK,
+                            "VPS/SPS/PPS and IDR open HEVC decoder");
+    failures += expect_true(g_fake.last_load.videoDataInfo.source == NDL_DIRECTVIDEO_SRC_TYPE_HEVC,
+                            "NDL receives HEVC source type");
+    failures += expect_true(native_video_feed(video, delta, sizeof(delta), 0) == NATIVE_VIDEO_OK,
+                            "HEVC delta feeds after seed");
     native_video_close(video);
     backend_ndl_close(media.backend);
     return failures;
@@ -303,5 +327,6 @@ int main(void) {
     failures += test_open_gating_and_stream_open();
     failures += test_reload_keyframe_recovery();
     failures += test_terminal_errors();
+    failures += test_hevc_decoder_and_keyframe_gate();
     return failures ? 1 : 0;
 }

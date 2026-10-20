@@ -117,6 +117,7 @@ struct NativePreconnectUi {
     lv_obj_t *password_input;
     lv_obj_t *fps_dropdown;
     lv_obj_t *desktop_dropdown;
+    lv_obj_t *desktop_scale_dropdown;
     lv_obj_t *audio_codec_dropdown;
     lv_obj_t *profile_camera_checkbox;
     lv_obj_t *profile_audio_input_checkbox;

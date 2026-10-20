@@ -112,7 +112,8 @@ void native_stop_slot(App *app, int index) {
     slot->audio_incompatible_logged = false;
     /* Whatever the cache held belongs to the connection that just died. */
     native_au_snapshot_reset(&slot->snapshot);
-    slot->h264_seen = false;
+    slot->video_seen = false;
+    slot->video_codec = NATIVE_VIDEO_CODEC_H264;
     atomic_store(&slot->video_via_bitmap, false);
     pthread_mutex_unlock(&app->video_lock);
     native_publish_effective_solo_mask(app);
@@ -222,6 +223,7 @@ bool native_slot_connect(App *app, int index, bool arm_snapshot) {
         .domain = slot->config.domain,
         .width = slot->config.desktop_width,
         .height = slot->config.desktop_height,
+        .desktop_scale_factor = slot->config.desktop_scale_factor,
         .fps = slot->config.fps,
         .prefer_pcm_audio = app->audio_codec == NATIVE_AUDIO_CODEC_PCM ? 1 : 0,
         .enable_camera =
@@ -231,7 +233,7 @@ bool native_slot_connect(App *app, int index, bool arm_snapshot) {
                     slot->config.audio_input_redirect
                 ? 1
                 : 0,
-        .reserved0 = 0,
+        .enable_hevc = native_video_supports_hevc() ? 1 : 0,
         .camera_width = slot->camera_width,
         .camera_height = slot->camera_height,
         .camera_fps = slot->camera_fps,

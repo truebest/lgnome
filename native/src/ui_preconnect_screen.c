@@ -75,8 +75,9 @@ static void screen_focus_setup(NativePreconnectUi *ui) {
     lv_group_add_obj(ui->group, ui->username_input);
     lv_group_add_obj(ui->group, ui->domain_input);
     lv_group_add_obj(ui->group, ui->password_input);
-    lv_group_add_obj(ui->group, ui->fps_dropdown);
     lv_group_add_obj(ui->group, ui->desktop_dropdown);
+    lv_group_add_obj(ui->group, ui->desktop_scale_dropdown);
+    lv_group_add_obj(ui->group, ui->fps_dropdown);
     lv_group_add_obj(ui->group, ui->audio_codec_dropdown);
     lv_group_add_obj(ui->group, ui->profile_camera_checkbox);
     lv_group_add_obj(ui->group, ui->profile_audio_input_checkbox);
@@ -238,7 +239,7 @@ void native_ui_preconnect_back(NativePreconnectUi *ui) {
         return;
     }
     lv_obj_t *dropdowns[] = {
-        ui->fps_dropdown, ui->desktop_dropdown, ui->audio_codec_dropdown,
+        ui->fps_dropdown, ui->desktop_dropdown, ui->desktop_scale_dropdown, ui->audio_codec_dropdown,
         ui->camera_input_dropdown, ui->camera_resolution_dropdown, ui->camera_fps_dropdown,
         ui->audio_input_dropdown, ui->audio_input_gain_dropdown,
     };

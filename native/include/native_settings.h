@@ -21,6 +21,10 @@
 /* Highest valid duck_mask value: every other slot ducks this one (own bit ignored). */
 #define NATIVE_SETTINGS_DUCK_MASK_ALL ((1u << NATIVE_SETTINGS_MAX_SESSIONS) - 1u)
 
+#define NATIVE_SETTINGS_MIXER_STEP_DB 3
+#define NATIVE_SETTINGS_MIXER_MIN_DB (-60)
+#define NATIVE_SETTINGS_MIXER_MAX_DB 6
+
 typedef struct NativeSessionConfig {
     /* Optional human-facing profile label. Empty keeps the color/host fallback used by
      * callers and by settings written before the field was introduced. */
@@ -35,12 +39,16 @@ typedef struct NativeSessionConfig {
      * that mirror a real monitor ignore it; Windows builds its session at this size. */
     uint16_t desktop_width;
     uint16_t desktop_height;
+    uint16_t desktop_scale_factor;
     /* Which slots' audio ducks THIS session -12 dB while it is on screen ("duckTriggers"
      * JSON key, bit = slot index, own bit ignored; default: nobody -- ducking is opt-in).
      * Toggled from the mixer overlay's channel color-bar buttons, shown relative to the
      * active session. (Renamed from a short-lived "duckMask" key whose builds wrote an
      * all-on default; the old key is deliberately ignored so those masks reset.) */
     uint16_t duck_mask;
+    int16_t mixer_gain_db;
+    bool mixer_muted;
+    bool mixer_solo;
     /* Local capture devices are global, but each remote profile independently opts
      * into exposing the camera and microphone. Both default false. */
     bool camera_redirect;
@@ -78,6 +86,8 @@ typedef struct NativeSettings {
 
 /* Human-facing slot name ("green"/"yellow"); "?" for out-of-range indices. */
 const char *native_session_slot_name(int slot);
+
+bool native_desktop_scale_valid(uint16_t scale);
 
 void native_settings_defaults(NativeSettings *settings);
 /* Empty profile with valid connection defaults, also used when deleting a slot. */
