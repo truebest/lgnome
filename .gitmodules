@@ -4,7 +4,7 @@
 [submodule "third_party/IronRDP"]
 	path = third_party/IronRDP
 	url = https://github.com/truebest/IronRDP.git
-	branch = fix/lgnome-egfx-drop-state-20261011
+	branch = feature/hevc-current
 [submodule "third_party/miniaudio"]
 	path = third_party/miniaudio
 	url = https://github.com/mackron/miniaudio.git

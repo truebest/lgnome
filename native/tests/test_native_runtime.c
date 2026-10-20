@@ -650,11 +650,56 @@ static void test_drag_cannot_survive_lost_button_state(void) {
     finish(&app);
 }
 
+static void test_mixer_motion_preserves_handoff_buttons(void) {
+    App app;
+    SDL_Window window = {0};
+    init(&app);
+    app.mixer_overlay_visible = true;
+    app.mixer_overlay_pointer_buttons = SDL_BUTTON_LMASK;
+    app.mixer_overlay_dismiss_pending = true;
+    SDL_Event event = {.type = SDL_MOUSEMOTION};
+    event.motion.state = 0;
+    native_handle_sdl_event(&app, &window, NULL, &event);
+    assert(app.mixer_overlay_pointer_buttons == SDL_BUTTON_LMASK);
+    assert(app.mixer_overlay_visible && overlay_hides == 0);
+    event.type = SDL_MOUSEBUTTONUP;
+    event.button.button = SDL_BUTTON_LEFT;
+    native_handle_sdl_event(&app, &window, NULL, &event);
+    assert(!app.mixer_overlay_visible && overlay_hides == 1);
+    finish(&app);
+}
+
+static void test_mixer_motion_recovers_lost_release(void) {
+    App app;
+    SDL_Window window = {0};
+    init(&app);
+    app.mixer_overlay_visible = true;
+    app.mixer_overlay_dragging = true;
+    app.mixer_overlay_pointer_buttons = SDL_BUTTON_LMASK | native_overlay_button_bit(SDL_BUTTON_X1);
+    app.mixer_overlay_sdl_buttons = app.mixer_overlay_pointer_buttons;
+    app.mixer_overlay_dismiss_button = SDL_BUTTON_X1;
+    SDL_Event event = {.type = SDL_MOUSEMOTION};
+    event.motion.state = SDL_BUTTON_LMASK;
+    native_handle_sdl_event(&app, &window, NULL, &event);
+    assert(app.mixer_overlay_pointer_buttons == SDL_BUTTON_LMASK);
+    assert(app.mixer_overlay_dismiss_button == 0);
+    assert(app.mixer_overlay_dismiss_pending);
+    assert(app.mixer_overlay_visible && overlay_hides == 0);
+    event.motion.state = 0;
+    native_handle_sdl_event(&app, &window, NULL, &event);
+    assert(app.mixer_overlay_pointer_buttons == 0);
+    assert(!app.mixer_overlay_dragging && !app.mixer_overlay_visible);
+    assert(overlay_hides == 1);
+    finish(&app);
+}
+
 int main(void) {
     test_focus_controls_grab_and_input_arming();
     test_survivor_failure_returns_to_ui();
     test_rgba_transition_releases_mixer_ownership();
     test_drag_cannot_survive_lost_button_state();
+    test_mixer_motion_recovers_lost_release();
+    test_mixer_motion_preserves_handoff_buttons();
     puts("PASS native-runtime");
     return 0;
 }

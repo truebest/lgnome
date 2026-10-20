@@ -1,4 +1,4 @@
-//! EGFX graphics pipeline: AVC420 access units and RemoteFX/bitmap RGBA
+//! EGFX graphics pipeline: H.264/HEVC access units and RemoteFX/bitmap RGBA
 //! updates, accumulated under a lock by IronRDP's handler callbacks and
 //! drained by the worker between socket reads.
 
@@ -7,16 +7,17 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use super::abi::{RDP_VIDEO_CODEC_H264, RDP_VIDEO_CODEC_H265};
 use super::LOG_TARGET_GRAPHICS;
 use ironrdp_egfx::client::{BitmapUpdate, GraphicsPipelineHandler};
 use ironrdp_egfx::pdu::{
-    CacheToSurfacePdu, CapabilitiesV107Flags, CapabilitiesV81Flags, CapabilitiesV8Flags,
-    CapabilitySet, Codec1Type, GfxPdu, SolidFillPdu, SurfaceToSurfacePdu,
+    CacheToSurfacePdu, CapabilitiesFrdp1Flags, CapabilitiesV107Flags, CapabilitiesV81Flags,
+    CapabilitiesV8Flags, CapabilitySet, Codec1Type, GfxPdu, SolidFillPdu, SurfaceToSurfacePdu,
 };
 
 #[derive(Default)]
 pub(super) struct NativeGfxState {
-    pub(super) pending_video: Vec<Vec<u8>>,
+    pub(super) pending_video: Vec<NativeVideoUnit>,
     pub(super) pending_bitmap: Vec<NativeBitmapUnit>,
     pub(super) unsupported_graphics: Option<String>,
     // ResetGraphics dimensions, independent of the initial MCS/GCC desktop size.
@@ -26,6 +27,11 @@ pub(super) struct NativeGfxState {
     // Add the mapped output origin to surface-local bitmap rectangles.
     pub(super) surface_origins: HashMap<u16, (u32, u32)>,
     pub(super) avc444_aux_frames: u64,
+}
+
+pub(super) struct NativeVideoUnit {
+    pub(super) codec: u32,
+    pub(super) data: Vec<u8>,
 }
 
 pub(super) struct NativeBitmapUnit {
@@ -40,6 +46,8 @@ pub(super) struct NativeBitmapUnit {
 
 pub(super) struct NativeGfxHandler {
     pub(super) shared: Arc<Mutex<NativeGfxState>>,
+    hevc_capable: bool,
+    hevc_negotiated: bool,
     undecodable_since_render: u32,
     /// Session-wide log counter; successful renders must not reset the limiter.
     undecodable_total: u32,
@@ -81,9 +89,11 @@ fn gfx_pdu_name(pdu: &GfxPdu) -> &'static str {
 }
 
 impl NativeGfxHandler {
-    pub(super) fn new(shared: Arc<Mutex<NativeGfxState>>) -> Self {
+    pub(super) fn new(shared: Arc<Mutex<NativeGfxState>>, hevc_capable: bool) -> Self {
         Self {
             shared,
+            hevc_capable,
+            hevc_negotiated: false,
             undecodable_since_render: 0,
             undecodable_total: 0,
             video_seen: false,
@@ -135,7 +145,7 @@ impl NativeGfxHandler {
 impl GraphicsPipelineHandler for NativeGfxHandler {
     fn capabilities(&self) -> Vec<CapabilitySet> {
         // AVC_THIN_CLIENT requests the YUV420 view; tested Windows hosts need V10 for H.264.
-        let caps = vec![
+        let mut caps = vec![
             CapabilitySet::V8 {
                 flags: CapabilitiesV8Flags::SMALL_CACHE,
             },
@@ -146,12 +156,25 @@ impl GraphicsPipelineHandler for NativeGfxHandler {
                 flags: CapabilitiesV107Flags::SMALL_CACHE | CapabilitiesV107Flags::AVC_THIN_CLIENT,
             },
         ];
+        if self.hevc_capable {
+            caps.insert(
+                0,
+                CapabilitySet::Frdp1 {
+                    flags: CapabilitiesFrdp1Flags::HEVC_SUPPORTED
+                        | CapabilitiesFrdp1Flags::SMALL_CACHE
+                        | CapabilitiesFrdp1Flags::AVC_THIN_CLIENT,
+                },
+            );
+        }
         tracing::info!(target: LOG_TARGET_GRAPHICS, offered = ?caps,
-            "EGFX offer: H.264 passthrough, native bitmap fallback, no full AVC444 presentation");
+            "EGFX offer: hardware video passthrough, native bitmap fallback, no full AVC444 presentation");
         caps
     }
 
     fn on_capabilities_confirmed(&mut self, caps: &CapabilitySet) {
+        self.hevc_negotiated = self.hevc_capable
+            && matches!(caps,
+            CapabilitySet::Frdp1 { flags } if flags.contains(CapabilitiesFrdp1Flags::HEVC_SUPPORTED));
         tracing::info!(
             target: LOG_TARGET_GRAPHICS,
             caps = ?caps,
@@ -265,7 +288,40 @@ impl GraphicsPipelineHandler for NativeGfxHandler {
                 self.video_seen = true;
             }
             if let Ok(mut shared) = self.shared.lock() {
-                shared.pending_video.push(nal.to_vec());
+                shared.pending_video.push(NativeVideoUnit {
+                    codec: RDP_VIDEO_CODEC_H264,
+                    data: nal.to_vec(),
+                });
+            }
+            self.note_rendered_update();
+        }
+        true
+    }
+
+    fn on_hevc_frame(
+        &mut self,
+        _surface_id: u16,
+        _left: u16,
+        _top: u16,
+        _width: u16,
+        _height: u16,
+        nal: &[u8],
+    ) -> bool {
+        if !self.hevc_negotiated {
+            self.mark_unsupported_graphics("server sent HEVC without negotiating it");
+            return true;
+        }
+        if !nal.is_empty() {
+            if !self.video_seen {
+                tracing::info!(target: LOG_TARGET_GRAPHICS, bytes = nal.len(),
+                    "first HEVC AU since graphics reset");
+                self.video_seen = true;
+            }
+            if let Ok(mut shared) = self.shared.lock() {
+                shared.pending_video.push(NativeVideoUnit {
+                    codec: RDP_VIDEO_CODEC_H265,
+                    data: nal.to_vec(),
+                });
             }
             self.note_rendered_update();
         }
@@ -391,7 +447,7 @@ mod tests {
         ];
         for (name, invoke) in cases {
             let mut handler =
-                NativeGfxHandler::new(Arc::new(Mutex::new(NativeGfxState::default())));
+                NativeGfxHandler::new(Arc::new(Mutex::new(NativeGfxState::default())), false);
             invoke(&mut handler);
             // gnome-remote-desktop sends these during routine AVC420 sessions; they must
             // never take the session down (regression: they briefly did).
@@ -409,7 +465,8 @@ mod tests {
 
     #[test]
     fn reset_graphics_marks_size_pending_once_per_distinct_value() {
-        let mut handler = NativeGfxHandler::new(Arc::new(Mutex::new(NativeGfxState::default())));
+        let mut handler =
+            NativeGfxHandler::new(Arc::new(Mutex::new(NativeGfxState::default())), false);
 
         // ResetGraphics dimensions may change independently of the initial handshake.
         handler.on_reset_graphics(3840, 2160);
@@ -456,7 +513,8 @@ mod tests {
 
     #[test]
     fn a_stream_that_only_ever_drops_updates_fails_the_session_over() {
-        let mut handler = NativeGfxHandler::new(Arc::new(Mutex::new(NativeGfxState::default())));
+        let mut handler =
+            NativeGfxHandler::new(Arc::new(Mutex::new(NativeGfxState::default())), false);
         let pdu = undecodable_wire_to_surface1();
 
         for _ in 0..MAX_UNDECODABLE_UPDATES - 1 {
@@ -486,7 +544,8 @@ mod tests {
 
     #[test]
     fn dropped_updates_stay_non_fatal_while_the_session_renders() {
-        let mut handler = NativeGfxHandler::new(Arc::new(Mutex::new(NativeGfxState::default())));
+        let mut handler =
+            NativeGfxHandler::new(Arc::new(Mutex::new(NativeGfxState::default())), false);
         let pdu = undecodable_wire_to_surface1();
 
         // Windows mixes tiles this client cannot decode into a working AVC420 stream.
@@ -522,7 +581,8 @@ mod tests {
 
     #[test]
     fn bitmap_update_offsets_by_mapped_surface_origin() {
-        let mut handler = NativeGfxHandler::new(Arc::new(Mutex::new(NativeGfxState::default())));
+        let mut handler =
+            NativeGfxHandler::new(Arc::new(Mutex::new(NativeGfxState::default())), false);
 
         // Server maps surface 7 at a non-zero desktop position (e.g. a second monitor).
         handler.on_surface_mapped(7, 1920, 100);
@@ -604,7 +664,7 @@ mod tests {
 
     #[test]
     fn gfx_capabilities_offer_avc420_and_windows_v10_fallback() {
-        let handler = NativeGfxHandler::new(Arc::new(Mutex::new(NativeGfxState::default())));
+        let handler = NativeGfxHandler::new(Arc::new(Mutex::new(NativeGfxState::default())), false);
 
         let capabilities = handler.capabilities();
         assert_eq!(
@@ -615,5 +675,41 @@ mod tests {
         );
         assert_eq!(capabilities.len(), 3);
         assert!(handler.wants_avc420_passthrough());
+    }
+
+    #[test]
+    fn hevc_offer_retains_fallbacks_and_frames_keep_their_codec() {
+        let shared = Arc::new(Mutex::new(NativeGfxState::default()));
+        let mut handler = NativeGfxHandler::new(Arc::clone(&shared), true);
+        let fallback = NativeGfxHandler::new(Arc::clone(&shared), false).capabilities();
+        let caps = handler.capabilities();
+        assert_eq!(&caps[1..], fallback.as_slice());
+        assert!(matches!(caps[0], CapabilitySet::Frdp1 { flags }
+            if flags.contains(CapabilitiesFrdp1Flags::HEVC_SUPPORTED | CapabilitiesFrdp1Flags::AVC_THIN_CLIENT)));
+        handler.on_capabilities_confirmed(&caps[0]);
+        assert!(handler.on_hevc_frame(1, 0, 0, 16, 16, &[0, 0, 1, 38, 1]));
+        handler.on_capabilities_confirmed(&fallback[1]);
+        assert!(handler.on_avc420_frame(1, 0, 0, 16, 16, &[0, 0, 1, 0x65]));
+        let frames = &shared.lock().unwrap().pending_video;
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].codec, RDP_VIDEO_CODEC_H265);
+        assert_eq!(frames[1].codec, RDP_VIDEO_CODEC_H264);
+    }
+
+    #[test]
+    fn hevc_requires_both_local_support_and_server_confirmation() {
+        for enabled in [false, true] {
+            let shared = Arc::new(Mutex::new(NativeGfxState::default()));
+            let mut handler = NativeGfxHandler::new(Arc::clone(&shared), enabled);
+            if !enabled {
+                handler.on_capabilities_confirmed(&CapabilitySet::Frdp1 {
+                    flags: CapabilitiesFrdp1Flags::HEVC_SUPPORTED,
+                });
+            }
+            handler.on_hevc_frame(1, 0, 0, 16, 16, &[0, 0, 1, 38, 1]);
+            let state = shared.lock().unwrap();
+            assert!(state.pending_video.is_empty());
+            assert!(state.unsupported_graphics.is_some());
+        }
     }
 }

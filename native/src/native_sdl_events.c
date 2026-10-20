@@ -100,6 +100,20 @@ void native_handle_sdl_event(App *app, SDL_Window *window, SDL_Renderer *rendere
             if (!(event->motion.state & SDL_BUTTON_LMASK)) {
                 app->mixer_overlay_dragging = false;
             }
+            /* SDL cannot report buttons pressed before the evdev handoff. */
+            uint8_t released = app->mixer_overlay_sdl_buttons & (uint8_t)~event->motion.state;
+            app->mixer_overlay_sdl_buttons = (uint8_t)event->motion.state;
+            app->mixer_overlay_pointer_buttons &= (uint8_t)~released;
+            if (app->mixer_overlay_dismiss_button != 0 &&
+                (released & native_overlay_button_bit(app->mixer_overlay_dismiss_button))) {
+                app->mixer_overlay_dismiss_button = 0;
+                app->mixer_overlay_dismiss_pending = true;
+            }
+            if (app->mixer_overlay_dismiss_pending && app->mixer_overlay_pointer_buttons == 0) {
+                app->mixer_overlay_dismiss_pending = false;
+                native_mixer_overlay_hide(app);
+                break;
+            }
             if (app->mixer_overlay_dragging && !app->window_unfocused && !app->app_backgrounded) {
                 int win_w = 0;
                 int win_h = 0;
@@ -129,6 +143,8 @@ void native_handle_sdl_event(App *app, SDL_Window *window, SDL_Renderer *rendere
     case SDL_MOUSEBUTTONUP: {
         if (app->mixer_overlay_visible) {
             if (event->type == SDL_MOUSEBUTTONUP) {
+                app->mixer_overlay_sdl_buttons &=
+                    (uint8_t)~native_overlay_button_bit(event->button.button);
                 app->mixer_overlay_pointer_buttons &=
                     (uint8_t)~native_overlay_button_bit(event->button.button);
                 /* Only LEFT can start a fader drag, so only its release ends one. */
@@ -150,6 +166,7 @@ void native_handle_sdl_event(App *app, SDL_Window *window, SDL_Renderer *rendere
                 native_mixer_overlay_touch(app);
                 break;
             }
+            app->mixer_overlay_sdl_buttons |= native_overlay_button_bit(event->button.button);
             app->mixer_overlay_pointer_buttons |=
                 native_overlay_button_bit(event->button.button);
             if (event->button.button >= SDL_BUTTON_X1) {

@@ -26,6 +26,7 @@ void native_session_config_defaults(NativeSessionConfig *session) {
     session->fps = 60;
     session->desktop_width = NATIVE_RDP_INITIAL_DESKTOP_WIDTH;
     session->desktop_height = NATIVE_RDP_INITIAL_DESKTOP_HEIGHT;
+    session->desktop_scale_factor = 100;
 }
 
 void native_settings_defaults(NativeSettings *settings) {
@@ -42,4 +43,8 @@ void native_settings_defaults(NativeSettings *settings) {
     settings->camera_height = 480;
     settings->camera_fps = 15;
     settings->audio_input_gain_db = 0;
+}
+
+bool native_desktop_scale_valid(uint16_t scale) {
+    return scale == 100 || scale == 150 || scale == 200;
 }

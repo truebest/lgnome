@@ -63,7 +63,13 @@ unsafe fn copy_config(config: *const RdpConfig) -> Result<NativeConfig, &'static
     if host.is_empty() {
         return Err("missing host");
     }
+    let desktop_scale_factor = match config.desktop_scale_factor {
+        0 => 100,
+        100 | 150 | 200 => u32::from(config.desktop_scale_factor),
+        _ => return Err("desktop scale must be 100, 150 or 200"),
+    };
     Ok(NativeConfig {
+        desktop_scale_factor,
         host,
         port: if config.port == 0 { 3389 } else { config.port },
         username: unsafe { cstr_lossy(config.username) },
@@ -75,6 +81,7 @@ unsafe fn copy_config(config: *const RdpConfig) -> Result<NativeConfig, &'static
         prefer_pcm_audio: config.prefer_pcm_audio != 0,
         enable_camera: config.enable_camera != 0,
         enable_audio_input: config.enable_audio_input != 0,
+        enable_hevc: config.enable_hevc != 0,
         camera_width: config.camera_width.max(1),
         camera_height: config.camera_height.max(1),
         camera_fps: config.camera_fps.max(1),
@@ -539,5 +546,29 @@ mod tests {
         assert!(unsafe {
             rdp_submit_camera_h264(session_ptr, 11, camera.as_ptr(), camera.len(), true)
         });
+    }
+}
+
+#[cfg(test)]
+mod scale_tests {
+    use super::*;
+
+    #[test]
+    fn copy_config_preserves_scale_and_rejects_invalid_values() {
+        let mut config: RdpConfig = unsafe { core::mem::zeroed() };
+        config.host = c"test".as_ptr();
+        for (scale, expected) in [(0, 100), (100, 100), (150, 150), (200, 200)] {
+            config.desktop_scale_factor = scale;
+            assert_eq!(
+                unsafe { copy_config(&config) }
+                    .unwrap()
+                    .desktop_scale_factor,
+                expected
+            );
+        }
+        for scale in [99, 125, 201, 500] {
+            config.desktop_scale_factor = scale;
+            assert!(unsafe { copy_config(&config) }.is_err());
+        }
     }
 }

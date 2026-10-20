@@ -1,6 +1,6 @@
 {
   "id": "com.truebest.lgnome.native",
-  "version": "0.5.6",
+  "version": "0.5.7",
   "vendor": "truebest",
   "type": "native",
   "main": "bin/lgnome-native",

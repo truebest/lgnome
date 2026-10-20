@@ -77,10 +77,11 @@ pub struct RdpConfig {
     pub prefer_pcm_audio: u8,
     pub enable_camera: u8,
     pub enable_audio_input: u8,
-    pub reserved0: u8,
+    pub enable_hevc: u8,
     pub camera_width: u16,
     pub camera_height: u16,
     pub camera_fps: u16,
+    pub desktop_scale_factor: u16,
 }
 
 #[repr(C)]
@@ -93,9 +94,8 @@ pub struct RdpCallbacks {
     pub on_log:
         Option<extern "C" fn(*mut core::ffi::c_void, RdpLogLevel, *const c_char, *const c_char)>,
     pub on_desktop_size: Option<extern "C" fn(*mut core::ffi::c_void, u16, u16)>,
-    /// Raw AVC420 access unit. C classifies AVC/Annex-B framing and IDR state from
-    /// these bytes before any snapshot or decoder-ownership decision.
-    pub on_video_au: Option<extern "C" fn(*mut core::ffi::c_void, *const u8, usize, u64)>,
+    /// Per-AU RDP_VIDEO_CODEC_* and bytes, borrowed for the synchronous callback.
+    pub on_video_au: Option<extern "C" fn(*mut core::ffi::c_void, u32, *const u8, usize, u64)>,
     pub on_bitmap_update: Option<
         extern "C" fn(*mut core::ffi::c_void, u16, u32, u32, u32, u32, u32, *const u8, usize),
     >,
@@ -122,6 +122,9 @@ pub struct RdpCallbacks {
     pub on_audio_input_start: Option<extern "C" fn(*mut core::ffi::c_void, u64, u32, u16, u32)>,
     pub on_audio_input_stop: Option<extern "C" fn(*mut core::ffi::c_void, u64)>,
 }
+
+pub const RDP_VIDEO_CODEC_H264: u32 = 0;
+pub const RDP_VIDEO_CODEC_H265: u32 = 1;
 
 pub const RDP_POINTER_STATE_HIDDEN: u32 = 0;
 pub const RDP_POINTER_STATE_DEFAULT: u32 = 1;
@@ -186,6 +189,8 @@ mod tests {
 
     #[test]
     fn ffi_struct_layout_is_c_compatible() {
+        assert_eq!(RDP_VIDEO_CODEC_H264, 0);
+        assert_eq!(RDP_VIDEO_CODEC_H265, 1);
         assert_eq!(align_of::<RdpConfig>(), align_of::<*const c_char>());
         assert_eq!(offset_of!(RdpConfig, host), 0);
         assert_eq!(offset_of!(RdpConfig, port), size_of::<*const c_char>());
@@ -196,10 +201,18 @@ mod tests {
         assert!(offset_of!(RdpConfig, prefer_pcm_audio) > offset_of!(RdpConfig, fps));
         assert!(offset_of!(RdpConfig, enable_camera) > offset_of!(RdpConfig, prefer_pcm_audio));
         assert!(offset_of!(RdpConfig, enable_audio_input) > offset_of!(RdpConfig, enable_camera));
-        assert!(offset_of!(RdpConfig, camera_width) > offset_of!(RdpConfig, reserved0));
+        assert_eq!(
+            offset_of!(RdpConfig, enable_hevc),
+            offset_of!(RdpConfig, enable_audio_input) + 1
+        );
+        assert!(offset_of!(RdpConfig, camera_width) > offset_of!(RdpConfig, enable_hevc));
         assert!(offset_of!(RdpConfig, camera_height) > offset_of!(RdpConfig, camera_width));
         assert!(offset_of!(RdpConfig, camera_fps) > offset_of!(RdpConfig, camera_height));
-        assert_eq!(size_of::<RdpConfig>(), 5 * size_of::<*const c_char>() + 16);
+        assert_eq!(
+            offset_of!(RdpConfig, desktop_scale_factor),
+            5 * size_of::<*const c_char>() + 16
+        );
+        assert_eq!(size_of::<RdpConfig>(), 6 * size_of::<*const c_char>() + 16);
         assert_eq!(
             align_of::<RdpCallbacks>(),
             align_of::<*mut core::ffi::c_void>()
@@ -264,3 +277,11 @@ mod tests {
         assert_eq!(RDP_AUDIO_CODEC_PCM_S16LE, 2);
     }
 }
+
+const _: () = {
+    assert!(
+        core::mem::offset_of!(RdpConfig, desktop_scale_factor)
+            == 5 * core::mem::size_of::<*const c_char>() + 16
+    );
+    assert!(core::mem::size_of::<RdpConfig>() == 6 * core::mem::size_of::<*const c_char>() + 16);
+};

@@ -21,6 +21,7 @@ use super::{CallbackSink, NativeError, RdpLogLevel, LOG_TARGET_GRAPHICS};
 pub(super) fn make_display_control(
     width: u16,
     height: u16,
+    scale: u32,
     sink: CallbackSink,
     gfx: Arc<Mutex<NativeGfxState>>,
 ) -> DisplayControlClient {
@@ -50,7 +51,10 @@ pub(super) fn make_display_control(
             return Ok(Vec::new());
         }
         let layout = match DisplayControlMonitorLayout::new_single_primary_monitor(
-            width, height, None, None,
+            width,
+            height,
+            Some(scale),
+            None,
         ) {
             Ok(layout) => layout,
             Err(e) => {
@@ -75,6 +79,7 @@ pub(super) fn make_display_control(
 pub(super) struct DisplayControlFactory {
     pub(super) width: u16,
     pub(super) height: u16,
+    pub(super) scale: u32,
     pub(super) sink: CallbackSink,
     pub(super) gfx: Arc<Mutex<NativeGfxState>>,
 }
@@ -88,6 +93,7 @@ impl DvcChannelListener for DisplayControlFactory {
         Some(Box::new(make_display_control(
             self.width,
             self.height,
+            self.scale,
             self.sink,
             Arc::clone(&self.gfx),
         )))
@@ -100,13 +106,14 @@ pub(super) fn encode_refresh_layout(
     active: &mut ActiveStage,
     width: u16,
     height: u16,
+    scale: u32,
 ) -> Result<Option<Vec<SvcMessage>>, NativeError> {
     let (width, height) =
         MonitorLayoutEntry::adjust_display_size(u32::from(width), u32::from(height));
     match active.get_dvc::<DisplayControlClient>() {
         Some(dvc) => match (dvc.channel_id(), dvc.processor()) {
             (channel_id, client) if client.ready() => client
-                .encode_single_primary_monitor(channel_id, width, height, None, None)
+                .encode_single_primary_monitor(channel_id, width, height, Some(scale), None)
                 .map_err(|e| NativeError::protocol(format!("refresh layout encode: {e}")))
                 .map(Some),
             _ => Ok(None),
@@ -140,6 +147,41 @@ mod tests {
     }
 
     #[test]
+    fn scale_is_preserved_on_every_display_channel_and_same_size_is_silent() {
+        for scale in [100, 150, 200] {
+            let gfx = Arc::new(Mutex::new(NativeGfxState::default()));
+            let mut factory = DisplayControlFactory {
+                width: 3840,
+                height: 2160,
+                scale,
+                sink: CallbackSink::default(),
+                gfx: Arc::clone(&gfx),
+            };
+            for id in [7, 9] {
+                let mut client = factory.create(id).unwrap();
+                let replies = client
+                    .process(id, &display_caps_payload(1, 8192, 8192))
+                    .unwrap();
+                let layout = decode_monitor_layout(&replies[0]);
+                let monitor = &layout.monitors()[0];
+                assert_eq!(monitor.dimensions(), (3840, 2160));
+                assert_eq!(monitor.desktop_scale_factor(), Some(scale));
+                assert_eq!(monitor.device_scale_factor().unwrap().value(), 100);
+            }
+            {
+                let mut state = gfx.lock().unwrap();
+                state.graphics_width = 3840;
+                state.graphics_height = 2160;
+            }
+            let mut client = factory.create(11).unwrap();
+            assert!(client
+                .process(11, &display_caps_payload(1, 8192, 8192))
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    #[test]
     fn display_control_pushes_configured_resolution_on_caps() {
         let payload = display_caps_payload(1, 1920, 1080);
         // Golden wire bytes: DISPLAYCONTROL_HEADER (Type=0x05 Caps, Length=0x14) + body.
@@ -157,6 +199,7 @@ mod tests {
         let mut client = make_display_control(
             1920,
             1080,
+            100,
             CallbackSink::default(),
             Arc::new(Mutex::new(NativeGfxState::default())),
         );
@@ -175,6 +218,7 @@ mod tests {
         let mut factory = DisplayControlFactory {
             width: 1920,
             height: 1080,
+            scale: 150,
             sink: CallbackSink::default(),
             gfx: Arc::new(Mutex::new(NativeGfxState::default())),
         };
@@ -198,6 +242,7 @@ mod tests {
         let mut client = make_display_control(
             1920,
             1080,
+            100,
             CallbackSink::default(),
             Arc::new(Mutex::new(NativeGfxState::default())),
         );
@@ -213,6 +258,7 @@ mod tests {
         let mut client = make_display_control(
             1367,
             768,
+            100,
             CallbackSink::default(),
             Arc::new(Mutex::new(NativeGfxState::default())),
         );

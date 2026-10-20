@@ -43,7 +43,7 @@ static void *late_tail(void *unused) {
     attempted = true;
     pthread_cond_broadcast(&changed);
     pthread_mutex_unlock(&schedule);
-    native_video_ingest_au(&app.sessions[0], delta3, sizeof(delta3), 3);
+    native_video_ingest_au(&app.sessions[0], NATIVE_VIDEO_CODEC_H264, delta3, sizeof(delta3), 3);
     return NULL;
 }
 
@@ -63,15 +63,21 @@ uint16_t native_video_height(const NativeVideo *v) {
     return v->h;
 }
 
+NativeVideoCodec native_video_codec(const NativeVideo *v) {
+    (void)v;
+    return NATIVE_VIDEO_CODEC_H264;
+}
+
 void native_video_close(NativeVideo *v) {
     (void)v;
 }
 
-NativeVideo *native_video_open(NativeMedia *m, uint16_t w, uint16_t h, uint16_t f) {
+NativeVideo *native_video_open(NativeMedia *m, uint16_t w, uint16_t h, uint16_t f, NativeVideoCodec codec) {
     (void)m;
     (void)w;
     (void)h;
     (void)f;
+    (void)codec;
     abort();
 }
 
@@ -151,7 +157,7 @@ static void test_late_tail_waits_for_entire_replay(void) {
 static void test_tail_before_replay_stays_in_cache_and_invalidates_quiet(void) {
     struct NativeVideo video = {16, 16};
     setup(&video);
-    native_video_ingest_au(&app.sessions[0], delta3, sizeof(delta3), 3);
+    native_video_ingest_au(&app.sessions[0], NATIVE_VIDEO_CODEC_H264, delta3, sizeof(delta3), 3);
     assert(count == 0 && app.sessions[0].snapshot.count == 3u);
     assert(!native_snapshot_replay(&app, 0));
     assert(count == 0 && !app.sessions[0].snapshot.armed);

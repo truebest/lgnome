@@ -78,9 +78,9 @@ impl CallbackSink {
         }
     }
 
-    pub(super) fn video_au(&self, data: &[u8], pts90k: u64) {
+    pub(super) fn video_au(&self, codec: u32, data: &[u8], pts90k: u64) {
         if let Some(cb) = self.callbacks.on_video_au {
-            cb(self.callbacks.ctx, data.as_ptr(), data.len(), pts90k);
+            cb(self.callbacks.ctx, codec, data.as_ptr(), data.len(), pts90k);
         }
     }
     pub(super) fn bitmap_update(&self, update: &NativeBitmapUnit) {
@@ -236,18 +236,19 @@ mod tests {
 
         extern "C" fn on_video_au(
             ctx: *mut core::ffi::c_void,
+            codec: u32,
             data: *const u8,
             len: usize,
             pts90k: u64,
         ) {
-            let seen = unsafe { &*(ctx.cast::<StdMutex<Option<(Vec<u8>, u64)>>>()) };
+            let seen = unsafe { &*(ctx.cast::<StdMutex<Option<(u32, Vec<u8>, u64)>>>()) };
             let bytes = unsafe { core::slice::from_raw_parts(data, len) }.to_vec();
-            *seen.lock().unwrap() = Some((bytes, pts90k));
+            *seen.lock().unwrap() = Some((codec, bytes, pts90k));
         }
 
         let seen = StdMutex::new(None);
         let mut callbacks = CallbackSink::default().callbacks;
-        callbacks.ctx = (&seen as *const StdMutex<Option<(Vec<u8>, u64)>>)
+        callbacks.ctx = (&seen as *const StdMutex<Option<(u32, Vec<u8>, u64)>>)
             .cast_mut()
             .cast();
         callbacks.on_video_au = Some(on_video_au);
@@ -255,9 +256,12 @@ mod tests {
         let au = [0x00, 0x00, 0x01, 0x65, 0x88];
         let pts90k = 0xfedc_ba98_7654_3210;
 
-        sink.video_au(&au, pts90k);
+        sink.video_au(super::super::abi::RDP_VIDEO_CODEC_H265, &au, pts90k);
 
-        assert_eq!(*seen.lock().unwrap(), Some((au.to_vec(), pts90k)));
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some((super::super::abi::RDP_VIDEO_CODEC_H265, au.to_vec(), pts90k))
+        );
     }
 
     #[test]

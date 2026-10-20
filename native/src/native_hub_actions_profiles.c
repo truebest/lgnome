@@ -57,6 +57,9 @@ bool native_hub_actions_drain_profiles(NativeHubActionsContext *context) {
         char save_status[128] = "";
         if (native_preconnect_ui_get_slot_values(ui, saved_slot, &edited)) {
             edited.duck_mask = settings->sessions[saved_slot].duck_mask;
+            edited.mixer_gain_db = settings->sessions[saved_slot].mixer_gain_db;
+            edited.mixer_muted = settings->sessions[saved_slot].mixer_muted;
+            edited.mixer_solo = settings->sessions[saved_slot].mixer_solo;
             NativeSettings candidate = *settings;
             candidate.sessions[saved_slot] = edited;
             candidate.audio_codec = saved_audio_codec;

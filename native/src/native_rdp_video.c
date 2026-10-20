@@ -22,8 +22,8 @@ clog_define(g_native_log_rdp_video, cLogLevelInfo, "native");
 /* Periodic decoder-input statistics. */
 #define NATIVE_VIDEO_PACING_LOG_MS 5000u
 
-/* Hold H.264 through bitmap refinements from the same owner. */
-#define NATIVE_H264_PATH_HOLD_MS 1500u
+/* Hold hardware video through bitmap refinements from the same owner. */
+#define NATIVE_VIDEO_PATH_HOLD_MS 1500u
 
 /* Report one in this many discarded refinements. */
 #define NATIVE_TILE_DROP_LOG_INTERVAL 500u
@@ -74,10 +74,10 @@ static void on_bitmap_update(void *ctx, uint16_t surface_id, uint32_t left, uint
     }
     App *app = slot->app;
     pthread_mutex_lock(&app->video_lock);
-    bool recent_h264 = slot->h264_seen && slot->h264_epoch == atomic_load(&slot->connect_epoch) &&
-                       native_monotonic_ms() - slot->h264_last_au_ms < NATIVE_H264_PATH_HOLD_MS;
-    if (!native_slot_is_active(slot) || (slot->snapshot.armed && recent_h264)) {
-        atomic_store(&slot->video_via_bitmap, !recent_h264);
+    bool recent_video = slot->video_seen && slot->video_epoch == atomic_load(&slot->connect_epoch) &&
+                       native_monotonic_ms() - slot->video_last_au_ms < NATIVE_VIDEO_PATH_HOLD_MS;
+    if (!native_slot_is_active(slot) || (slot->snapshot.armed && recent_video)) {
+        atomic_store(&slot->video_via_bitmap, !recent_video);
         pthread_mutex_unlock(&app->video_lock);
         return;
     }
@@ -100,11 +100,11 @@ static void on_bitmap_update(void *ctx, uint16_t surface_id, uint32_t left, uint
     if (app->video) {
         bool same_owner = app->video_owner_slot == slot->index && app->video_owner_epoch == owner_epoch;
         uint32_t since_feed = native_monotonic_ms() - app->video_last_feed_ms;
-        if (same_owner && app->video_feed_started && since_feed < NATIVE_H264_PATH_HOLD_MS) {
-            /* Only the matching decoder owner may hold bitmap refinements behind live H.264. */
+        if (same_owner && app->video_feed_started && since_feed < NATIVE_VIDEO_PATH_HOLD_MS) {
+            /* Only the matching decoder owner may hold bitmap refinements behind live hardware video. */
             atomic_store(&slot->video_via_bitmap, false);
             if (++app->tiles_dropped_under_video % NATIVE_TILE_DROP_LOG_INTERVAL == 0) {
-                clog(cLogLevelDebug, "video: %u refinement tiles dropped while H.264 is live",
+                clog(cLogLevelDebug, "video: %u refinement tiles dropped while hardware video is live",
                      app->tiles_dropped_under_video);
             }
             pthread_mutex_unlock(&app->video_lock);
@@ -113,7 +113,7 @@ static void on_bitmap_update(void *ctx, uint16_t surface_id, uint32_t left, uint
         native_video_close(app->video);
         app->video = NULL;
         app->decoder_keyframe_pending = false;
-        if (same_owner && native_note_graphics_path_switch(app, slot, "from NDL/H.264 to native RemoteFX RGBA")) {
+        if (same_owner && native_note_graphics_path_switch(app, slot, "from NDL video to native RemoteFX RGBA")) {
             pthread_mutex_unlock(&app->video_lock);
             return;
         }
@@ -156,11 +156,11 @@ static void on_bitmap_update(void *ctx, uint16_t surface_id, uint32_t left, uint
     }
 }
 
-static void native_note_h264_stream(NativeSessionSlot *slot, bool valid_au) {
+static void native_note_video_stream(NativeSessionSlot *slot, bool valid_au) {
     if (valid_au) {
-        slot->h264_seen = true;
-        slot->h264_last_au_ms = native_monotonic_ms();
-        slot->h264_epoch = atomic_load(&slot->connect_epoch);
+        slot->video_seen = true;
+        slot->video_last_au_ms = native_monotonic_ms();
+        slot->video_epoch = atomic_load(&slot->connect_epoch);
     }
 }
 
@@ -170,13 +170,21 @@ void native_video_ingest_au_locked(NativeSessionSlot *slot, const uint8_t *data,
         return;
     }
     App *app = slot->app;
-    NativeH264Info h264_info;
-    bool valid_au = native_h264_scan_au(data, len, &h264_info) == NATIVE_H264_OK;
-    bool decoder_seed = valid_au && h264_info.can_seed_decoder;
-    /* This stream feeds H.264 AUs: snapshot switching applies. Stamped before any
+    bool valid_au;
+    bool decoder_seed;
+    if (slot->video_codec == NATIVE_VIDEO_CODEC_H265) {
+        NativeHevcInfo info;
+        valid_au = native_hevc_scan_annexb(data, len, &info) == NATIVE_HEVC_OK;
+        decoder_seed = valid_au && info.can_seed_decoder;
+    } else {
+        NativeH264Info info;
+        valid_au = native_h264_scan_au(data, len, &info) == NATIVE_H264_OK;
+        decoder_seed = valid_au && info.can_seed_decoder;
+    }
+    /* This stream feeds compressed AUs: snapshot switching applies. Stamped before any
      * routing so a backgrounded stream classifies its slot too. */
     atomic_store(&slot->video_via_bitmap, false);
-    native_note_h264_stream(slot, valid_au);
+    native_note_video_stream(slot, valid_au);
     /* Armed caches remain the handoff barrier after active_index is published. */
     if (slot->snapshot.armed) {
         if (!native_au_snapshot_append(&slot->snapshot, data, len, valid_au, decoder_seed, pts90k)) {
@@ -204,12 +212,13 @@ void native_video_ingest_au_locked(NativeSessionSlot *slot, const uint8_t *data,
     if (app->rgba) {
         bool same_owner = native_rgba_owner_matches(app, slot->index, atomic_load(&slot->connect_epoch));
         native_close_rgba_locked(app, true);
-        if (same_owner && native_note_graphics_path_switch(app, slot, "from native RemoteFX RGBA to NDL/H.264")) {
+        if (same_owner && native_note_graphics_path_switch(app, slot, "from native RemoteFX RGBA to NDL video")) {
             return;
         }
     }
     if (app->video && (app->video_owner_slot != slot->index ||
-                       app->video_owner_epoch != atomic_load(&slot->connect_epoch))) {
+                       app->video_owner_epoch != atomic_load(&slot->connect_epoch) ||
+                       native_video_codec(app->video) != slot->video_codec)) {
         /* Keep the old picture until the new decoder owner supplies a keyframe. */
         if (!decoder_seed) {
             unsigned waited = atomic_fetch_add(&slot->keyframe_wait_drops, 1u) + 1u;
@@ -222,8 +231,9 @@ void native_video_ingest_au_locked(NativeSessionSlot *slot, const uint8_t *data,
         }
         atomic_store(&slot->keyframe_wait_drops, 0u);
         if (desktop_width == native_video_width(app->video) &&
-            desktop_height == native_video_height(app->video)) {
-            /* SPS/PPS + IDR allow in-band handoff without reloading the shared audio pipeline. */
+            desktop_height == native_video_height(app->video) &&
+            slot->video_codec == native_video_codec(app->video)) {
+            /* A decoder seed permits in-band handoff only within the same codec. */
             clog(cLogLevelNotice, "handing the video decoder to the %s session in-band (%ux%u)",
                  native_session_slot_name(slot->index), (unsigned)desktop_width,
                  (unsigned)desktop_height);
@@ -255,14 +265,14 @@ void native_video_ingest_au_locked(NativeSessionSlot *slot, const uint8_t *data,
         if (media) {
             /* Attach audio before video to load both tracks once, at the keyframe. */
             native_open_speculative_audio_locked(app);
-            app->video = native_video_open(media, desktop_width, desktop_height, slot->config.fps);
+            app->video = native_video_open(media, desktop_width, desktop_height, slot->config.fps, slot->video_codec);
             if (app->video) {
                 clog(cLogLevelInfo,
-                     "%s video decoder opened: NDL H.264 %ux%u epoch=%u AU=%zu bytes NALs=%zu IDR=%d SPS=%d PPS=%d framing=%s",
-                     native_session_slot_name(slot->index), (unsigned)desktop_width, (unsigned)desktop_height,
-                     atomic_load(&slot->connect_epoch), len, h264_info.nal_count, h264_info.has_idr,
-                     h264_info.has_sps, h264_info.has_pps,
-                     h264_info.starts_with_annexb_start_code ? "Annex-B" : "AVC-length-prefixed");
+                     "%s video decoder opened: NDL %s %ux%u epoch=%u AU=%zu bytes seed=%d",
+                     native_session_slot_name(slot->index),
+                     slot->video_codec == NATIVE_VIDEO_CODEC_H265 ? "HEVC" : "H.264",
+                     (unsigned)desktop_width, (unsigned)desktop_height,
+                     atomic_load(&slot->connect_epoch), len, decoder_seed);
                 app->video_owner_slot = slot->index;
                 app->video_owner_epoch = atomic_load(&slot->connect_epoch);
             }
@@ -316,17 +326,37 @@ void native_video_ingest_au_locked(NativeSessionSlot *slot, const uint8_t *data,
                                 rdp_state_exit_code(RDP_STATE_DECODER_ERROR));
 }
 
-void native_video_ingest_au(NativeSessionSlot *slot, const uint8_t *data, size_t len, uint64_t pts90k) {
+void native_video_ingest_au(NativeSessionSlot *slot, NativeVideoCodec codec, const uint8_t *data, size_t len,
+                           uint64_t pts90k) {
     if (!slot) {
         return;
     }
     pthread_mutex_lock(&slot->app->video_lock);
+    if (slot->video_codec != codec) {
+        /* A cached delta chain belongs to one codec, even within the same connection. */
+        if (slot->snapshot.armed) {
+            (void)native_au_snapshot_arm(&slot->snapshot);
+        }
+        atomic_store(&slot->snapshot_idr_ready, false);
+        slot->video_codec = codec;
+        slot->video_seen = false;
+    }
     native_video_ingest_au_locked(slot, data, len, pts90k);
     pthread_mutex_unlock(&slot->app->video_lock);
 }
 
-static void on_video_au(void *ctx, const uint8_t *data, size_t len, uint64_t pts90k) {
-    native_video_ingest_au((NativeSessionSlot *)ctx, data, len, pts90k);
+static void on_video_au(void *ctx, uint32_t codec, const uint8_t *data, size_t len, uint64_t pts90k) {
+    NativeSessionSlot *slot = (NativeSessionSlot *)ctx;
+    if (!slot) {
+        return;
+    }
+    if (codec != RDP_VIDEO_CODEC_H264 && codec != RDP_VIDEO_CODEC_H265) {
+        native_slot_report_terminal(slot, RDP_STATE_PROTOCOL_ERROR,
+                                    rdp_state_exit_code(RDP_STATE_PROTOCOL_ERROR));
+        return;
+    }
+    native_video_ingest_au(slot, codec == RDP_VIDEO_CODEC_H265 ? NATIVE_VIDEO_CODEC_H265 : NATIVE_VIDEO_CODEC_H264,
+                           data, len, pts90k);
 }
 
 void native_rdp_install_video_callbacks(RdpCallbacks *callbacks) {

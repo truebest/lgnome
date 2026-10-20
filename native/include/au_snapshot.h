@@ -23,7 +23,7 @@ typedef struct NativeAuSnapshot {
     NativeAuSnapshotEntry entries[NATIVE_AU_SNAPSHOT_MAX_AUS];
     unsigned count;
     bool armed;            /* appends are accepted */
-    bool has_decoder_seed; /* an AU carrying SPS + PPS before IDR seeded the snapshot */
+    bool has_decoder_seed; /* an AU with codec parameter sets before a restart picture */
 } NativeAuSnapshot;
 
 /* Empties the snapshot and (re)allocates the byte buffer; appends are accepted until the

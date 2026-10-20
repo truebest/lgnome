@@ -2,7 +2,7 @@
 
 This runbook tracks the current native-only webOS target. The native app must not fall
 back to a web app, JavaScript service, MSE, WebCodecs, RDCleanPath, or browser rendering.
-AVC420/H.264 is preferred through the in-house NDL DirectMedia backend
+AVC420/H.264 and the private HEVC extension use the in-house NDL DirectMedia backend
 (`backend_ndl`, dlopen of `libNDL_directmedia.so.1`); RemoteFX is supported only as a native
 Rust/IronRDP decode path with RGBA updates presented by SDL.
 
@@ -28,6 +28,26 @@ declarations, so the webOS NDK is not a build dependency. When an official ARM
 target NDK is available, use backend_ndl's separate optional conformance test
 to compare enum values, layouts and signatures; the x86_64 NDK sysroot is
 rejected.
+
+### HEVC extension
+
+NDL builds offer HEVC alongside the existing H.264 capability sets, including the
+Windows V10 thin-client path. This requires our `gnome-remote-desktop` HEVC branch:
+capability version `FRDP_1` (`0x00010000`), flag `0x40000000`, codec ID `0x0002`,
+and an AVC420 metablock followed by an Annex-B HEVC access unit. Ordinary servers
+continue to negotiate the existing codecs. `LGNOME_HEVC=0` withdraws the HEVC offer;
+the default is a platform policy, not a runtime decoder capability probe.
+
+`RdpConfig.enable_hevc` replaces the reserved byte. `on_video_au` now includes a
+`uint32_t codec` after `ctx`, with `RDP_VIDEO_CODEC_H264=0` and
+`RDP_VIDEO_CODEC_H265=1` applying to that exact AU. Rebuild C and Rust together.
+Snapshots retain one codec per slot; a codec change discards the old cached chain.
+Restart AUs must contain VPS/SPS/PPS before an IRAP picture. Switching codecs waits
+for that seed and reopens NDL, even when both sessions have the same resolution.
+
+Host tests and an ARMv7 package build check the transport and decoder boundary.
+They do not establish HEVC playback, 4K60, or mixed-codec switching on a TV; those
+still require a device smoke test with the matching server.
 
 ## Multi-RDP Sessions (red/green/yellow/blue)
 
@@ -298,7 +318,10 @@ the TV remote's color buttons in the remote's own order: red, green, yellow, blu
   resetting, and once it settles the ~6s idle timeout hides the panel as usual. The
   first reading after launch is the baseline, so nothing pops at startup. No mouse or
   keyboard input reaches the RDP session while the panel is up; the grab and the
-  session's cursor shape come back when it closes. Levels are per launch (not persisted), survive reconnects
+  session's cursor shape come back when it closes. Channel levels, mute and solo are
+  saved in each profile (`mixerGainDb`, `mixerMuted`, `mixerSolo`) and restored
+  on launch. Gains use 3 dB steps from -60 (silent) through +6 dB. Fader writes are coalesced until idle, overlay close, or normal app exit; older profiles default to 0 dB, unmuted, and no solo. MASTER remains the
+  webOS system volume. Channel settings survive reconnects
   and source format resets, and disconnected slots show dimmed knobs whose level applies once
   they connect. On the RemoteFX RGBA fallback path the overlay cannot be drawn over the
   stream, so the button keeps its old badge-flash behavior there.
@@ -826,3 +849,21 @@ the compositor, so input takeover and overlay return restore the server's cursor
 artwork before its visibility. A server-requested hide remains in effect. Cursor
 resizing uses premultiplied-alpha area sampling to avoid dark fringes; capped hotspots
 are derived from original geometry to avoid accumulated rounding or saturation.
+
+### Per-profile desktop scale
+
+The profile editor offers 100%, 150%, and 200% beside the desktop resolution.
+`desktopScaleFactor` is saved per profile; older profiles default to 100%.
+Changing scale requires reconnecting. A 3840x2160 Windows session stays at that
+pixel resolution: 150% requests 144 DPI and 200% requests 192 DPI.
+The actual DPI depends on Windows applying the request to the new session.
+
+Scale is sent in GCC Client Core Data and retained in Display Control channel
+creation and RequestRefresh layouts, with device scale fixed at 100 by IronRDP.
+The existing guard against sending a layout when server dimensions already match
+remains in place. Scaling does not change WDDM, codec selection, NDL decoding, or
+pixel-coordinate input mapping.
+
+The C/Rust `RdpConfig` ABI appends `desktop_scale_factor` (uint16/u16): offset 56,
+size 64 on 64-bit hosts; offset 36, size 40 on ARM32. Rebuild C and Rust together.
+Zero at the ABI boundary defaults to 100; other values must be 100, 150, or 200.

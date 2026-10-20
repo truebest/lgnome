@@ -49,7 +49,10 @@ _Static_assert(sizeof(((RdpConfig *)0)->enable_audio_input) == sizeof(uint8_t),
 _Static_assert(sizeof(((RdpConfig *)0)->camera_width) == sizeof(uint16_t),
                "RdpConfig.camera_width must stay uint16_t");
 _Static_assert(sizeof(((RdpCallbacks *)0)->ctx) == sizeof(void *), "RdpCallbacks.ctx must be a pointer");
-typedef void (*ExpectedVideoAuCallback)(void *, const uint8_t *, size_t, uint64_t);
+_Static_assert(RDP_VIDEO_CODEC_H264 == 0, "H.264 codec value changed");
+_Static_assert(RDP_VIDEO_CODEC_H265 == 1, "HEVC codec value changed");
+_Static_assert(sizeof(((RdpConfig *)0)->enable_hevc) == sizeof(uint8_t), "enable_hevc must stay uint8_t");
+typedef void (*ExpectedVideoAuCallback)(void *, uint32_t, const uint8_t *, size_t, uint64_t);
 _Static_assert(_Generic(((RdpCallbacks *)0)->on_video_au, ExpectedVideoAuCallback: 1, default: 0),
                "RdpCallbacks.on_video_au signature changed");
 
@@ -85,11 +88,12 @@ _Static_assert(offsetof(RdpConfig, fps) == 44, "RdpConfig.fps offset changed");
 _Static_assert(offsetof(RdpConfig, prefer_pcm_audio) == 46, "RdpConfig.prefer_pcm_audio offset changed");
 _Static_assert(offsetof(RdpConfig, enable_camera) == 47, "RdpConfig.enable_camera offset changed");
 _Static_assert(offsetof(RdpConfig, enable_audio_input) == 48, "RdpConfig.enable_audio_input offset changed");
-_Static_assert(offsetof(RdpConfig, reserved0) == 49, "RdpConfig.reserved0 offset changed");
+_Static_assert(offsetof(RdpConfig, enable_hevc) == 49, "RdpConfig.enable_hevc offset changed");
 _Static_assert(offsetof(RdpConfig, camera_width) == 50, "RdpConfig.camera_width offset changed");
 _Static_assert(offsetof(RdpConfig, camera_height) == 52, "RdpConfig.camera_height offset changed");
 _Static_assert(offsetof(RdpConfig, camera_fps) == 54, "RdpConfig.camera_fps offset changed");
-_Static_assert(sizeof(RdpConfig) == 56, "RdpConfig size changed");
+_Static_assert(offsetof(RdpConfig, desktop_scale_factor) == 56, "RdpConfig.desktop_scale_factor offset changed");
+_Static_assert(sizeof(RdpConfig) == 64, "RdpConfig size changed");
 
 _Static_assert(offsetof(RdpCallbacks, ctx) == 0, "RdpCallbacks.ctx offset changed");
 _Static_assert(offsetof(RdpCallbacks, on_state) == 8, "RdpCallbacks.on_state offset changed");
@@ -125,11 +129,12 @@ _Static_assert(offsetof(RdpConfig, fps) == 24, "RdpConfig.fps offset changed");
 _Static_assert(offsetof(RdpConfig, prefer_pcm_audio) == 26, "RdpConfig.prefer_pcm_audio offset changed");
 _Static_assert(offsetof(RdpConfig, enable_camera) == 27, "RdpConfig.enable_camera offset changed");
 _Static_assert(offsetof(RdpConfig, enable_audio_input) == 28, "RdpConfig.enable_audio_input offset changed");
-_Static_assert(offsetof(RdpConfig, reserved0) == 29, "RdpConfig.reserved0 offset changed");
+_Static_assert(offsetof(RdpConfig, enable_hevc) == 29, "RdpConfig.enable_hevc offset changed");
 _Static_assert(offsetof(RdpConfig, camera_width) == 30, "RdpConfig.camera_width offset changed");
 _Static_assert(offsetof(RdpConfig, camera_height) == 32, "RdpConfig.camera_height offset changed");
 _Static_assert(offsetof(RdpConfig, camera_fps) == 34, "RdpConfig.camera_fps offset changed");
-_Static_assert(sizeof(RdpConfig) == 36, "RdpConfig size changed");
+_Static_assert(offsetof(RdpConfig, desktop_scale_factor) == 36, "RdpConfig.desktop_scale_factor offset changed");
+_Static_assert(sizeof(RdpConfig) == 40, "RdpConfig size changed");
 
 _Static_assert(offsetof(RdpCallbacks, ctx) == 0, "RdpCallbacks.ctx offset changed");
 _Static_assert(offsetof(RdpCallbacks, on_state) == 4, "RdpCallbacks.on_state offset changed");

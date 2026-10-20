@@ -21,6 +21,7 @@ mod transport;
 pub use abi::{
     RdpCallbacks, RdpConfig, RdpDisconnectReason, RdpLogLevel, RdpState, RDP_AUDIO_CODEC_OPUS,
     RDP_AUDIO_CODEC_PCM_S16LE, RDP_POINTER_STATE_DEFAULT, RDP_POINTER_STATE_HIDDEN,
+    RDP_VIDEO_CODEC_H264, RDP_VIDEO_CODEC_H265,
 };
 use egfx::NativeGfxState;
 pub use ffi::RdpSession;
@@ -57,10 +58,12 @@ struct NativeConfig {
     domain: String,
     width: u16,
     height: u16,
+    desktop_scale_factor: u32,
     fps: u16,
     prefer_pcm_audio: bool,
     enable_camera: bool,
     enable_audio_input: bool,
+    enable_hevc: bool,
     camera_width: u16,
     camera_height: u16,
     camera_fps: u16,
@@ -516,10 +519,12 @@ mod tests {
             domain: String::new(),
             width: 1,
             height: 1,
+            desktop_scale_factor: 100,
             fps: 30,
             prefer_pcm_audio: false,
             enable_camera: false,
             enable_audio_input: false,
+            enable_hevc: false,
             camera_width: 640,
             camera_height: 480,
             camera_fps: 15,

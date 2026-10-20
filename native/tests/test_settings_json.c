@@ -57,6 +57,47 @@ static void test_desktop_size_round_trip(void) {
     assert(s.sessions[0].desktop_width == 1920);
 }
 
+static void test_desktop_scale_profiles(void) {
+    NativeSettings settings = make_defaults();
+    assert(native_settings_apply_json(&settings, "{\"sessions\":[{\"desktopWidth\":3840,\"desktopHeight\":2160}]}", "legacy"));
+    for (int i = 0; i < NATIVE_SETTINGS_MAX_SESSIONS; i++) {
+        assert(settings.sessions[i].desktop_scale_factor == 100);
+    }
+    for (unsigned scale = 100; scale <= 200; scale += 50) {
+        char patch[80];
+        snprintf(patch, sizeof(patch), "{\"desktopScaleFactor\":%u}", scale);
+        char *argv[] = {"lgnome", patch};
+        assert(native_settings_json_has_rdp_key(patch));
+        assert(native_config_apply_launch_params(&settings, 2, argv));
+        assert(settings.sessions[NATIVE_SESSION_SLOT_GREEN].desktop_scale_factor == scale);
+        assert(settings.sessions[NATIVE_SESSION_SLOT_RED].desktop_scale_factor == 100);
+        char *json = NULL;
+        size_t size = 0;
+        FILE *file = open_memstream(&json, &size);
+        assert(file && native_settings_write_json(&settings, file));
+        assert(fclose(file) == 0);
+        NativeSettings loaded = make_defaults();
+        assert(native_settings_apply_json(&loaded, json, "round-trip"));
+        free(json);
+        assert(loaded.sessions[1].desktop_scale_factor == scale);
+        assert(loaded.sessions[1].desktop_width == 3840 && loaded.sessions[1].desktop_height == 2160);
+        NativeSessionConfig old = loaded.sessions[1];
+        old.desktop_scale_factor = scale == 100 ? 150 : 100;
+        assert(native_session_connection_config_changed(&old, &loaded.sessions[1]));
+        assert(!native_session_endpoint_changed(&old, &loaded.sessions[1]));
+    }
+    const char *invalid[] = {"0", "99", "125", "151", "201", "500", "150.5", "null", "\"150\""};
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        NativeSettings before = settings;
+        char patch[96];
+        snprintf(patch, sizeof(patch), "{\"sessions\":[{}, {\"desktopScaleFactor\":%s}]}", invalid[i]);
+        assert(!native_settings_apply_json(&settings, patch, "invalid scale"));
+        assert(memcmp(&settings, &before, sizeof(settings)) == 0);
+    }
+    settings.sessions[1].desktop_scale_factor = 125;
+    assert(!native_config_validate_runtime(&settings));
+}
+
 static void test_deleted_profile_round_trip(void) {
     for (int deleted = 0; deleted < NATIVE_SETTINGS_MAX_SESSIONS; deleted++) {
         NativeSettings s = make_defaults();
@@ -380,6 +421,9 @@ static void test_local_capture_settings(void) {
 }
 
 static void test_has_rdp_key(void) {
+    assert(native_settings_json_has_rdp_key("{\"mixerGainDb\": -12}"));
+    assert(native_settings_json_has_rdp_key("{\"mixerMuted\": true}"));
+    assert(native_settings_json_has_rdp_key("{\"mixerSolo\": true}"));
     NativeSettings s = make_defaults();
     assert(!native_settings_json_has_rdp_key("{ \"unrelated\": 1 }"));
     assert(native_settings_json_has_rdp_key("{ \"sessions\": [] }"));
@@ -409,6 +453,10 @@ static void test_save_load_round_trip(void) {
     s.audio_codec = NATIVE_AUDIO_CODEC_PCM;
     s.sessions[0].duck_mask = 5;
     s.sessions[1].duck_mask = 15;
+    s.sessions[0].mixer_gain_db = -60;
+    s.sessions[0].mixer_muted = true;
+    s.sessions[1].mixer_gain_db = 6;
+    s.sessions[1].mixer_solo = true;
     s.camera_enabled = true;
     (void)snprintf(s.camera_device_id, sizeof(s.camera_device_id),
                    "usb:046d:0943:serial");
@@ -581,7 +629,26 @@ static void test_cli_values_and_selected_slot(void) {
     assert(!native_config_validate(&s, -1));
 }
 
+static void test_mixer_settings_validation(void) {
+    NativeSettings s = make_defaults();
+    assert(native_settings_apply_json(&s, "{\"host\":\"old-server\"}", "legacy"));
+    assert(s.sessions[0].mixer_gain_db == 0);
+    assert(!s.sessions[0].mixer_muted && !s.sessions[0].mixer_solo);
+    const char *invalid[] = {
+        "{\"mixerGainDb\":-61}", "{\"mixerGainDb\":7}",
+        "{\"mixerGainDb\":-59}", "{\"mixerGainDb\":-1}",
+        "{\"mixerGainDb\":1}", "{\"mixerGainDb\":1.5}", "{\"mixerMuted\":1}",
+        "{\"mixerSolo\":\"yes\"}"
+    };
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        NativeSettings before = s;
+        assert(!native_settings_apply_json(&s, invalid[i], "invalid mixer"));
+        assert(memcmp(&s, &before, sizeof(s)) == 0);
+    }
+}
+
 int main(void) {
+    test_mixer_settings_validation();
     test_json_boundaries();
     test_maximum_escaped_round_trip();
     test_cli_values_and_selected_slot();
@@ -590,6 +657,7 @@ int main(void) {
     test_capture_gates_follow_remaining_profiles();
     test_defaults();
     test_desktop_size_round_trip();
+    test_desktop_scale_profiles();
     test_deleted_profile_round_trip();
     test_resolution_changes_require_save_and_reconnect();
     test_legacy_flat_applies_to_green();
