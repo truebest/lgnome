@@ -25,6 +25,7 @@
 #include "native_config_storage.h"
 #include "native_lifecycle.h"
 #include "native_loop.h"
+#include "native_mixer_overlay.h"
 #include "native_rdp_media.h"
 #include "native_rdp_state.h"
 #include "native_session.h"
@@ -144,7 +145,13 @@ int main(int argc, char **argv) {
         atomic_init(&slot->snapshot_idr_ready, false);
         atomic_init(&slot->snapshot_last_au_ms, 0u);
         atomic_init(&slot->video_via_bitmap, false);
-        app.mixer_gain_db[i] = 0;
+        app.mixer_gain_db[i] = (int8_t)native_settings.sessions[i].mixer_gain_db;
+        if (native_settings.sessions[i].mixer_muted) {
+            app.mixer_mute_mask |= (uint8_t)(1u << i);
+        }
+        if (native_settings.sessions[i].mixer_solo) {
+            app.mixer_solo_mask |= (uint8_t)(1u << i);
+        }
         app.duck_mask[i] = (uint8_t)native_settings.sessions[i].duck_mask;
     }
     atomic_init(&app.video_refresh_needed, false);
@@ -162,6 +169,8 @@ int main(int argc, char **argv) {
                 native_audio_pipeline_set_source_gain(
                     &app.audio_pipeline, i,
                     native_ui_mixer_gain_db_to_q15(app.mixer_gain_db[i]));
+                native_audio_pipeline_set_source_muted(
+                    &app.audio_pipeline, i, native_settings.sessions[i].mixer_muted);
             }
             clog(cLogLevelInfo,
                  "miniaudio engine running at 48000Hz stereo, 480-frame blocks");
@@ -189,8 +198,7 @@ int main(int argc, char **argv) {
             native_capture_record_applied(&app, &capture_config);
         }
     }
-    app.mixer_mute_mask = 0;
-    app.mixer_solo_mask = 0;
+    native_publish_effective_solo_mask(&app);
     native_duck_retarget(&app);
     const char *snapshot_force = getenv("LGNOME_SNAPSHOT_FORCE");
     app.snapshot_force = snapshot_force && snapshot_force[0] != '\0' && strcmp(snapshot_force, "0") != 0;
@@ -246,6 +254,9 @@ int main(int argc, char **argv) {
         atomic_store(&app.exit_code, loop_result);
     }
 
+#ifdef LGNOME_TARGET_WEBOS
+    native_mixer_overlay_flush_settings(&app);
+#endif
     native_stop_all_sessions(&app);
     native_capture_redirect_destroy(&app.capture_redirect);
     native_luna_volume_stop(&app.luna_volume);

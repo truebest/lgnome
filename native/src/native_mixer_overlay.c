@@ -32,7 +32,15 @@ void native_mixer_overlay_touch(App *app) {
     app->mixer_overlay_hide_ticks = SDL_GetTicks() + NATIVE_MIXER_OVERLAY_IDLE_HIDE_MS;
 }
 
+void native_mixer_overlay_flush_settings(App *app) {
+    if (app->mixer_settings_dirty && app->settings) {
+        app->mixer_settings_dirty = !native_config_save_persisted(app->settings);
+        app->mixer_settings_save_ticks = SDL_GetTicks() + 1000;
+    }
+}
+
 void native_mixer_overlay_hide(App *app) {
+    native_mixer_overlay_flush_settings(app);
     if (!app->mixer_overlay_visible) {
         return;
     }
@@ -51,6 +59,7 @@ void native_mixer_overlay_hide(App *app) {
     app->mixer_overlay_dismiss_button = 0;
     app->mixer_overlay_dismiss_pending = false;
     app->mixer_overlay_pointer_buttons = 0;
+    app->mixer_overlay_sdl_buttons = 0;
     /* Hand the pointer back to the stream: re-grab and restore the session's cursor —
      * but only while we are actually staying on a live FOCUSED stream. A hide on the way
      * to a configurator or a failure path must not re-grab (those screens own the SDL
@@ -85,6 +94,7 @@ void native_mixer_overlay_force_hide(App *app) {
     app->mixer_overlay_dismiss_button = 0;
     app->mixer_overlay_dismiss_pending = false;
     app->mixer_overlay_pointer_buttons = 0;
+    app->mixer_overlay_sdl_buttons = 0;
     native_mixer_overlay_hide(app);
 }
 
@@ -123,6 +133,7 @@ void native_mixer_overlay_show(App *app) {
      * synthetic ups and clears it): their real release edges arrive through the
      * overlay's SDL handler and must keep blocking the close until then. */
     app->mixer_overlay_pointer_buttons = 0;
+    app->mixer_overlay_sdl_buttons = 0;
     if (app->held_mouse[NATIVE_INPUT_BUTTON_LEFT - 1]) {
         app->mixer_overlay_pointer_buttons |= native_overlay_button_bit(SDL_BUTTON_LEFT);
     }
@@ -167,6 +178,11 @@ void native_mixer_overlay_set_db(App *app, int slot, int gain_db) {
     }
     if (gain_db != (int)app->mixer_gain_db[slot]) {
         app->mixer_gain_db[slot] = (int8_t)gain_db;
+        if (app->settings) {
+            app->settings->sessions[slot].mixer_gain_db = (int16_t)gain_db;
+            app->mixer_settings_dirty = true;
+            app->mixer_settings_save_ticks = SDL_GetTicks() + 300;
+        }
         native_audio_pipeline_set_source_gain(&app->audio_pipeline, slot,
                                               native_ui_mixer_gain_db_to_q15(gain_db));
     }
@@ -182,7 +198,8 @@ void native_mixer_overlay_toggle_duck(App *app, int slot) {
         app->duck_mask[fg] ^= (uint8_t)(1u << slot);
         if (app->settings) {
             app->settings->sessions[fg].duck_mask = app->duck_mask[fg];
-            (void)native_config_save_persisted(app->settings);
+            app->mixer_settings_dirty = true;
+            app->mixer_settings_save_ticks = SDL_GetTicks() + 300;
         }
         native_duck_retarget(app);
         clog(cLogLevelInfo, "duck trigger %s: %s while %s is on screen",
@@ -193,11 +210,16 @@ void native_mixer_overlay_toggle_duck(App *app, int slot) {
 }
 
 /* M plate click: mutes/unmutes that channel in the mix (any session slot, the active
- * one included). Runtime-only — nothing is persisted. */
+ * one included). */
 void native_mixer_overlay_toggle_mute(App *app, int slot) {
     if (slot >= 0 && slot < NATIVE_SETTINGS_MAX_SESSIONS) {
         app->mixer_mute_mask ^= (uint8_t)(1u << slot);
         bool muted = (app->mixer_mute_mask >> slot) & 1u;
+        if (app->settings) {
+            app->settings->sessions[slot].mixer_muted = muted;
+            app->mixer_settings_dirty = true;
+            app->mixer_settings_save_ticks = SDL_GetTicks() + 300;
+        }
         native_audio_pipeline_set_source_muted(&app->audio_pipeline, slot, muted);
         clog(cLogLevelInfo, "%s %s", native_session_slot_name(slot), muted ? "muted" : "unmuted");
     }
@@ -209,6 +231,11 @@ void native_mixer_overlay_toggle_mute(App *app, int slot) {
 void native_mixer_overlay_toggle_solo(App *app, int slot) {
     if (slot >= 0 && slot < NATIVE_SETTINGS_MAX_SESSIONS) {
         app->mixer_solo_mask ^= (uint8_t)(1u << slot);
+        if (app->settings) {
+            app->settings->sessions[slot].mixer_solo = (app->mixer_solo_mask >> slot) & 1u;
+            app->mixer_settings_dirty = true;
+            app->mixer_settings_save_ticks = SDL_GetTicks() + 300;
+        }
         native_publish_effective_solo_mask(app);
         clog(cLogLevelInfo, "solo %s: mask 0x%x", native_session_slot_name(slot),
              (unsigned)app->mixer_solo_mask);
@@ -364,6 +391,10 @@ void native_system_volume_rebaseline(App *app) {
  * detector (optimistic cache updates count as changes) and simply keep the visible
  * overlay alive — same effect as any other interaction. */
 void native_system_volume_tick(App *app) {
+    if (!app->mixer_overlay_dragging &&
+        SDL_TICKS_PASSED(SDL_GetTicks(), app->mixer_settings_save_ticks)) {
+        native_mixer_overlay_flush_settings(app);
+    }
     if (!app->streaming_visible) {
         return; /* the overlay is a streaming-screen surface */
     }

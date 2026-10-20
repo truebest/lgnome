@@ -52,6 +52,12 @@ typedef enum RdpAudioCodec {
     RDP_AUDIO_CODEC_PCM_S16LE = 2
 } RdpAudioCodec;
 
+/* Values shared with RDP_VIDEO_CODEC_* in webrdp-min/src/native/abi.rs. */
+typedef enum RdpVideoCodec {
+    RDP_VIDEO_CODEC_H264 = 0,
+    RDP_VIDEO_CODEC_H265 = 1
+} RdpVideoCodec;
+
 /* Structured logging levels shared with webrdp-min. These values deliberately match
  * the clog severity ordering, but consumers must still map them explicitly so the two
  * interfaces can evolve independently. */
@@ -79,10 +85,13 @@ typedef struct RdpConfig {
     uint8_t prefer_pcm_audio;
     uint8_t enable_camera;
     uint8_t enable_audio_input;
-    uint8_t reserved0;
+    /* Offer the private HEVC extension only when a hardware decoder is available. */
+    uint8_t enable_hevc;
     uint16_t camera_width;
     uint16_t camera_height;
     uint16_t camera_fps;
+    /* 100, 150 or 200 percent; zero-initialized callers default to 100. */
+    uint16_t desktop_scale_factor;
 } RdpConfig;
 
 typedef struct RdpCallbacks {
@@ -95,9 +104,9 @@ typedef struct RdpCallbacks {
     bool (*on_log_enabled)(void *ctx, RdpLogLevel level);
     void (*on_log)(void *ctx, RdpLogLevel level, const char *target, const char *message);
     void (*on_desktop_size)(void *ctx, uint16_t width, uint16_t height);
-    /* Raw AVC420 access unit. The C shell classifies AVC/Annex-B framing and IDR
-     * state from these bytes before routing them to snapshots or the decoder. */
-    void (*on_video_au)(void *ctx, const uint8_t *data, size_t len, uint64_t pts90k);
+    /* codec takes RdpVideoCodec values for this AU. H.264 accepts AVC/Annex-B;
+     * HEVC uses Annex-B. Bytes are valid only during this synchronous callback. */
+    void (*on_video_au)(void *ctx, uint32_t codec, const uint8_t *data, size_t len, uint64_t pts90k);
     void (*on_bitmap_update)(void *ctx, uint16_t surface_id, uint32_t left, uint32_t top, uint32_t width,
                              uint32_t height, uint32_t stride, const uint8_t *rgba, size_t len);
     /* codec takes RdpAudioCodec values. Fired before the first on_audio_data of a stream

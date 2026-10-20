@@ -104,6 +104,19 @@ static void test_credentials_byte_limits(void) {
     text[510]=0; lv_textarea_set_text(ui.password_input,text); assert(ui_form_valid(&ui));
     lv_textarea_set_text(ui.username_input,text); assert(!ui_form_valid(&ui));
     lv_textarea_set_text(ui.username_input,"user"); lv_textarea_set_text(ui.domain_input,text); assert(!ui_form_valid(&ui));
+    lv_textarea_set_text(ui.domain_input, "");
+    ui.desktop_scale_dropdown = lv_dropdown_create(lv_scr_act());
+    lv_dropdown_set_options_static(ui.desktop_scale_dropdown, "100%\n150%\n200%");
+    ui.selected_desktop_width = 3840;
+    ui.selected_desktop_height = 2160;
+    for (uint16_t index = 0; index < 3; index++) {
+        lv_dropdown_set_selected(ui.desktop_scale_dropdown, index);
+        NativeSessionConfig saved;
+        assert(native_preconnect_ui_get_slot_values(&ui, 0, &saved));
+        assert(saved.desktop_scale_factor == 100 + 50 * index);
+        assert(saved.desktop_width == 3840 && saved.desktop_height == 2160);
+    }
+    lv_obj_del(ui.desktop_scale_dropdown);
     lv_obj_del(ui.name_input); lv_obj_del(ui.host_input); lv_obj_del(ui.port_input);
     lv_obj_del(ui.username_input); lv_obj_del(ui.domain_input); lv_obj_del(ui.password_input);
 }

@@ -145,7 +145,7 @@ impl NativeWorker {
             support_dyn_vc_gfx_protocol: true,
             performance_flags: PerformanceFlags::ENABLE_FONT_SMOOTHING
                 | PerformanceFlags::ENABLE_DESKTOP_COMPOSITION,
-            desktop_scale_factor: 0,
+            desktop_scale_factor: self.config.desktop_scale_factor,
             hardware_id: None,
             license_cache: None,
             timezone_info: TimezoneInfo::default(),
@@ -155,7 +155,10 @@ impl NativeWorker {
         let mut drdynvc = DrdynvcClient::new()
             .with_dynamic_channel(
                 GraphicsPipelineClient::new(
-                    Box::new(NativeGfxHandler::new(Arc::clone(&self.gfx))),
+                    Box::new(NativeGfxHandler::new(
+                        Arc::clone(&self.gfx),
+                        self.config.enable_hevc,
+                    )),
                     None,
                 )
                 .with_suspended_frame_acknowledgments(),
@@ -167,6 +170,7 @@ impl NativeWorker {
             .with_typed_listener::<DisplayControlClient, _>(rdpedisp::DisplayControlFactory {
                 width: self.config.width,
                 height: self.config.height,
+                scale: self.config.desktop_scale_factor,
                 sink: self.callbacks,
                 gfx: Arc::clone(&self.gfx),
             });
@@ -392,6 +396,38 @@ impl NativeWorker {
             other => Err(NativeError::protocol(format!(
                 "connector ended in unexpected state {other:?}"
             ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod scale_tests {
+    use super::*;
+    use ironrdp_core::decode;
+    use ironrdp_pdu::{mcs::ConnectInitial, x224::X224};
+
+    #[test]
+    fn gcc_scale_survives_fresh_connectors_and_reconnect() {
+        let (mut worker, _tx) = super::super::tests::test_worker();
+        worker.config.width = 3840;
+        worker.config.height = 2160;
+        for scale in [100, 150, 200] {
+            worker.config.desktop_scale_factor = scale;
+            for _attempt in 0..2 {
+                let mut connector = worker.new_connector("127.0.0.1:3389".parse().unwrap());
+                connector.state = ClientConnectorState::BasicSettingsExchangeSendInitial {
+                    selected_protocol: SecurityProtocol::HYBRID,
+                };
+                let mut output = WriteBuf::new();
+                connector.step(&[], None, &mut output).unwrap();
+                let X224(payload): X224<ironrdp_pdu::x224::X224Data<'_>> =
+                    decode(output.filled()).unwrap();
+                let initial: ConnectInitial = decode(&payload.data).unwrap();
+                let core = &initial.conference_create_request.gcc_blocks().core;
+                assert_eq!((core.desktop_width, core.desktop_height), (3840, 2160));
+                assert_eq!(core.optional_data.desktop_scale_factor, Some(scale));
+                assert_eq!(core.optional_data.device_scale_factor, Some(100));
+            }
         }
     }
 }

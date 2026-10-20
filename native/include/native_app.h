@@ -109,6 +109,7 @@ typedef struct NativeSessionSlot {
     bool refresh_ineffective;
     /* Guarded by video_lock; background worker appends, SDL thread replays and resets. */
     NativeAuSnapshot snapshot;
+    NativeVideoCodec video_codec;
     /* Worker -> SDL thread: the snapshot is seeded with a cached decoder restart AU. */
     atomic_bool snapshot_idr_ready;
     /* SDL thread only: hidden background reconnect in flight for this slot; cleared when
@@ -122,10 +123,10 @@ typedef struct NativeSessionSlot {
     bool snapshot_retry_used;
     /* Worker publishes the graphics path; bitmap streams cannot use AU snapshots. */
     atomic_bool video_via_bitmap;
-    /* video_lock protects the recent-H.264 classification for background slots. */
-    bool h264_seen;
-    uint32_t h264_last_au_ms;
-    unsigned h264_epoch;
+    /* video_lock protects the recent compressed-video classification for background slots. */
+    bool video_seen;
+    uint32_t video_last_au_ms;
+    unsigned video_epoch;
 } NativeSessionSlot;
 
 typedef struct App {
@@ -240,6 +241,9 @@ typedef struct App {
     uint8_t mixer_overlay_dismiss_button;
     /* SDL button bits 1..8; defer overlay close until all buttons are released. */
     uint8_t mixer_overlay_pointer_buttons;
+    uint8_t mixer_overlay_sdl_buttons;
+    bool mixer_settings_dirty;
+    uint32_t mixer_settings_save_ticks;
     bool mixer_overlay_dismiss_pending;
     /* SDL-thread press latch: ignore evdev autorepeat. */
     bool mixer_overlay_ok_held;

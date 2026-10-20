@@ -162,13 +162,16 @@ ends.
   so their (virtual) display should use a known-good standard resolution server-side —
   and note that a headless server's display can revert to its unusual default after a
   service restart.
-- **The native video path presents AVC420 only.** The client requests AVC420 through
+- **The standard native video path presents AVC420.** The client requests AVC420 through
   EGFX V8.1 and also advertises V10 because the tested Windows host enables H.264 only
   for a V10 client. That host sends a self-contained 4:2:0 stream when its AVC444
   prioritization policy is disabled. A server that actually sends the AVC444 auxiliary
   view is not supported correctly (see "Chroma subsampling" below). Servers without a
   usable H.264 encoder fall back to software RemoteFX rendering (slower, and rendered on
   the ~1080p UI plane rather than the native-resolution video plane).
+- **HEVC is experimental.** NDL builds also offer our private HEVC extension, which
+  requires the matching gnome-remote-desktop server branch. TV playback and 4K60 remain
+  unverified; see [HEVC setup and limits](docs/native-runbook.md#hevc-extension).
 - **EGFX surface-composition operations are ignored** (SolidFill, SurfaceToSurface,
   CacheToSurface). Harmless with gnome-remote-desktop — it sends SurfaceToSurface during
   routine AVC420 sessions and the picture is complete since the video plane carries full

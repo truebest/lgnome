@@ -11,6 +11,7 @@
 typedef struct App App;
 
 void native_mixer_overlay_touch(App *app);
+void native_mixer_overlay_flush_settings(App *app);
 void native_mixer_overlay_show(App *app);
 void native_mixer_overlay_hide(App *app);
 void native_mixer_overlay_force_hide(App *app);

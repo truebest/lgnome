@@ -134,9 +134,26 @@ int main(void) {
     assert(stat(pref_path, &st) == 0 && (st.st_mode & 0777) == 0700);
     assert(unlink(discovered) == 0);
     write_text(discovered, "{\"wheelStep\":57}");
-    assert(chmod(discovered, 0666) == 0);
-    assert(native_config_load_persisted(&s, false));
-    assert(s.wheel_step == 46);
+    const mode_t safe_modes[] = {0600, 0644, 0755};
+    for (size_t i = 0; i < sizeof(safe_modes) / sizeof(safe_modes[0]); i++) {
+        assert(chmod(pref_path, 0775) == 0);
+        assert(chmod(discovered, safe_modes[i]) == 0);
+        native_settings_defaults(&s);
+        assert(native_config_load_persisted(&s, false));
+        assert(s.wheel_step == 57);
+        assert(stat(pref_path, &st) == 0 && (st.st_mode & 0777) == 0700);
+        assert(stat(discovered, &st) == 0 && (st.st_mode & 0777) == safe_modes[i]);
+    }
+    const mode_t writable_modes[] = {0620, 0602, 0664, 0666, 0775};
+    for (size_t i = 0; i < sizeof(writable_modes) / sizeof(writable_modes[0]); i++) {
+        assert(chmod(pref_path, 0775) == 0);
+        assert(chmod(discovered, writable_modes[i]) == 0);
+        native_settings_defaults(&s);
+        assert(native_config_load_persisted(&s, false));
+        assert(s.wheel_step == 46);
+        assert(stat(pref_path, &st) == 0 && (st.st_mode & 0777) == 0700);
+        assert(stat(discovered, &st) == 0 && (st.st_mode & 0777) == writable_modes[i]);
+    }
     assert(unlink(discovered) == 0);
 
     s.wheel_step = 47;

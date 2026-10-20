@@ -269,59 +269,65 @@ static void ui_build(NativePreconnectUi *ui, const char *host, uint16_t port, co
     lv_label_set_long_mode(setup_help, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_font(setup_help, &lv_font_ibm_plex_sans_regular_24, 0);
 
-    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 48, 150, 584, "NAME");
-    ui->name_input = native_ui_preconnect_make_input(ui, ui->setup_panel, 48, 174, 584,
+    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 48, 150, 282, "NAME");
+    ui->name_input = native_ui_preconnect_make_input(ui, ui->setup_panel, 48, 174, 282,
                                                      ui->slot_values[ui->selected_slot].name, "e.g. Studio PC",
                                                      UI_NAME_MAX - 1, native_ui_profile_name_accepted_chars(), false);
     lv_obj_add_event_cb(ui->name_input, ui_profile_name_insert, LV_EVENT_INSERT, ui);
-    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 48, 246, 584, "REMOTE COLOUR KEY (FIXED)");
+    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 346, 150, 286, "COLOUR KEY (FIXED)");
     for (int slot = 0; slot < NATIVE_SETTINGS_MAX_SESSIONS; slot++) {
-        ui->color_choices[slot] = native_ui_preconnect_make_box(ui->setup_panel, 48 + slot * 68, 272, 52, 52);
+        ui->color_choices[slot] = native_ui_preconnect_make_box(ui->setup_panel, 346 + slot * 68, 177, 52, 52);
         lv_obj_set_style_bg_color(ui->color_choices[slot], lv_color_hex(native_ui_slot_rgb(slot)), 0);
         lv_obj_set_style_radius(ui->color_choices[slot], 15, 0);
     }
 
-    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 48, 344, 394, "ADDRESS");
-    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 458, 344, 174, "PORT");
-    ui->host_input = native_ui_preconnect_make_input(ui, ui->setup_panel, 48, 368, 394, host, "192.168.1.40",
+    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 48, 248, 394, "ADDRESS");
+    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 458, 248, 174, "PORT");
+    ui->host_input = native_ui_preconnect_make_input(ui, ui->setup_panel, 48, 272, 394, host, "192.168.1.40",
                                                      UI_HOST_MAX - 1, native_ui_host_accepted_chars(), false);
     char port_text[UI_PORT_MAX];
     (void)snprintf(port_text, sizeof(port_text), "%u", (unsigned)port);
-    ui->port_input = native_ui_preconnect_make_input(ui, ui->setup_panel, 458, 368, 174, port_text, "3389",
+    ui->port_input = native_ui_preconnect_make_input(ui, ui->setup_panel, 458, 272, 174, port_text, "3389",
                                                      UI_PORT_MAX - 1, "0123456789", false);
 
-    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 48, 440, 282, "USERNAME");
-    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 346, 440, 286, "DOMAIN (OPTIONAL)");
-    ui->username_input = native_ui_preconnect_make_input(ui, ui->setup_panel, 48, 464, 282, username, "username",
+    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 48, 344, 282, "USERNAME");
+    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 346, 344, 286, "DOMAIN (OPTIONAL)");
+    ui->username_input = native_ui_preconnect_make_input(ui, ui->setup_panel, 48, 368, 282, username, "username",
                                                          UI_USERNAME_MAX - 1, NULL, false);
-    ui->domain_input = native_ui_preconnect_make_input(ui, ui->setup_panel, 346, 464, 286, domain, "optional",
+    ui->domain_input = native_ui_preconnect_make_input(ui, ui->setup_panel, 346, 368, 286, domain, "optional",
                                                        UI_DOMAIN_MAX - 1, NULL, false);
 
-    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 48, 536, 584, "PASSWORD");
-    ui->password_input = native_ui_preconnect_make_input(ui, ui->setup_panel, 48, 560, 584, password, "password",
+    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 48, 440, 584, "PASSWORD");
+    ui->password_input = native_ui_preconnect_make_input(ui, ui->setup_panel, 48, 464, 584, password, "password",
                                                          UI_PASSWORD_TEXT_MAX, NULL, true);
     lv_obj_t *password_help = native_ui_preconnect_make_label(
         ui->setup_panel, "Stored privately on this TV when you save.", &ui->status_style);
-    lv_obj_set_pos(password_help, 48, 624);
+    lv_obj_set_pos(password_help, 48, 528);
 
-    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 48, 668, 170, "FRAME RATE");
-    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 234, 668, 190, "DESKTOP SIZE");
-    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 440, 668, 192, "AUDIO QUALITY");
-    ui->fps_dropdown = native_ui_preconnect_make_dropdown(ui, ui->setup_panel, 170);
+    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 48, 572, 282, "DESKTOP SIZE");
+    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 346, 572, 286, "SCALE");
+    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 48, 668, 282, "FPS");
+    native_ui_preconnect_make_field_label(ui, ui->setup_panel, 346, 668, 286, "AUDIO QUALITY");
+    ui->fps_dropdown = native_ui_preconnect_make_dropdown(ui, ui->setup_panel, 282);
     lv_obj_set_pos(ui->fps_dropdown, 48, 692);
     size_t selected_fps = ui_select_fps_index(ui, fps);
     ui_set_fps_options(ui);
     ui_set_selected_fps(ui, selected_fps);
     lv_obj_add_event_cb(ui->fps_dropdown, ui_fps_changed, LV_EVENT_VALUE_CHANGED, ui);
     lv_obj_add_event_cb(ui->fps_dropdown, native_ui_preconnect_form_key_event, UI_FORM_KEY_EVENT, ui);
-    ui->desktop_dropdown = native_ui_preconnect_make_dropdown(ui, ui->setup_panel, 190);
-    lv_obj_set_pos(ui->desktop_dropdown, 234, 692);
+    ui->desktop_dropdown = native_ui_preconnect_make_dropdown(ui, ui->setup_panel, 282);
+    lv_obj_set_pos(ui->desktop_dropdown, 48, 596);
     ui_set_desktop_options(ui);
     ui_set_selected_desktop(ui, ui_desktop_option_index(desktop_width, desktop_height));
     lv_obj_add_event_cb(ui->desktop_dropdown, ui_desktop_changed, LV_EVENT_VALUE_CHANGED, ui);
     lv_obj_add_event_cb(ui->desktop_dropdown, native_ui_preconnect_form_key_event, UI_FORM_KEY_EVENT, ui);
-    ui->audio_codec_dropdown = native_ui_preconnect_make_dropdown(ui, ui->setup_panel, 192);
-    lv_obj_set_pos(ui->audio_codec_dropdown, 440, 692);
+    ui->desktop_scale_dropdown = native_ui_preconnect_make_dropdown(ui, ui->setup_panel, 286);
+    lv_obj_set_pos(ui->desktop_scale_dropdown, 346, 596);
+    lv_dropdown_set_options_static(ui->desktop_scale_dropdown, "100%\n150%\n200%");
+    lv_obj_add_event_cb(ui->desktop_scale_dropdown, native_ui_preconnect_input_changed, LV_EVENT_VALUE_CHANGED, ui);
+    lv_obj_add_event_cb(ui->desktop_scale_dropdown, native_ui_preconnect_form_key_event, UI_FORM_KEY_EVENT, ui);
+    ui->audio_codec_dropdown = native_ui_preconnect_make_dropdown(ui, ui->setup_panel, 286);
+    lv_obj_set_pos(ui->audio_codec_dropdown, 346, 692);
     lv_dropdown_set_options_static(ui->audio_codec_dropdown, "Auto (Opus)\nLossless PCM");
     lv_dropdown_set_selected(ui->audio_codec_dropdown, audio_codec == NATIVE_AUDIO_CODEC_PCM ? 1 : 0);
     lv_obj_add_event_cb(ui->audio_codec_dropdown, native_ui_preconnect_input_changed, LV_EVENT_VALUE_CHANGED, ui);

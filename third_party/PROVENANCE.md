@@ -21,14 +21,14 @@ and browser WASM bundle were removed and are not runtime dependencies of the nat
 
 - Path: `third_party/IronRDP` (git submodule — lgnome fork)
 - Fork: https://github.com/truebest/IronRDP.
-- Branch: `fix/lgnome-egfx-drop-state-20261011`.
-- Pinned commit: `8bfef9fe62bd9d936ba5f253ed3fd0ccb668b49c`
+- Branch: `feature/hevc-current`.
+- Pinned commit: `9817a298d3dd0c1688e78fa09fdd6b1194646da7`
 - Upstream: https://github.com/Devolutions/IronRDP
 - Upstream base: `1bec1d57f446a7ddef8f26b0c3c644059564cdc2` (2026-09-06).
 - Base commit and fork delta provenance: see `third_party/IronRDP/PROVENANCE.md`.
 - License: MIT OR Apache-2.0; see `third_party/IronRDP/LICENSE-MIT` and
   `third_party/IronRDP/LICENSE-APACHE`
-- Native usage: RDP connector/session/EGFX protocol, AVC420 passthrough hooks, and
+- Native usage: RDP connector/session/EGFX protocol, AVC420/HEVC passthrough hooks, and
   RemoteFX Progressive decode to RGBA bitmap updates for the native renderer.
 
 ## LVGL

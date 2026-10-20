@@ -37,6 +37,7 @@ bool native_session_connection_config_changed(const NativeSessionConfig *before,
            strcmp(before->domain, after->domain) != 0 || before->fps != after->fps ||
            before->desktop_width != after->desktop_width ||
            before->desktop_height != after->desktop_height ||
+           before->desktop_scale_factor != after->desktop_scale_factor ||
            before->camera_redirect != after->camera_redirect ||
            before->audio_input_redirect != after->audio_input_redirect;
 }
@@ -65,6 +66,10 @@ bool native_config_validate_runtime(const NativeSettings *settings) {
     }
     for (int slot = 0; slot < NATIVE_SETTINGS_MAX_SESSIONS; slot++) {
         const NativeSessionConfig *session = &settings->sessions[slot];
+        if (!native_desktop_scale_valid(session->desktop_scale_factor)) {
+            clog(cLogLevelError, "invalid desktop scale in %s profile", native_session_slot_name(slot));
+            ok = false;
+        }
         if (session->port == 0 || session->fps == 0 || session->desktop_width == 0 ||
             session->desktop_height == 0) {
             clog(cLogLevelError, "invalid zero value in %s session config", native_session_slot_name(slot));
