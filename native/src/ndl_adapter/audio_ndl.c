@@ -79,6 +79,9 @@ NativeAudio *native_audio_open(NativeMedia *media, uint32_t codec, uint32_t samp
         .codec = BACKEND_NDL_AUDIO_PCM_S16LE,
         .sample_rate_hz = sample_rate,
         .channels = channels,
+#ifdef LGNOME_TARGET_WEBOS
+        .app_type = BACKEND_NDL_APP_RTC,
+#endif
     };
     /* Reloads the shared pipeline (unload+load with the combined tracks) and primes
      * the PCM sink; a live video track needs a fresh keyframe afterwards. */

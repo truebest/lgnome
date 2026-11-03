@@ -10,7 +10,7 @@ crate-type = ["staticlib"]
 
 [features]
 default = []
-native = ["dep:rustls"]
+native = ["dep:rustls", "dep:webpki-roots"]
 
 [dependencies]
 # Native entropy for CredSSP nonces and TLS helpers.
@@ -35,9 +35,7 @@ ironrdp-connector = { path = "../third_party/IronRDP/crates/ironrdp-connector", 
 ironrdp-session = { path = "../third_party/IronRDP/crates/ironrdp-session", default-features = false }
 ironrdp-egfx = { path = "../third_party/IronRDP/crates/ironrdp-egfx" }
 ironrdp-graphics = { path = "../third_party/IronRDP/crates/ironrdp-graphics" }
-# Audio output: only the public `pdu` module is used; the crate's own client is
-# static-channel rdpsnd, while gnome-remote-desktop speaks MS-RDPEA over the
-# AUDIO_PLAYBACK_DVC dynamic channel (see RdpsndDvcHandler in src/native.rs).
+# Audio output uses the public PDU types with lgnome's native audio handler.
 ironrdp-rdpsnd = { path = "../third_party/IronRDP/crates/ironrdp-rdpsnd" }
 # Display Control DVC (MS-RDPEDISP): the client dictates the server's monitor resolution
 # right after connect, so headless hosts with odd virtual-display defaults (e.g.
@@ -57,6 +55,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["r
 x509-cert = { version = "0.3", default-features = false, features = ["std"] }
 
 # Native-only direct TCP/TLS RDP transport.
+webpki-roots = { version = "1", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"], optional = true }
 
 [profile.release]

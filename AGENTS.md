@@ -10,105 +10,29 @@ GNOME desktops (gnome-remote-desktop) to the TV with hardware-decoded video and 
 mixed audio. It is a C11/CMake shell (`native/`) around a Rust RDP core (`webrdp-min/`),
 linked through a C ABI (`native/include/rdp_ffi.h`).
 
-- **Multi-RDP / HUB**: four RDP session slots map to the remote's red/green/yellow/blue
-  buttons. One slot owns the video plane and KVM-style input at a time; the rest stay
-  connected in the background (graphics suppressed server-side, audio still mixed). The
-  remote's OK button opens the HUB card browser to switch, edit, or connect a slot. See
-  `docs/native-runbook.md` for the full navigation/switching/backgrounding model
-  (deferred switching, IDR-snapshot backgrounding, the audio mixer overlay).
-- **Video**: AVC420/H.264 over RDPEGFX, decoded by the TV hardware video plane via the
-  in-house NDL DirectMedia backend (`backend_ndl`, dlopen of `libNDL_directmedia.so.1`).
-  Servers without H.264 fall back to native RemoteFX/bitmap decoding in Rust,
-  presented as RGBA through SDL. If neither native path works, report a terminal native
-  error — never fall back to Web/MSE/WebCodecs/RDCleanPath or the removed browser app.
-- **Audio**: MS-RDPEA over `AUDIO_PLAYBACK_DVC`; Opus preferred, 16-bit PCM fallback; a
-  headless miniaudio engine mixes all connected slots with adaptive jitter/drift control.
-  Strictly best-effort (failures degrade to silent video, never a dropped session).
-- **Input**: the USB mouse and keyboard are read from grabbed `/dev/input` (evdev,
-  `EVIOCGRAB`) below the compositor; the SDL path is a fallback for the compositor pointer
-  (Magic Remote) only. The grab follows window focus so a webOS overlay (TV menu) stays usable.
-
-Stack: C11 + CMake (native shell, decoder boundary, CTests), Rust 2021 (`webrdp-min`
-`staticlib` + C ABI), pinned git submodules under `third_party/` (`backend_ndl`, IronRDP,
-LVGL, and miniaudio), and the webOS buildroot toolchain + `ares` CLI for packaging. The
-private production NDL ABI lives in `third_party/backend_ndl/src/backend_ndl_window_id_abi.h`;
-an optional host test checks it against an installed official target-NDK header. Libopus
-builds from the own recipe in `native/cmake/ExternalOPUS.cmake`.
+- One session owns video and input; background sessions remain connected with graphics
+  suppressed and audio mixed.
+- Video uses the NDL hardware backend, with native RemoteFX/bitmap decoding through SDL
+  as the fallback. If neither path works, report a terminal native error.
+- Audio is best-effort: failures may silence audio, never drop the RDP session.
+- USB input uses evdev; SDL handles the compositor pointer. Input grabs follow window focus.
 
 ## Key paths
 
-- `native/src/main.c` — bootstrap only: config acquisition, App init, subsystem start, one
-  `native_run_app_loop()` call, teardown. The runtime lives in `native_*` modules sharing
-  `native_app.h` (the App/slot state). Config is split into `native_settings` (model/defaults),
-  `settings_json` (codec), `native_config` (derived values/validation), `native_config_launch`
-  (launch/CLI overrides), and `native_config_storage` (file/persisted settings). The RDP
-  callback boundary is split into the `native_rdp_callbacks` facade plus `native_rdp_state`,
-  `native_rdp_media`, `native_rdp_video`, and `native_rdp_audio`. `native_switch`,
-  `native_hub_actions`, and `native_loop` are thin ordered coordinators; their private sibling
-  modules own recovery/handoff/navigation, HUB request handlers, and loop phase transitions.
-  Other lifecycle/session/input/presentation modules retain the names described below. Shared
-  utils: `native_time.h`, `native_json.c/h` (log-free scanner).
-- `webrdp-min/src/native/` — the Rust worker's sibling modules (`ffi.rs` is the inbound C
-  ABI matched 1:1 against `rdp_ffi.h`; `abi.rs` owns declarations/constants and `sink.rs`
-  the outbound callbacks). `connection`, `active`, and `active_io` own bootstrap and active
-  dispatch; `media_mailbox` owns camera/audio submissions. Protocol modules include `egfx`,
-  `rdpsnd`, `rdpedisp`, `rdpeai`, `logging`, `transport`, `input`, and `dvc`; `rdpecam/` is
-  further split into wire, bridge/lifecycle, enumerator, and device request/channel modules.
-  `native.rs` keeps worker-owned state and top-level retry/session orchestration.
-- `native/include/ui_host.h`, `ui_slot_palette.h`, `ui_profile_name.h`, `ui_fonts.h` — the
-  HUB card browser: layout/navigation, per-slot color palette, profile name editing, and
-  the pre-generated IBM Plex/JetBrains Mono font data.
-- `native/src/input_evdev.c` / `.h` — unified raw `/dev/input` mouse+keyboard reader (grabbed).
-- `native/src/input_sdl.c` / `.h` — RDP fast-path input: window↔desktop coordinate mapping and
-  the Linux-keycode / SDL-scancode → RDP scancode maps.
-- `native/src/cursor_sdl.c` / `.h` — server-driven cursor on the platform cursor plane.
-- `third_party/backend_ndl/` — standalone MIT C11 DirectMedia git submodule: public API, dlopen/symbol table,
-  atomic combined-track state machine, callbacks, host tests, and installable CMake package.
-- `native/include/audio_backend.h`, `media_backend.h`, `video_backend.h` — the adapter
-  interface `ndl_adapter/` implements; a future non-NDL backend would implement these instead.
-- `native/src/ndl_adapter/` (`audio_ndl.c`, `media_ndl.c`, `video_ndl.c`) — lgnome-specific
-  adapters over `backend_ndl`; own RDP codecs, H.264 framing, keyframe recovery, and
-  best-effort audio.
-- `native/src/au_snapshot.c` / `.h` — compressed-AU snapshot cache used to re-enter a
-  backgrounded session's H.264 delta chain without a visible reconnect (IDR-snapshot
-  backgrounding — see the runbook's Multi-RDP section for the trade-offs).
-- `native/include/clog.h`, `native/src/category_log.c` — file-scoped category logging:
-  one `clog_define(...)` per C file that logs, then lowercase `clog(level, ...)` calls.
-- `native/src/rdp_log.c` / `.h` — bridges Rust/IronRDP tracing events into `clog` as the
-  `rdp.rust` category, across the synchronous FFI callback.
-- `native/src/audio_pipeline.c`, `audio_pipeline_source.c`, and the public `.h` — headless
-  miniaudio engine/duck/pump plus the per-source adaptive SPSC, jitter, resampling, and
-  miniaudio data-source state machine. Shared implementation state is private in
-  `audio_pipeline_internal.h`.
-- `native/src/audio_opus.c` / `.h` — Opus decode for RDP audio sources.
-- `native/src/luna_volume.c` / `.h` — webOS Luna-bus (`luna://com.webos.audio`) system
-  volume bridge for the mixer overlay's MASTER fader; polled, since LS2 volume-change
-  subscriptions do not work for a dev-mode app on this device (see the runbook).
-- `native/src/h264_annexb.c` — H.264 framing scanners/conversion (AVC length-prefixed
-  AND Annex-B — grd sends the latter); the only parsers to use for classifying AUs.
-- `native/src/camera_v4l2.c` / `.h` — strict single-plane native-H.264 V4L2 discovery,
-  exact-mode capture, and the separate YUYV-only `--camera-preview` diagnostic.
-- `native/src/camera_h264_stream.c` / `.h` — bounded Annex-B camera AU FIFO, SPS/PPS
-  caching, bounded decoder-seed gating, and sequence/corruption recovery for RDPECAM.
-- `native/src/video_rgba_sdl.c` — RemoteFX/bitmap RGBA surface.
-- `native/src/ui_preconnect.c` and `ui_preconnect_*` siblings — on-TV LVGL pre-connect UI:
-  runtime facade, widget construction, HUB presentation/navigation, profile state machine,
-  capture drawer/model, shared screen navigation, display, theme, and widget helpers.
-- `native/src/capture_redirect.c` plus `capture_camera_worker.c` and
-  `capture_audio_worker.c` — capture lifecycle/orchestration and the independent camera/audio
-  producer workers; private shared state lives in `capture_redirect_internal.h`.
-- `native/src/ui_mixer.c` / `native/include/ui_mixer.h` — the volume-mixer overlay: dBFS
-  faders + live L/R meters (LVGL screen on the preconnect display, plus a raw-SDL fallback
-  and the dB gain model).
-- `native/include/rdp_ffi.h` — the C↔Rust ABI contract.
-- `webrdp-min/src/native.rs` — the Rust session worker (`NativeWorker`); the C ABI itself is `src/native/ffi.rs`.
-- `native/CMakeLists.txt` — native target, options, CTests, webOS package.
-- `docs/native-runbook.md` — build/package/deploy/triage; `docs/build-environment.md` —
-  host/container toolchain setup; `third_party/PROVENANCE.md` and
-  `third_party/IronRDP/PROVENANCE.md` — pinned-dependency provenance and the IronRDP fork delta.
-
-Historical web/browser/Luna trees were removed. Use git history for reference; do not
-reintroduce them.
+- `native/src/main.c` — bootstrap; runtime and session state live in `native_*` modules
+  and `native_app.h`.
+- `webrdp-min/src/native.rs` and `webrdp-min/src/native/` — Rust session worker, RDP
+  protocols and FFI (`ffi.rs`, `abi.rs`, `sink.rs`).
+- `native/include/rdp_ffi.h` — C/Rust ABI contract.
+- `native/src/ndl_adapter/` — application adapters for `third_party/backend_ndl/`.
+- `native/src/audio_pipeline*.c` — audio mixing and per-source buffering.
+- `native/src/ui_preconnect*.c`, `ui_mixer.c` — LVGL UI and mixer.
+- `native/src/input_evdev.c`, `input_sdl.c`, `cursor_sdl.c` — input and cursor handling.
+- `native/src/capture_*.c`, `camera_*.c` — camera and microphone redirection.
+- `native/CMakeLists.txt` — native build, tests and packaging.
+- `docs/native-runbook.md` — runtime behavior, deployment and troubleshooting.
+- `docs/build-environment.md` — toolchain setup; `third_party/PROVENANCE.md` and
+  `third_party/IronRDP/PROVENANCE.md` — dependencies and fork changes.
 
 ## Commands
 
@@ -176,7 +100,7 @@ webOS. Toolchain default
 
 ## Git / release workflow
 
-- Dev history lives in Bitbucket (`origin`, `kodavr/lgnome`); pushes auto-trigger CI on
+- Dev history lives in Bitbucket (`origin`, `kodavr/gnomecast`); pushes auto-trigger CI on
   self-hosted runners. `main` is protected — land changes via `bkt pr` (create → `bkt pr checks
   --wait` → `bkt pr merge`), not direct pushes.
 - GitHub (`truebest/lgnome`) is an append-only, releases-only mirror: one snapshot commit +
@@ -185,6 +109,21 @@ webOS. Toolchain default
   force-push or move tags there.
 - Bump `native/deploy/webos/appinfo.json` `version` for a release. Never add Claude/AI
   attribution trailers to commit messages.
+
+## Bitbucket review follow-up
+
+- Read `bkt pr comments <pr> --json`, verify findings against the code, and test fixes
+  appropriately. Documentation-only changes do not need a full test run.
+- Fetch before pushing: preserve fixes already committed by bots or contributors.
+  Check that the PR is still open before reusing its branch.
+- After pushing a fix, resolve only its addressed comments and verify the API response:
+
+  ```sh
+  bkt api /repositories/<workspace>/<repo>/pullrequests/<pr>/comments/<comment-id>/resolve --method POST
+  ```
+
+- Review and CI are separate: before merging, check new findings on the current head
+  and run `bkt pr checks <pr> --wait`.
 
 ## Do not
 

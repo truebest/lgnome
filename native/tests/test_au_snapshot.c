@@ -33,7 +33,7 @@ static void test_unarmed_and_basic_append(void) {
     fill(idr, sizeof(idr), 1);
     format_nal_au(idr, sizeof(idr), 5);
     /* Unarmed appends are rejected without effect. */
-    assert(!native_au_snapshot_append(&snap, idr, sizeof(idr), true, true, 0));
+    assert(!native_au_snapshot_append(&snap, idr, sizeof(idr), true, true, 0, false));
     assert(snap.count == 0 && snap.buf == NULL);
 
     assert(native_au_snapshot_arm(&snap));
@@ -42,17 +42,17 @@ static void test_unarmed_and_basic_append(void) {
     /* Deltas before the first decoder seed are skipped but do not invalidate. */
     uint8_t delta[8];
     fill(delta, sizeof(delta), 7);
-    assert(native_au_snapshot_append(&snap, delta, sizeof(delta), true, false, 100));
+    assert(native_au_snapshot_append(&snap, delta, sizeof(delta), true, false, 100, false));
     assert(snap.count == 0 && !native_au_snapshot_ready(&snap));
 
     /* Empty pushes are ignored, valid either way. */
-    assert(native_au_snapshot_append(&snap, NULL, 0, false, false, 0));
+    assert(native_au_snapshot_append(&snap, NULL, 0, false, false, 0, false));
     assert(snap.count == 0);
 
     /* A decoder seed starts the snapshot; a delta appends after it. */
-    assert(native_au_snapshot_append(&snap, idr, sizeof(idr), true, true, 200));
+    assert(native_au_snapshot_append(&snap, idr, sizeof(idr), true, true, 200, false));
     assert(native_au_snapshot_ready(&snap));
-    assert(native_au_snapshot_append(&snap, delta, sizeof(delta), true, false, 300));
+    assert(native_au_snapshot_append(&snap, delta, sizeof(delta), true, false, 300, false));
     assert(snap.count == 2 && snap.used == sizeof(idr) + sizeof(delta));
     assert(snap.entries[0].len == sizeof(idr) && snap.entries[0].pts90k == 200);
     assert(snap.entries[1].len == sizeof(delta) && snap.entries[1].pts90k == 300);
@@ -77,13 +77,13 @@ static void test_decoder_seed_restarts(void) {
     format_nal_au(first, sizeof(first), 5);
     format_nal_au(second, sizeof(second), 5);
 
-    assert(native_au_snapshot_append(&snap, first, sizeof(first), true, true, 1));
-    assert(native_au_snapshot_append(&snap, tail, sizeof(tail), true, false, 2));
-    assert(native_au_snapshot_append(&snap, tail, sizeof(tail), true, false, 3));
+    assert(native_au_snapshot_append(&snap, first, sizeof(first), true, true, 1, false));
+    assert(native_au_snapshot_append(&snap, tail, sizeof(tail), true, false, 2, false));
+    assert(native_au_snapshot_append(&snap, tail, sizeof(tail), true, false, 3, false));
     assert(snap.count == 3);
 
     /* A newer decoder seed drops everything before it. */
-    assert(native_au_snapshot_append(&snap, second, sizeof(second), true, true, 4));
+    assert(native_au_snapshot_append(&snap, second, sizeof(second), true, true, 4, false));
     assert(native_au_snapshot_ready(&snap));
     assert(snap.count == 1 && snap.used == sizeof(second));
     assert(snap.entries[0].offset == 0 && snap.entries[0].pts90k == 4);
@@ -102,14 +102,14 @@ static void test_entry_overflow_invalidates(void) {
     format_nal_au(idr, sizeof(idr), 5);
     uint8_t au[4];
     fill(au, sizeof(au), 5);
-    assert(native_au_snapshot_append(&snap, idr, sizeof(idr), true, true, 0));
+    assert(native_au_snapshot_append(&snap, idr, sizeof(idr), true, true, 0, false));
     for (unsigned i = 1; i < NATIVE_AU_SNAPSHOT_MAX_AUS; i++) {
-        assert(native_au_snapshot_append(&snap, au, sizeof(au), true, false, i));
+        assert(native_au_snapshot_append(&snap, au, sizeof(au), true, false, i, false));
     }
     assert(snap.count == NATIVE_AU_SNAPSHOT_MAX_AUS);
 
     /* One entry past the cap voids the snapshot: a partial chain is undecodable. */
-    assert(!native_au_snapshot_append(&snap, au, sizeof(au), true, false, 999));
+    assert(!native_au_snapshot_append(&snap, au, sizeof(au), true, false, 999, false));
     assert(!snap.armed && !native_au_snapshot_ready(&snap) && snap.buf == NULL);
 }
 
@@ -123,18 +123,18 @@ static void test_byte_overflow_invalidates(void) {
     /* A keyframe of exactly the cap fits... */
     assert(native_au_snapshot_arm(&snap));
     format_nal_au(big, NATIVE_AU_SNAPSHOT_MAX_BYTES, 5);
-    assert(native_au_snapshot_append(&snap, big, NATIVE_AU_SNAPSHOT_MAX_BYTES, true, true, 0));
+    assert(native_au_snapshot_append(&snap, big, NATIVE_AU_SNAPSHOT_MAX_BYTES, true, true, 0, false));
     assert(native_au_snapshot_ready(&snap) && snap.used == NATIVE_AU_SNAPSHOT_MAX_BYTES);
     /* ...and the next byte voids the snapshot. */
     uint8_t one = 0xCD;
-    assert(!native_au_snapshot_append(&snap, &one, 1, true, false, 1));
+    assert(!native_au_snapshot_append(&snap, &one, 1, true, false, 1, false));
     assert(!snap.armed && snap.buf == NULL);
 
     /* A delta that would cross the cap voids the snapshot too. */
     assert(native_au_snapshot_arm(&snap));
     format_nal_au(big, NATIVE_AU_SNAPSHOT_MAX_BYTES - 1, 5);
-    assert(native_au_snapshot_append(&snap, big, NATIVE_AU_SNAPSHOT_MAX_BYTES - 1, true, true, 0));
-    assert(!native_au_snapshot_append(&snap, big, 2, true, false, 1));
+    assert(native_au_snapshot_append(&snap, big, NATIVE_AU_SNAPSHOT_MAX_BYTES - 1, true, true, 0, false));
+    assert(!native_au_snapshot_append(&snap, big, 2, true, false, 1, false));
     assert(!snap.armed && snap.buf == NULL);
 
     native_au_snapshot_reset(&snap);
@@ -152,13 +152,13 @@ static void test_seed_and_invalid_verdicts(void) {
     uint8_t sps[12];
     fill(sps, sizeof(sps), 40);
     format_nal_au(sps, sizeof(sps), 7);
-    assert(native_au_snapshot_append(&snap, sps, sizeof(sps), true, false, 1));
+    assert(native_au_snapshot_append(&snap, sps, sizeof(sps), true, false, 1, false));
     assert(snap.count == 0 && !native_au_snapshot_ready(&snap));
 
     /* Unparseable bytes likewise cannot seed when the scanner reported no IDR. */
     uint8_t garbage[16];
     fill(garbage, sizeof(garbage), 0xF0);
-    assert(native_au_snapshot_append(&snap, garbage, sizeof(garbage), false, false, 2));
+    assert(native_au_snapshot_append(&snap, garbage, sizeof(garbage), false, false, 2, false));
     assert(snap.count == 0 && !native_au_snapshot_ready(&snap));
 
     /* An AU classified as carrying SPS + PPS before IDR seeds normally. */
@@ -167,16 +167,16 @@ static void test_seed_and_invalid_verdicts(void) {
     format_nal_au(bundle, 12, 7);                       /* SPS */
     format_nal_au(bundle + 12, 12, 8);                  /* PPS */
     format_nal_au(bundle + 24, sizeof(bundle) - 24, 5); /* IDR */
-    assert(native_au_snapshot_append(&snap, bundle, sizeof(bundle), true, true, 3));
+    assert(native_au_snapshot_append(&snap, bundle, sizeof(bundle), true, true, 3, false));
     assert(snap.count == 1 && native_au_snapshot_ready(&snap));
 
     /* A config-only AU after the seed joins the chain instead of restarting it. */
-    assert(native_au_snapshot_append(&snap, sps, sizeof(sps), true, false, 4));
+    assert(native_au_snapshot_append(&snap, sps, sizeof(sps), true, false, 4, false));
     assert(snap.count == 2 && native_au_snapshot_ready(&snap));
     assert(snap.entries[0].pts90k == 3 && snap.entries[1].pts90k == 4);
 
     /* A malformed AU after the seed breaks the cached delta chain and voids it. */
-    assert(!native_au_snapshot_append(&snap, garbage, sizeof(garbage), false, false, 5));
+    assert(!native_au_snapshot_append(&snap, garbage, sizeof(garbage), false, false, 5, false));
     assert(!snap.armed && snap.buf == NULL && !native_au_snapshot_ready(&snap));
     native_au_snapshot_reset(&snap);
 }

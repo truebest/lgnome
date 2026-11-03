@@ -10,13 +10,6 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 option(LGNOME_LINK_RDP_FFI "Link the Rust RDP FFI static library" OFF)
 option(LGNOME_WITH_NDL "Build the NDL DirectMedia hardware media backend (webOS)" OFF)
 
-# The DirectMedia state machine is a standalone subproject. Only the three
-# NativeMedia/NativeVideo/NativeAudio adapters remain owned by lgnome.
-set(BACKEND_NDL_BUILD_TESTS ${BUILD_TESTING})
-set(BACKEND_NDL_INSTALL OFF)
-add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../third_party/backend_ndl"
-                 "${CMAKE_CURRENT_BINARY_DIR}/backend_ndl")
-
 check_symbol_exists(clock_gettime "time.h" CLOGX_HAVE_CLOCK_GETTIME)
 
 add_library(category-log STATIC src/category_log.c)
@@ -25,8 +18,8 @@ target_compile_definitions(category-log PRIVATE
   $<$<BOOL:${CLOGX_HAVE_CLOCK_GETTIME}>:CLOGX_HAVE_CLOCK_GETTIME=1>
 )
 
-set(LGNOME_LVGL_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/lvgl" CACHE PATH "Path to the pinned LVGL checkout")
-set(LGNOME_MINIAUDIO_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/miniaudio" CACHE PATH "Path to pinned miniaudio sources")
+include(cmake/LvglSdlLine.cmake)
+include(cmake/Miniaudio.cmake)
 
 get_filename_component(LGNOME_C_COMPILER_NAME "${CMAKE_C_COMPILER}" NAME)
 set(LGNOME_TARGET_WEBOS OFF)
@@ -34,10 +27,22 @@ if(LGNOME_C_COMPILER_NAME MATCHES "arm-webos-linux-gnueabi-.*" OR CMAKE_C_COMPIL
   set(LGNOME_TARGET_WEBOS ON)
 endif()
 
+if(LGNOME_TARGET_WEBOS OR BUILD_TESTING)
+  include(cmake/Lvgl.cmake)
+endif()
+
 # Default ON only for product (webOS) builds: ExternalOPUS downloads the libopus source
 # tarball at build time, which would break the documented offline host smoke build.
 # Host test runs opt in with -DLGNOME_WITH_OPUS=ON to cover the audio-opus ctest.
 option(LGNOME_WITH_OPUS "Decode rdpsnd Opus streams in-process for the audio pipeline" ${LGNOME_TARGET_WEBOS})
+
+set(BACKEND_NDL_WITH_GSTREAMER ${LGNOME_TARGET_WEBOS})
+# The DirectMedia state machine is a standalone subproject. Only the three
+# NativeMedia/NativeVideo/NativeAudio adapters remain owned by lgnome.
+set(BACKEND_NDL_BUILD_TESTS ${BUILD_TESTING})
+set(BACKEND_NDL_INSTALL OFF)
+add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../third_party/backend_ndl"
+                 "${CMAKE_CURRENT_BINARY_DIR}/backend_ndl")
 
 if(LGNOME_TARGET_WEBOS)
   if(NOT LGNOME_LINK_RDP_FFI)
@@ -67,11 +72,14 @@ add_executable(lgnome-native
   src/luna_volume.c
   src/webos_platform.c
   src/config_paths.c
+  src/native_diagnostics.c src/native_statistics.c
+  src/native_diagnostics_runtime.c
   src/native_config.c
   src/native_config_launch.c
   src/native_config_storage.c
   src/native_json.c
   src/native_capture_glue.c
+  src/native_hub_actions_certificate.c
   src/native_hub_actions.c
   src/native_hub_actions_connect.c
   src/native_hub_actions_navigation.c
@@ -127,6 +135,7 @@ target_include_directories(lgnome-ndl-adapter
   PRIVATE src/ndl_adapter
 )
 target_compile_definitions(lgnome-ndl-adapter PRIVATE
+  $<$<BOOL:${LGNOME_TARGET_WEBOS}>:LGNOME_TARGET_WEBOS=1>
   $<$<BOOL:${LGNOME_WITH_NDL}>:LGNOME_WITH_NDL=1>
 )
 target_link_libraries(lgnome-ndl-adapter PRIVATE backend_ndl::backend_ndl category-log)
@@ -237,7 +246,7 @@ endif()
 
 if(LGNOME_TARGET_WEBOS)
   if(NOT EXISTS "${LGNOME_LVGL_SOURCE_DIR}/CMakeLists.txt")
-    message(FATAL_ERROR "webOS product builds require initialized LVGL at ${LGNOME_LVGL_SOURCE_DIR}; run git submodule update --init third_party/lvgl")
+    message(FATAL_ERROR "Pinned LVGL sources are missing from ${LGNOME_LVGL_SOURCE_DIR}")
   endif()
 
   set(LV_CONF_PATH "${CMAKE_CURRENT_SOURCE_DIR}/include/lv_conf.h" CACHE STRING "lgnome LVGL config" FORCE)
@@ -245,7 +254,16 @@ if(LGNOME_TARGET_WEBOS)
   set(LV_LVGL_H_INCLUDE_SIMPLE ON CACHE BOOL "Use simple lvgl.h include" FORCE)
   set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build LVGL static for native package" FORCE)
   add_subdirectory("${LGNOME_LVGL_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/third_party/lvgl" EXCLUDE_FROM_ALL)
+  lgnome_lvgl_sdl_line(LGNOME_LVGL_SDL_LINE)
+  get_target_property(LGNOME_LVGL_SOURCES lvgl SOURCES)
+  list(FILTER LGNOME_LVGL_SOURCES EXCLUDE REGEX "/draw/sdl/lv_draw_sdl_line\\.c$")
+  set_property(TARGET lvgl PROPERTY SOURCES ${LGNOME_LVGL_SOURCES} "${LGNOME_LVGL_SDL_LINE}")
+  set_source_files_properties("${LGNOME_LVGL_SDL_LINE}" TARGET_DIRECTORY lvgl PROPERTIES
+    INCLUDE_DIRECTORIES "${LGNOME_LVGL_SOURCE_DIR}/src/draw/sdl")
   target_sources(lgnome-native PRIVATE
+    src/ui_preconnect_statistics.c
+    src/ui_preconnect_certificate.c
+    src/ui_preconnect_statistics_tabs.c
     src/ui_preconnect.c
     src/ui_preconnect_build.c
     src/ui_preconnect_capture.c
@@ -268,6 +286,8 @@ if(LGNOME_TARGET_WEBOS)
     src/fonts/lv_font_ibm_plex_sans_regular_24.c
     src/fonts/lv_font_ibm_plex_sans_regular_20.c
     src/fonts/lv_font_ibm_plex_mono_semibold_28.c
+    src/fonts/lv_font_ibm_plex_mono_semibold_12.c
+    src/fonts/lv_font_ibm_plex_sans_semibold_16.c
     src/fonts/lv_font_ibm_plex_mono_semibold_18.c
     src/fonts/lv_font_ibm_plex_mono_regular_22.c
     src/fonts/lv_font_ibm_plex_mono_regular_22_profile.c
@@ -312,7 +332,7 @@ endif()
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/IronRDP/PROVENANCE.md")
   install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/IronRDP/PROVENANCE.md" DESTINATION licenses RENAME IronRDP_PROVENANCE.md)
 endif()
-if(EXISTS "${LGNOME_LVGL_SOURCE_DIR}/LICENCE.txt")
+if(LGNOME_LVGL_SOURCE_DIR AND EXISTS "${LGNOME_LVGL_SOURCE_DIR}/LICENCE.txt")
   install(FILES "${LGNOME_LVGL_SOURCE_DIR}/LICENCE.txt" DESTINATION licenses RENAME lvgl-MIT.txt)
 endif()
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libevdev-COPYING")
@@ -429,6 +449,7 @@ if(BUILD_TESTING)
     add_test(NAME ui-font-coverage
       COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_ui_font_coverage.py"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/fonts/lv_font_ibm_plex_mono_regular_22_profile.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src/fonts/lv_font_ibm_plex_sans_semibold_16.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/fonts/lv_font_ibm_plex_sans_semibold_24_profile.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/fonts/lv_font_ibm_plex_sans_semibold_40_profile.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/src/fonts/lv_font_ibm_plex_sans_semibold_86_profile.c"
@@ -500,11 +521,14 @@ if(BUILD_TESTING)
   add_test(NAME native-logging COMMAND test-native-logging)
   add_executable(test-native-runtime
     tests/test_native_runtime.c
+    src/native_diagnostics.c src/native_statistics.c
+    src/native_diagnostics_runtime.c
     src/native_input_route.c
     src/native_sdl_events.c
     src/native_streaming_transition.c
     src/native_session_supervisor.c
     src/native_switch_handoff.c
+    src/native_switch.c
     src/native_presentation.c
     src/native_rdp_state.c
     src/native_settings.c
@@ -515,6 +539,20 @@ if(BUILD_TESTING)
   target_link_options(test-native-runtime PRIVATE -Wl,--gc-sections -Wl,--wrap=native_complete_session_switch)
   target_link_libraries(test-native-runtime PRIVATE category-log Threads::Threads)
   add_test(NAME native-runtime COMMAND test-native-runtime)
+  add_executable(test-native-audio-dispatch tests/test_native_audio_dispatch.c
+    src/native_rdp_audio.c src/native_rdp_media.c src/audio_opus.c)
+  target_include_directories(test-native-audio-dispatch PRIVATE include src)
+  target_compile_options(test-native-audio-dispatch PRIVATE -ffunction-sections -fdata-sections)
+  target_link_options(test-native-audio-dispatch PRIVATE -Wl,--gc-sections)
+  target_link_libraries(test-native-audio-dispatch PRIVATE category-log Threads::Threads)
+  add_test(NAME native-audio-dispatch COMMAND test-native-audio-dispatch)
+  set_tests_properties(native-audio-dispatch PROPERTIES TIMEOUT 5)
+  add_executable(test-native-certificate tests/test_native_certificate.c src/native_hub_actions_certificate.c src/native_settings.c)
+  target_include_directories(test-native-certificate PRIVATE tests/support/fake_runtime include src)
+  target_compile_definitions(test-native-certificate PRIVATE LGNOME_TARGET_WEBOS=1)
+  target_link_libraries(test-native-certificate PRIVATE Threads::Threads)
+  add_test(NAME native-certificate COMMAND test-native-certificate)
+
   add_executable(test-mixer-settings tests/test_mixer_settings.c src/native_mixer_overlay.c)
   target_include_directories(test-mixer-settings PRIVATE tests/support/fake_runtime include src)
   target_compile_definitions(test-mixer-settings PRIVATE LGNOME_TARGET_WEBOS=1 _POSIX_C_SOURCE=200809L)
@@ -523,7 +561,7 @@ if(BUILD_TESTING)
   target_link_libraries(test-mixer-settings PRIVATE category-log Threads::Threads)
   add_test(NAME mixer-settings COMMAND test-mixer-settings)
   add_executable(test-native-snapshot-replay
-    tests/test_native_snapshot_replay.c src/native_switch_recovery.c
+    tests/test_native_snapshot_replay.c src/native_switch_recovery.c src/native_switch.c
     src/native_rdp_video.c src/au_snapshot.c src/h264_annexb.c src/hevc_annexb.c)
   target_include_directories(test-native-snapshot-replay PRIVATE tests/support/fake_runtime include src)
   target_compile_definitions(test-native-snapshot-replay PRIVATE LGNOME_TARGET_WEBOS=1 _POSIX_C_SOURCE=200809L)
@@ -555,14 +593,29 @@ if(BUILD_TESTING)
 
   file(GLOB_RECURSE LVGL_TEST_SOURCES "${LGNOME_LVGL_SOURCE_DIR}/src/*.c")
   list(FILTER LVGL_TEST_SOURCES EXCLUDE REGEX "/draw/sdl/")
-  add_executable(test-ui-preconnect-input tests/test_ui_preconnect_input.c src/ui_key_queue.c ${LVGL_TEST_SOURCES})
+  add_executable(test-ui-preconnect-input tests/test_ui_preconnect_input.c src/ui_key_queue.c
+    src/native_diagnostics.c src/native_statistics.c src/native_settings.c src/fonts/lv_font_ibm_plex_mono_regular_22.c src/fonts/lv_font_ibm_plex_mono_regular_22_profile.c src/fonts/lv_font_ibm_plex_sans_semibold_24.c
+    src/fonts/lv_font_ibm_plex_sans_semibold_24_profile.c
+    src/fonts/lv_font_ibm_plex_mono_semibold_12.c
+    src/fonts/lv_font_ibm_plex_sans_semibold_16.c
+    src/fonts/lv_font_ibm_plex_mono_semibold_18.c src/ui_preconnect_certificate.c src/ui_preconnect_widgets.c
+    src/fonts/lv_font_ibm_plex_sans_regular_24.c src/fonts/lv_font_ibm_plex_sans_semibold_40.c
+    src/fonts/lv_font_ibm_plex_sans_semibold_40_profile.c ${LVGL_TEST_SOURCES})
   target_include_directories(test-ui-preconnect-input PRIVATE tests/support/fake_ui include src
     "${LGNOME_LVGL_SOURCE_DIR}" "${LGNOME_LVGL_SOURCE_DIR}/src")
-  target_compile_definitions(test-ui-preconnect-input PRIVATE LGNOME_TARGET_WEBOS=1 LV_CONF_INCLUDE_SIMPLE=1)
+  target_compile_definitions(test-ui-preconnect-input PRIVATE LGNOME_TARGET_WEBOS=1 LV_CONF_INCLUDE_SIMPLE=1 LV_LVGL_H_INCLUDE_SIMPLE=1)
   target_compile_options(test-ui-preconnect-input PRIVATE -ffunction-sections -fdata-sections)
   target_link_options(test-ui-preconnect-input PRIVATE -Wl,--gc-sections)
   target_link_libraries(test-ui-preconnect-input PRIVATE category-log Threads::Threads m)
   add_test(NAME ui-preconnect-input COMMAND test-ui-preconnect-input)
+
+  lgnome_lvgl_sdl_line(LGNOME_LVGL_SDL_LINE)
+  add_executable(test-lvgl-sdl-line tests/test_lvgl_sdl_line.c "${LGNOME_LVGL_SOURCE_DIR}/src/draw/lv_draw_line.c")
+  target_include_directories(test-lvgl-sdl-line PRIVATE tests/support/fake_sdl_line include
+    "${CMAKE_CURRENT_BINARY_DIR}" "${LGNOME_LVGL_SOURCE_DIR}" "${LGNOME_LVGL_SOURCE_DIR}/src/draw/sdl")
+  target_compile_definitions(test-lvgl-sdl-line PRIVATE LV_CONF_INCLUDE_SIMPLE=1 LV_LVGL_H_INCLUDE_SIMPLE=1)
+  target_link_libraries(test-lvgl-sdl-line PRIVATE m)
+  add_test(NAME lvgl-sdl-line COMMAND test-lvgl-sdl-line)
 
   find_package(Python3 COMPONENTS Interpreter REQUIRED)
   add_test(NAME deploy-webos COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/../tools/test-deploy-native-webos.py")
@@ -582,6 +635,13 @@ if(BUILD_TESTING)
   target_link_options(test-native-rdp-video PRIVATE -Wl,--wrap=pthread_mutex_lock)
   target_link_libraries(test-native-rdp-video PRIVATE category-log Threads::Threads)
   add_test(NAME native-rdp-video COMMAND test-native-rdp-video)
+
+  add_executable(test-native-diagnostics tests/test_native_diagnostics.c src/native_diagnostics.c src/native_statistics.c)
+  target_include_directories(test-native-diagnostics PRIVATE include)
+  add_test(NAME native-diagnostics COMMAND test-native-diagnostics)
+  add_executable(test-native-statistics tests/test_native_statistics.c src/native_statistics.c)
+  target_include_directories(test-native-statistics PRIVATE include)
+  add_test(NAME native-statistics COMMAND test-native-statistics)
 
   add_executable(test-native-time tests/test_native_time.c)
   target_include_directories(test-native-time PRIVATE include)
@@ -625,6 +685,12 @@ if(BUILD_TESTING)
   target_include_directories(test-media-ndl-log-level PRIVATE include src/ndl_adapter)
   target_link_libraries(test-media-ndl-log-level PRIVATE backend_ndl::test_support category-log)
   add_test(NAME media-ndl-log-level COMMAND test-media-ndl-log-level)
+
+  add_executable(test-media-decoder-stats tests/test_media_decoder_stats.c)
+  target_compile_definitions(test-media-decoder-stats PRIVATE LGNOME_WITH_NDL=1)
+  target_include_directories(test-media-decoder-stats PRIVATE include src/ndl_adapter)
+  target_link_libraries(test-media-decoder-stats PRIVATE backend_ndl::test_support category-log)
+  add_test(NAME media-decoder-stats COMMAND test-media-decoder-stats)
 
   add_executable(test-ui-mixer-geometry
     tests/test_ui_mixer_geometry.c
@@ -753,3 +819,5 @@ if(BUILD_TESTING)
     endif()
   endforeach()
 endif()
+
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/webpki-roots-LICENSE" DESTINATION licenses)

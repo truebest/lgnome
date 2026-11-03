@@ -1,8 +1,8 @@
 //! Transport primitives: socket timeouts, TLS plumbing, and byte-level
 //! helpers shared by the connect/CredSSP/session read paths.
 //!
-//! Self-signed certificates are accepted; TLS handshake signatures still prove
-//! possession of the presented key used for CredSSP channel binding.
+//! TLS proves possession of the presented key. connection::upgrade_tls checks
+//! server identity and waits for consent before returning a stream to CredSSP.
 
 #![forbid(unsafe_code)]
 
@@ -28,6 +28,7 @@ pub(super) type TlsStream = rustls::StreamOwned<rustls::ClientConnection, Pollin
 
 pub(super) struct PollingSocket {
     pub(super) socket: TcpStream,
+    pub(super) counters: super::network::SocketCounters,
     pub(super) stop: Arc<AtomicBool>,
     pub(super) phase_deadline: Option<Instant>,
     pub(super) write_deadline: Arc<Mutex<Option<Instant>>>,
@@ -47,7 +48,9 @@ impl Read for PollingSocket {
                 "connection phase deadline exceeded",
             ));
         }
-        self.socket.read(bytes)
+        let result = self.socket.read(bytes);
+        self.counters.read_result(&result);
+        result
     }
 }
 
@@ -72,7 +75,9 @@ impl Write for PollingSocket {
             ));
         }
         drop(deadline);
-        self.socket.write(bytes)
+        let result = self.socket.write(bytes);
+        self.counters.write_result(&result);
+        result
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -171,9 +176,9 @@ pub(super) fn install_rustls_provider() {
 }
 
 #[derive(Debug)]
-pub(super) struct NoCertificateVerification;
+pub(super) struct HandshakeSignatureVerifier;
 
-impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
+impl rustls::client::danger::ServerCertVerifier for HandshakeSignatureVerifier {
     fn verify_server_cert(
         &self,
         _: &rustls::pki_types::CertificateDer<'_>,
@@ -315,7 +320,7 @@ mod tests {
             .with_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(cert)));
         let client_config = rustls::ClientConfig::builder_with_protocol_versions(&[version])
             .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
+            .with_custom_certificate_verifier(Arc::new(HandshakeSignatureVerifier))
             .with_no_client_auth();
         let mut server = rustls::ServerConnection::new(Arc::new(server_config)).unwrap();
         let mut client = rustls::ClientConnection::new(
@@ -356,6 +361,7 @@ mod tests {
         let stop = Arc::new(AtomicBool::new(false));
         let deadline = Arc::new(Mutex::new(Some(Instant::now())));
         let mut socket = PollingSocket {
+            counters: Default::default(),
             socket,
             stop: Arc::clone(&stop),
             phase_deadline: None,

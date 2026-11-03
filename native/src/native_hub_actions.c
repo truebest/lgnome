@@ -18,6 +18,7 @@ void native_hub_actions_tick(App *app, NativePreconnectUi *ui, NativeSettings *s
         .ui = ui,
         .settings = settings,
     };
+    if (native_hub_actions_certificate(&context)) return;
     bool handled = native_hub_actions_drain_navigation(&context);
     if (native_hub_actions_drain_profiles(&context)) {
         handled = true;

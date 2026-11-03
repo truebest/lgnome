@@ -25,7 +25,8 @@ pub(super) struct CallbackSink {
 }
 
 // The C shell owns `ctx` and guarantees that it outlives the session. Callbacks are invoked
-// synchronously from the worker thread, and byte/string pointers are valid only for the call.
+// synchronously on the network or serial graphics thread; audio and graphics may overlap.
+// Byte/string pointers are valid only for the call; both workers join before C frees ctx.
 unsafe impl Send for CallbackSink {}
 unsafe impl Sync for CallbackSink {}
 
@@ -48,6 +49,16 @@ impl CallbackSink {
             let detail = cstring_lossy(detail.as_ref());
             cb(self.callbacks.ctx, state, reason, detail.as_ptr());
         }
+    }
+
+    pub(super) fn certificate(&self, fingerprint: &str, reason: &str) -> bool {
+        let Some(cb) = self.callbacks.on_certificate else {
+            return false;
+        };
+        let fingerprint = cstring_lossy(fingerprint);
+        let reason = cstring_lossy(reason);
+        cb(self.callbacks.ctx, fingerprint.as_ptr(), reason.as_ptr());
+        true
     }
 
     pub(super) fn log_enabled(&self, level: RdpLogLevel) -> bool {
@@ -78,9 +89,22 @@ impl CallbackSink {
         }
     }
 
-    pub(super) fn video_au(&self, codec: u32, data: &[u8], pts90k: u64) {
+    pub(super) fn refresh_started(&self, cookie: u32) {
+        if let Some(cb) = self.callbacks.on_refresh_started {
+            cb(self.callbacks.ctx, cookie);
+        }
+    }
+
+    pub(super) fn video_au(&self, codec: u32, flags: u32, data: &[u8], pts90k: u64) {
         if let Some(cb) = self.callbacks.on_video_au {
-            cb(self.callbacks.ctx, codec, data.as_ptr(), data.len(), pts90k);
+            cb(
+                self.callbacks.ctx,
+                codec,
+                flags,
+                data.as_ptr(),
+                data.len(),
+                pts90k,
+            );
         }
     }
     pub(super) fn bitmap_update(&self, update: &NativeBitmapUnit) {
@@ -237,18 +261,19 @@ mod tests {
         extern "C" fn on_video_au(
             ctx: *mut core::ffi::c_void,
             codec: u32,
+            flags: u32,
             data: *const u8,
             len: usize,
             pts90k: u64,
         ) {
-            let seen = unsafe { &*(ctx.cast::<StdMutex<Option<(u32, Vec<u8>, u64)>>>()) };
+            let seen = unsafe { &*(ctx.cast::<StdMutex<Option<(u32, u32, Vec<u8>, u64)>>>()) };
             let bytes = unsafe { core::slice::from_raw_parts(data, len) }.to_vec();
-            *seen.lock().unwrap() = Some((codec, bytes, pts90k));
+            *seen.lock().unwrap() = Some((codec, flags, bytes, pts90k));
         }
 
         let seen = StdMutex::new(None);
         let mut callbacks = CallbackSink::default().callbacks;
-        callbacks.ctx = (&seen as *const StdMutex<Option<(u32, Vec<u8>, u64)>>)
+        callbacks.ctx = (&seen as *const StdMutex<Option<(u32, u32, Vec<u8>, u64)>>)
             .cast_mut()
             .cast();
         callbacks.on_video_au = Some(on_video_au);
@@ -256,11 +281,21 @@ mod tests {
         let au = [0x00, 0x00, 0x01, 0x65, 0x88];
         let pts90k = 0xfedc_ba98_7654_3210;
 
-        sink.video_au(super::super::abi::RDP_VIDEO_CODEC_H265, &au, pts90k);
+        sink.video_au(
+            super::super::abi::RDP_VIDEO_CODEC_H264,
+            super::super::abi::RDP_VIDEO_FLAG_AVC444_AUX,
+            &au,
+            pts90k,
+        );
 
         assert_eq!(
             *seen.lock().unwrap(),
-            Some((super::super::abi::RDP_VIDEO_CODEC_H265, au.to_vec(), pts90k))
+            Some((
+                super::super::abi::RDP_VIDEO_CODEC_H264,
+                super::super::abi::RDP_VIDEO_FLAG_AVC444_AUX,
+                au.to_vec(),
+                pts90k
+            ))
         );
     }
 

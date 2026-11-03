@@ -4,10 +4,11 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::HashMap;
+use super::graphics::{Event, GraphicsQueue};
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
-use super::abi::{RDP_VIDEO_CODEC_H264, RDP_VIDEO_CODEC_H265};
+use super::abi::{RDP_VIDEO_CODEC_H264, RDP_VIDEO_CODEC_H265, RDP_VIDEO_FLAG_AVC444_AUX};
 use super::LOG_TARGET_GRAPHICS;
 use ironrdp_egfx::client::{BitmapUpdate, GraphicsPipelineHandler};
 use ironrdp_egfx::pdu::{
@@ -17,23 +18,25 @@ use ironrdp_egfx::pdu::{
 
 #[derive(Default)]
 pub(super) struct NativeGfxState {
-    pub(super) pending_video: Vec<NativeVideoUnit>,
-    pub(super) pending_bitmap: Vec<NativeBitmapUnit>,
+    pub(super) queue: Arc<GraphicsQueue>,
+    pub(super) frames: VecDeque<(u32, u64, u64)>,
     pub(super) unsupported_graphics: Option<String>,
     // ResetGraphics dimensions, independent of the initial MCS/GCC desktop size.
     pub(super) graphics_width: u32,
     pub(super) graphics_height: u32,
-    pub(super) graphics_size_pending: bool,
     // Add the mapped output origin to surface-local bitmap rectangles.
     pub(super) surface_origins: HashMap<u16, (u32, u32)>,
     pub(super) avc444_aux_frames: u64,
 }
 
+#[derive(Clone)]
 pub(super) struct NativeVideoUnit {
     pub(super) codec: u32,
+    pub(super) flags: u32,
     pub(super) data: Vec<u8>,
 }
 
+#[derive(Clone)]
 pub(super) struct NativeBitmapUnit {
     pub(super) surface_id: u16,
     pub(super) left: u32,
@@ -144,7 +147,7 @@ impl NativeGfxHandler {
 
 impl GraphicsPipelineHandler for NativeGfxHandler {
     fn capabilities(&self) -> Vec<CapabilitySet> {
-        // AVC_THIN_CLIENT requests the YUV420 view; tested Windows hosts need V10 for H.264.
+        // Tested Windows hosts need V10 for H.264; AVC_THIN_CLIENT prefers YUV444.
         let mut caps = vec![
             CapabilitySet::V8 {
                 flags: CapabilitiesV8Flags::SMALL_CACHE,
@@ -167,7 +170,7 @@ impl GraphicsPipelineHandler for NativeGfxHandler {
             );
         }
         tracing::info!(target: LOG_TARGET_GRAPHICS, offered = ?caps,
-            "EGFX offer: hardware video passthrough, native bitmap fallback, no full AVC444 presentation");
+            "EGFX offer: experimental AVC444 main+aux hardware passthrough; no chroma reconstruction");
         caps
     }
 
@@ -189,15 +192,23 @@ impl GraphicsPipelineHandler for NativeGfxHandler {
         self.bitmap_seen = false;
         self.undecodable_since_render = 0;
         if let Ok(mut shared) = self.shared.lock() {
-            shared.pending_video.clear();
-            shared.pending_bitmap.clear();
+            shared.queue.reset(false);
             // ResetGraphics implicitly destroys all surfaces, so any tracked mapping origin is
             // stale afterward.
             shared.surface_origins.clear();
-            if width != shared.graphics_width || height != shared.graphics_height {
-                shared.graphics_width = width;
-                shared.graphics_height = height;
-                shared.graphics_size_pending = true;
+            shared.graphics_width = width;
+            shared.graphics_height = height;
+            if width == 0
+                || height == 0
+                || width > u32::from(u16::MAX)
+                || height > u32::from(u16::MAX)
+                || u64::from(width) * u64::from(height) * 4 > 64 * 1024 * 1024
+            {
+                shared.unsupported_graphics = Some("invalid graphics dimensions".into());
+            } else {
+                shared
+                    .queue
+                    .submit(Event::Desktop(width as u16, height as u16));
             }
         }
     }
@@ -248,7 +259,7 @@ impl GraphicsPipelineHandler for NativeGfxHandler {
             ));
             return;
         }
-        if let Ok(mut shared) = self.shared.lock() {
+        if let Ok(shared) = self.shared.lock() {
             // `destination_rectangle` is surface-local; a surface mapped away from (0,0) via
             // RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU needs that origin added before this lands on the
             // desktop-relative native RGBA canvas.
@@ -257,7 +268,7 @@ impl GraphicsPipelineHandler for NativeGfxHandler {
                 .get(&update.surface_id)
                 .copied()
                 .unwrap_or((0, 0));
-            shared.pending_bitmap.push(NativeBitmapUnit {
+            shared.queue.submit(Event::Bitmap(NativeBitmapUnit {
                 surface_id: update.surface_id,
                 left: u32::from(update.destination_rectangle.left) + origin_x,
                 top: u32::from(update.destination_rectangle.top) + origin_y,
@@ -265,7 +276,7 @@ impl GraphicsPipelineHandler for NativeGfxHandler {
                 height: u32::from(update.height),
                 stride,
                 data: update.data.clone(),
-            });
+            }));
         }
         self.note_rendered_update();
     }
@@ -287,11 +298,8 @@ impl GraphicsPipelineHandler for NativeGfxHandler {
                     "first H.264 YUV420 AU since graphics reset; rectangle is not desktop size; may be AVC444 base view");
                 self.video_seen = true;
             }
-            if let Ok(mut shared) = self.shared.lock() {
-                shared.pending_video.push(NativeVideoUnit {
-                    codec: RDP_VIDEO_CODEC_H264,
-                    data: nal.to_vec(),
-                });
+            if let Ok(shared) = self.shared.lock() {
+                shared.queue.submit_video(RDP_VIDEO_CODEC_H264, 0, nal);
             }
             self.note_rendered_update();
         }
@@ -317,31 +325,46 @@ impl GraphicsPipelineHandler for NativeGfxHandler {
                     "first HEVC AU since graphics reset");
                 self.video_seen = true;
             }
-            if let Ok(mut shared) = self.shared.lock() {
-                shared.pending_video.push(NativeVideoUnit {
-                    codec: RDP_VIDEO_CODEC_H265,
-                    data: nal.to_vec(),
-                });
+            if let Ok(shared) = self.shared.lock() {
+                shared.queue.submit_video(RDP_VIDEO_CODEC_H265, 0, nal);
             }
             self.note_rendered_update();
         }
         true
     }
 
-    // NDL presents every decoded AU; submitting the auxiliary view would display chroma as luma.
-    fn on_avc444_aux_frame(&mut self, _nal: &[u8]) -> bool {
+    // Main and auxiliary pictures share the same H.264 reference chain.
+    fn on_avc444_aux_frame(&mut self, nal: &[u8]) -> bool {
         if let Ok(mut shared) = self.shared.lock() {
             shared.avc444_aux_frames += 1;
-            let dropped_aux = shared.avc444_aux_frames;
-            if dropped_aux == 1 || dropped_aux % 100 == 0 {
+            shared
+                .queue
+                .submit_video(RDP_VIDEO_CODEC_H264, RDP_VIDEO_FLAG_AVC444_AUX, nal);
+            if shared.avc444_aux_frames == 1 {
                 tracing::warn!(
                     target: LOG_TARGET_GRAPHICS,
-                    dropped_aux,
-                    "server sent AVC444; rendering its YUV420 view only, chroma refinement dropped"
+                    "AVC444 experiment: forwarding all main/aux AUs to one decoder in wire order; native output filtering required"
                 );
             }
         }
         true
+    }
+
+    fn on_frame_complete(&mut self, frame_id: u32) {
+        if let Ok(mut shared) = self.shared.lock() {
+            if shared.frames.len() >= 256 {
+                shared.unsupported_graphics = Some("graphics frame boundary overflow".into());
+            } else if let Some((generation, sequence)) = shared.queue.submit(Event::Frame) {
+                shared.frames.push_back((frame_id, generation, sequence));
+            }
+        }
+    }
+
+    fn on_close(&mut self) {
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.queue.reset(false);
+            shared.frames.clear();
+        }
     }
 
     fn wants_avc420_passthrough(&self) -> bool {
@@ -405,6 +428,31 @@ impl GraphicsPipelineHandler for NativeGfxHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auxiliary_aus_retain_wire_order_including_delayed_chroma() {
+        let shared = Arc::new(Mutex::new(NativeGfxState::default()));
+        let mut handler = NativeGfxHandler::new(Arc::clone(&shared), false);
+        handler.on_avc420_frame(0, 0, 0, 16, 16, &[1]);
+        handler.on_avc444_aux_frame(&[2]);
+        handler.on_avc420_frame(0, 0, 0, 16, 16, &[3]);
+        handler.on_avc444_aux_frame(&[4]);
+        handler.on_avc444_aux_frame(&[5]);
+        let state = shared.lock().unwrap();
+        assert_eq!(state.queue.videos().len(), 5);
+        for (index, unit) in state.queue.videos().iter().enumerate() {
+            assert_eq!(unit.codec, RDP_VIDEO_CODEC_H264);
+            assert_eq!(
+                unit.flags,
+                if index == 1 || index >= 3 {
+                    RDP_VIDEO_FLAG_AVC444_AUX
+                } else {
+                    0
+                }
+            );
+            assert_eq!(unit.data, vec![index as u8 + 1]);
+        }
+    }
     use ironrdp_pdu::geometry::ExclusiveRectangle;
 
     #[test]
@@ -463,37 +511,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn reset_graphics_marks_size_pending_once_per_distinct_value() {
-        let mut handler =
-            NativeGfxHandler::new(Arc::new(Mutex::new(NativeGfxState::default())), false);
-
-        // ResetGraphics dimensions may change independently of the initial handshake.
-        handler.on_reset_graphics(3840, 2160);
-        {
-            let shared = handler.shared.lock().unwrap();
-            assert!(shared.graphics_size_pending);
-            assert_eq!(shared.graphics_width, 3840);
-            assert_eq!(shared.graphics_height, 2160);
-        }
-
-        // Repeating the same size should not re-flag it as pending (drain_gfx already
-        // cleared the flag after dispatching it once).
-        {
-            let mut shared = handler.shared.lock().unwrap();
-            shared.graphics_size_pending = false;
-        }
-        handler.on_reset_graphics(3840, 2160);
-        assert!(!handler.shared.lock().unwrap().graphics_size_pending);
-
-        // A genuinely new size must be re-flagged.
-        handler.on_reset_graphics(1920, 1080);
-        let shared = handler.shared.lock().unwrap();
-        assert!(shared.graphics_size_pending);
-        assert_eq!(shared.graphics_width, 1920);
-        assert_eq!(shared.graphics_height, 1080);
-    }
-
     fn undecodable_wire_to_surface1() -> GfxPdu {
         use ironrdp_egfx::pdu::{PixelFormat, WireToSurface1Pdu};
 
@@ -509,6 +526,20 @@ mod tests {
             },
             bitmap_data: vec![0xFF; 16],
         })
+    }
+
+    #[test]
+    fn reset_graphics_invalidates_queued_data_even_at_the_same_size() {
+        let shared = Arc::new(Mutex::new(NativeGfxState::default()));
+        let mut handler = NativeGfxHandler::new(shared.clone(), false);
+        handler.on_reset_graphics(3840, 2160);
+        let generation = shared.lock().unwrap().queue.progress().0;
+        handler.on_avc420_frame(0, 0, 0, 16, 16, &[1]);
+        handler.on_reset_graphics(3840, 2160);
+        let state = shared.lock().unwrap();
+        assert_eq!(state.queue.progress().0, generation + 1);
+        assert!(state.queue.videos().is_empty());
+        assert_eq!((state.graphics_width, state.graphics_height), (3840, 2160));
     }
 
     #[test]
@@ -602,17 +633,17 @@ mod tests {
         ));
 
         let shared = handler.shared.lock().unwrap();
-        assert_eq!(shared.pending_bitmap.len(), 1);
-        assert_eq!(shared.pending_bitmap[0].left, 1920 + 10);
-        assert_eq!(shared.pending_bitmap[0].top, 100 + 20);
+        assert_eq!(shared.queue.bitmaps().len(), 1);
+        assert_eq!(shared.queue.bitmaps()[0].left, 1920 + 10);
+        assert_eq!(shared.queue.bitmaps()[0].top, 100 + 20);
         drop(shared);
 
         // A ResetGraphics implicitly destroys all surfaces; a stale origin must not leak into
         // a later bitmap update on a reused surface id that hasn't been re-mapped.
         handler.on_reset_graphics(3840, 2160);
         {
-            let mut shared = handler.shared.lock().unwrap();
-            shared.pending_bitmap.clear();
+            let shared = handler.shared.lock().unwrap();
+            shared.queue.reset(false);
         }
         handler.on_bitmap_updated(&BitmapUpdate::new(
             7,
@@ -629,8 +660,8 @@ mod tests {
         ));
         {
             let shared = handler.shared.lock().unwrap();
-            assert_eq!(shared.pending_bitmap[0].left, 10);
-            assert_eq!(shared.pending_bitmap[0].top, 20);
+            assert_eq!(shared.queue.bitmaps()[0].left, 10);
+            assert_eq!(shared.queue.bitmaps()[0].top, 20);
         }
 
         // DeleteSurface destroys a single surface the same way; a reused id must start
@@ -638,8 +669,8 @@ mod tests {
         handler.on_surface_mapped(7, 500, 600);
         handler.on_surface_deleted(7);
         {
-            let mut shared = handler.shared.lock().unwrap();
-            shared.pending_bitmap.clear();
+            let shared = handler.shared.lock().unwrap();
+            shared.queue.reset(false);
         }
         handler.on_bitmap_updated(&BitmapUpdate::new(
             7,
@@ -656,14 +687,15 @@ mod tests {
         ));
         let shared = handler.shared.lock().unwrap();
         assert_eq!(
-            shared.pending_bitmap[0].left, 10,
+            shared.queue.bitmaps()[0].left,
+            10,
             "deleted surface's origin must not leak"
         );
-        assert_eq!(shared.pending_bitmap[0].top, 20);
+        assert_eq!(shared.queue.bitmaps()[0].top, 20);
     }
 
     #[test]
-    fn gfx_capabilities_offer_avc420_and_windows_v10_fallback() {
+    fn gfx_capabilities_retain_v10_avc444_preference() {
         let handler = NativeGfxHandler::new(Arc::new(Mutex::new(NativeGfxState::default())), false);
 
         let capabilities = handler.capabilities();
@@ -674,6 +706,12 @@ mod tests {
             }
         );
         assert_eq!(capabilities.len(), 3);
+        assert_eq!(
+            capabilities[2],
+            CapabilitySet::V10_7 {
+                flags: CapabilitiesV107Flags::SMALL_CACHE | CapabilitiesV107Flags::AVC_THIN_CLIENT,
+            }
+        );
         assert!(handler.wants_avc420_passthrough());
     }
 
@@ -690,7 +728,7 @@ mod tests {
         assert!(handler.on_hevc_frame(1, 0, 0, 16, 16, &[0, 0, 1, 38, 1]));
         handler.on_capabilities_confirmed(&fallback[1]);
         assert!(handler.on_avc420_frame(1, 0, 0, 16, 16, &[0, 0, 1, 0x65]));
-        let frames = &shared.lock().unwrap().pending_video;
+        let frames = &shared.lock().unwrap().queue.videos();
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].codec, RDP_VIDEO_CODEC_H265);
         assert_eq!(frames[1].codec, RDP_VIDEO_CODEC_H264);
@@ -708,7 +746,7 @@ mod tests {
             }
             handler.on_hevc_frame(1, 0, 0, 16, 16, &[0, 0, 1, 38, 1]);
             let state = shared.lock().unwrap();
-            assert!(state.pending_video.is_empty());
+            assert!(state.queue.videos().is_empty());
             assert!(state.unsupported_graphics.is_some());
         }
     }

@@ -6,6 +6,8 @@
 #include "native_rdp_callback_parts.h"
 #include "native_rdp_media.h"
 #include "native_rgba_owner.h"
+#include "native_rdp_video.h"
+#include "native_rdp_state.h"
 
 /* Exercise the real callbacks, ownership and RGBA canvas. Only the hardware
  * decoder/media boundary is replaced; successful feed is not a display test. */
@@ -13,6 +15,9 @@ struct NativeVideo {
     uint16_t width;
     uint16_t height;
     NativeVideoCodec codec;
+    unsigned fed_count;
+    uint8_t fed_tags[8];
+    uint8_t fed_output_flags[8];
 };
 
 NativeMedia *native_ensure_media_locked(App *app) {
@@ -28,7 +33,7 @@ NativeVideo *native_video_open(NativeMedia *media, uint16_t width, uint16_t heig
     (void)fps;
     NativeVideo *video = malloc(sizeof(*video));
     assert(video);
-    *video = (NativeVideo){width, height, codec};
+    *video = (NativeVideo){.width = width, .height = height, .codec = codec};
     return video;
 }
 
@@ -38,9 +43,17 @@ void native_video_close(NativeVideo *video) { free(video); }
 uint16_t native_video_width(const NativeVideo *video) { return video->width; }
 uint16_t native_video_height(const NativeVideo *video) { return video->height; }
 
-NativeVideoResult native_video_feed(NativeVideo *video, const uint8_t *data, size_t len, uint64_t pts90k) {
+NativeVideoResult native_video_feed(NativeVideo *video, const uint8_t *data, size_t len, uint64_t pts90k, bool decode_only) {
     (void)pts90k;
     assert(video && data && len);
+    unsigned index = video->fed_count++ % 8;
+    video->fed_tags[index] = data[len - 1];
+    video->fed_output_flags[index] = !decode_only;
+    if (video->codec == NATIVE_VIDEO_CODEC_H264) {
+        for (size_t i = 0; i + 5 <= len; i++) {
+            assert(memcmp(data + i, "\0\0\0\1", 4) || (data[i + 4] & 31u) != 14u);
+        }
+    }
     return NATIVE_VIDEO_OK;
 }
 
@@ -89,7 +102,7 @@ static void teardown(App *app) {
 
 static void video(App *app, int index) {
     static const uint8_t seed[] = {0, 0, 1, 0x67, 1, 0, 0, 1, 0x68, 1, 0, 0, 1, 0x65, 1};
-    callbacks.on_video_au(&app->sessions[index], RDP_VIDEO_CODEC_H264, seed, sizeof(seed), 0);
+    callbacks.on_video_au(&app->sessions[index], RDP_VIDEO_CODEC_H264, 0, seed, sizeof(seed), 0);
 }
 
 static void bitmap(App *app, int index) {
@@ -242,9 +255,11 @@ static void test_hevc_switch_and_snapshot_codec(void) {
                             0, 0, 1, 68, 1, 0, 0, 1, 38, 1};
     NativeSessionSlot *slot = &app.sessions[1];
     atomic_store(&app.active_index, 1);
-    callbacks.on_video_au(slot, RDP_VIDEO_CODEC_H265, delta, sizeof(delta), 0);
+    callbacks.on_video_au(slot, RDP_VIDEO_CODEC_H265, 0, delta, sizeof(delta), 0);
     assert(app.video == previous && native_video_codec(app.video) == NATIVE_VIDEO_CODEC_H264);
-    callbacks.on_video_au(slot, RDP_VIDEO_CODEC_H265, seed, sizeof(seed), 1);
+    callbacks.on_video_au(slot, RDP_VIDEO_CODEC_H265, 0, seed, sizeof(seed), 1);
+    assert(slot->diagnostics.bytes == sizeof(delta) + sizeof(seed));
+    assert(slot->diagnostics.bytes_auxiliary == 0);
     assert(native_video_codec(app.video) == NATIVE_VIDEO_CODEC_H265);
     assert(app.video_owner_slot == 1);
     video(&app, 1);
@@ -253,17 +268,131 @@ static void test_hevc_switch_and_snapshot_codec(void) {
     assert(native_au_snapshot_arm(&slot->snapshot));
     video(&app, 1);
     assert(native_au_snapshot_ready(&slot->snapshot));
-    callbacks.on_video_au(slot, RDP_VIDEO_CODEC_H265, delta, sizeof(delta), 2);
+    callbacks.on_video_au(slot, RDP_VIDEO_CODEC_H265, 0, delta, sizeof(delta), 2);
     assert(!native_au_snapshot_ready(&slot->snapshot));
     assert(!atomic_load(&slot->snapshot_idr_ready));
-    callbacks.on_video_au(slot, RDP_VIDEO_CODEC_H265, seed, sizeof(seed), 3);
+    callbacks.on_video_au(slot, RDP_VIDEO_CODEC_H265, 0, seed, sizeof(seed), 3);
     assert(native_au_snapshot_ready(&slot->snapshot) && slot->snapshot.count == 1);
     assert(slot->video_codec == NATIVE_VIDEO_CODEC_H265);
     native_au_snapshot_reset(&slot->snapshot);
     teardown(&app);
 }
 
+static void test_all_auxiliary_aus_reach_one_decoder_and_snapshot_in_order(void) {
+    App app;
+    setup(&app);
+    NativeSessionSlot *slot = &app.sessions[0];
+    const uint8_t delta[] = {0, 0, 1, 0x41, 2};
+    const uint8_t seed[] = {0, 0, 0, 2, 0x67, 1, 0, 0, 0, 2, 0x68, 1,
+                            0, 0, 0, 2, 0x65, 3};
+    const uint8_t idr[] = {0, 0, 1, 0x65, 4};
+    const uint8_t main_delta[] = {0, 0, 1, 0x41, 5};
+    video(&app, 0);
+    NativeVideo *decoder = app.video;
+    callbacks.on_video_au(slot, RDP_VIDEO_CODEC_H264, RDP_VIDEO_FLAG_AVC444_AUX,
+                          delta, sizeof(delta), 1);
+    assert(atomic_load(&slot->video_ok_frames) == 2);
+    callbacks.on_video_au(slot, RDP_VIDEO_CODEC_H264, RDP_VIDEO_FLAG_AVC444_AUX,
+                          seed, sizeof(seed), 2);
+    callbacks.on_video_au(slot, RDP_VIDEO_CODEC_H264, RDP_VIDEO_FLAG_AVC444_AUX,
+                          idr, sizeof(idr), 3);
+    callbacks.on_video_au(slot, RDP_VIDEO_CODEC_H264, 0, main_delta, sizeof(main_delta), 4);
+    const uint8_t expected[] = {1, 2, 3, 4, 5};
+    assert(app.video == decoder && atomic_load(&slot->video_ok_frames) == 5);
+    assert(decoder->fed_count == sizeof(expected));
+    assert(memcmp(decoder->fed_tags, expected, sizeof(expected)) == 0);
+    const uint8_t outputs[] = {1, 0, 0, 0, 1};
+    assert(!memcmp(decoder->fed_output_flags, outputs, sizeof(outputs)));
+
+    assert(native_au_snapshot_arm(&slot->snapshot));
+    video(&app, 0);
+    callbacks.on_video_au(slot, RDP_VIDEO_CODEC_H264, RDP_VIDEO_FLAG_AVC444_AUX,
+                          seed, sizeof(seed), 4);
+    callbacks.on_video_au(slot, RDP_VIDEO_CODEC_H264, RDP_VIDEO_FLAG_AVC444_AUX,
+                          delta, sizeof(delta), 5);
+    assert(slot->snapshot.count == 2 && native_au_snapshot_ready(&slot->snapshot));
+    assert(slot->snapshot.used == sizeof(seed) + sizeof(delta));
+    callbacks.on_video_au(slot, RDP_VIDEO_CODEC_H264, 0, delta, sizeof(delta), 6);
+    assert(slot->snapshot.count == 3);
+    assert(slot->snapshot.entries[0].decode_only && slot->snapshot.entries[1].decode_only);
+    assert(!slot->snapshot.entries[2].decode_only);
+    NativeAuSnapshot snapshot = slot->snapshot;
+    memset(&slot->snapshot, 0, sizeof(slot->snapshot));
+    for (unsigned i = 0; i < snapshot.count; i++) {
+        NativeAuSnapshotEntry *entry = &snapshot.entries[i];
+        native_video_ingest_au_locked(slot, snapshot.buf + entry->offset, entry->len, entry->pts90k, true, entry->decode_only);
+    }
+    const uint8_t replay_outputs[] = {0, 0, 1};
+    assert(!memcmp(decoder->fed_output_flags + 5, replay_outputs, sizeof(replay_outputs)));
+    native_au_snapshot_reset(&snapshot);
+    native_au_snapshot_reset(&slot->snapshot);
+    teardown(&app);
+}
+
+static void test_refresh_rejects_old_frames_before_matching_ack(void) {
+    for (int snapshot = 0; snapshot < 2; snapshot++) {
+        App app;
+        setup(&app);
+        NativeSessionSlot *slot = &app.sessions[0];
+        if (snapshot) assert(native_au_snapshot_arm(&slot->snapshot));
+        slot->refresh_cookie = 7;
+        slot->refresh_waiting = true;
+        for (uint32_t cookie = 0; cookie < 7; cookie++) {
+            callbacks.on_refresh_started(slot, cookie);
+            video(&app, 0);
+            bitmap(&app, 0);
+            assert(slot->refresh_waiting);
+            assert(!atomic_load(&slot->snapshot_idr_ready));
+            assert(slot->snapshot.count == 0);
+            assert(atomic_load(&slot->video_ok_frames) == 0);
+        }
+        callbacks.on_refresh_started(slot, 7);
+        assert(!slot->refresh_waiting);
+        video(&app, 0);
+        if (snapshot) {
+            assert(native_au_snapshot_ready(&slot->snapshot));
+            assert(atomic_load(&slot->snapshot_idr_ready));
+        } else {
+            assert(atomic_load(&slot->video_ok_frames) == 1);
+        }
+        native_au_snapshot_reset(&slot->snapshot);
+        teardown(&app);
+    }
+}
+
+static void test_diagnostics_separates_auxiliary_and_replay(void) {
+    App app;
+    setup(&app);
+    NativeSessionSlot *slot = &app.sessions[0];
+    static const uint8_t seed[] = {0,0,1,0x67,1,0,0,1,0x68,1,0,0,1,0x65,1};
+    static const uint8_t delta[] = {0,0,1,0x41,1};
+    video(&app, 0);
+    callbacks.on_video_au(slot, RDP_VIDEO_CODEC_H264, RDP_VIDEO_FLAG_AVC444_AUX, delta, sizeof(delta), 1);
+    assert(slot->diagnostics.received == 2 && slot->diagnostics.accepted == 2);
+    assert(slot->diagnostics.received_auxiliary == 1);
+    assert(slot->diagnostics.bytes == sizeof(seed) + sizeof(delta));
+    assert(slot->diagnostics.bytes_auxiliary == sizeof(delta));
+    assert(slot->diagnostics.auxiliary && slot->diagnostics.last_au_ms == now_ms);
+    callbacks.on_video_au(slot, RDP_VIDEO_CODEC_H264, RDP_VIDEO_FLAG_AVC444_AUX, seed, sizeof(seed), 2);
+    assert(slot->diagnostics.received == 3 && slot->diagnostics.accepted == 3);
+    assert(slot->diagnostics.received_auxiliary == 2);
+    pthread_mutex_lock(&app.video_lock);
+    native_video_ingest_au_locked(slot, seed, sizeof(seed), 3, true, false);
+    pthread_mutex_unlock(&app.video_lock);
+    assert(slot->diagnostics.received == 3 && slot->diagnostics.accepted == 3 && slot->diagnostics.replayed == 1);
+    assert(slot->diagnostics.bytes == 2 * sizeof(seed) + sizeof(delta));
+    assert(slot->diagnostics.bytes_auxiliary == sizeof(seed) + sizeof(delta));
+    native_slot_record_state(slot, RDP_STATE_RECONNECTING, RDP_DISCONNECT_NONE);
+    assert(!slot->diagnostics.received && !slot->diagnostics.accepted && !slot->diagnostics.has_au);
+    assert(!slot->diagnostics.received_auxiliary);
+    assert(!slot->diagnostics.bytes && !slot->diagnostics.bytes_auxiliary);
+    teardown(&app);
+}
+
 int main(void) {
+    test_diagnostics_separates_auxiliary_and_replay();
+    test_refresh_rejects_old_frames_before_matching_ack();
+    test_all_auxiliary_aus_reach_one_decoder_and_snapshot_in_order();
     test_refinement_hold_requires_same_slot_and_epoch();
     test_handoffs_do_not_trip_codec_flip_limit();
     test_same_connection_still_limits_codec_flips();

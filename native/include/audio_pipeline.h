@@ -25,6 +25,11 @@ typedef uint32_t (*NativeAudioPipelineClock)(void *ctx);
 
 typedef struct NativeAudioSourceStats {
     bool open;
+    /* Passive counters modulo 2^32; input includes frames rejected on overflow. */
+    uint32_t received_frames;
+    uint32_t output_frames;
+    uint32_t generation;
+    uint32_t input_sample_rate;
     uint32_t queue_ms;
     uint32_t target_delay_ms;
     uint32_t jitter_p95_ms;

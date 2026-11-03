@@ -73,7 +73,7 @@ void native_streaming_transition_tick(App *app, NativePreconnectUi *ui, NativeSe
         app->ui_last_state = state;
     }
     bool hub_connect_ready = app->hub_connect_target == atomic_load(&app->active_index);
-    if (active->rdp && state == (int)RDP_STATE_ACTIVE && !app->streaming_visible &&
+    if (!app->certificate_prompt_active && active->rdp && state == (int)RDP_STATE_ACTIVE && !app->streaming_visible &&
         app->pending_switch_target < 0 && (!app->hub_visible || hub_connect_ready)) {
         clog(cLogLevelDebug, "entering streaming screen for the %s session",
              native_session_slot_name(active->index));
@@ -93,7 +93,7 @@ void native_streaming_transition_tick(App *app, NativePreconnectUi *ui, NativeSe
             active->suppressed = false;
             native_switch_watchdog_baseline(app, active);
             rdp_set_suppress_output(active->rdp, true);
-            rdp_request_refresh(active->rdp);
+            rdp_request_refresh(active->rdp, active->refresh_cookie);
             native_switch_watchdog_start(app, NATIVE_SWITCH_KEYFRAME_TIMEOUT_MS);
         }
         (void)native_config_save_persisted(settings);

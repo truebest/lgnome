@@ -15,6 +15,7 @@ typedef struct NativeAuSnapshotEntry {
     size_t offset; /* into NativeAuSnapshot.buf */
     size_t len;
     uint64_t pts90k;
+    bool decode_only;
 } NativeAuSnapshotEntry;
 
 typedef struct NativeAuSnapshot {
@@ -40,7 +41,7 @@ void native_au_snapshot_reset(NativeAuSnapshot *snap);
  * after a seed voids the cached chain, while one before the seed is skipped. Returns
  * false only when this call voided the snapshot (malformed AU or capacity overflow). */
 bool native_au_snapshot_append(NativeAuSnapshot *snap, const uint8_t *data, size_t len, bool valid_au,
-                               bool decoder_seed, uint64_t pts90k);
+                               bool decoder_seed, uint64_t pts90k, bool decode_only);
 
 /* True when a replay would rebuild decodable state: armed and seeded with a restart AU. */
 bool native_au_snapshot_ready(const NativeAuSnapshot *snap);

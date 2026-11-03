@@ -155,6 +155,7 @@ int main(int argc, char **argv) {
         app.duck_mask[i] = (uint8_t)native_settings.sessions[i].duck_mask;
     }
     atomic_init(&app.video_refresh_needed, false);
+    atomic_init(&app.audio_open_requested, false);
     app.audio_codec = native_settings.audio_codec;
     if (!app.camera_preview) {
         if (!native_audio_pipeline_init(&app.audio_pipeline) ||
