@@ -21,9 +21,33 @@ FILE *__wrap_fopen(const char *path, const char *mode) {
 static unsigned sync_calls;
 static unsigned fail_sync_call;
 static int test_fsync(int fd);
+static int test_lstat(const char *path, struct stat *st);
+static int test_nanosleep(const struct timespec *delay, struct timespec *remaining);
+#define lstat test_lstat
+#define nanosleep test_nanosleep
 #define fsync test_fsync
 #include "../src/native_config_storage.c"
 #undef fsync
+#undef lstat
+#undef nanosleep
+
+static const char *pending_mount;
+static unsigned mount_waits, mount_ready_after;
+static int test_lstat(const char *path, struct stat *st) {
+    int result = lstat(path, st);
+    if (result == 0 && pending_mount && strcmp(path, pending_mount) == 0 &&
+        mount_waits < mount_ready_after) {
+        st->st_uid = 0;
+        st->st_mode = S_IFDIR | 0700;
+    }
+    return result;
+}
+static int test_nanosleep(const struct timespec *delay, struct timespec *remaining) {
+    (void)remaining;
+    assert(delay->tv_sec == 0 && delay->tv_nsec == 100000000);
+    mount_waits++;
+    return 0;
+}
 
 static char pref_path[1024];
 
@@ -187,6 +211,63 @@ int main(void) {
     assert(native_config_load_file(&untouched, high, true));
     assert(untouched.wheel_step == 50);
     fail_sync_call = 0;
+
+    /* Resolve the rooted-TV candidate into the fixture without requiring root. */
+    char rooted_appid[1100];
+    snprintf(rooted_appid, sizeof(rooted_appid), "../..%s/alternate", root);
+    assert(setenv("APPID", rooted_appid, 1) == 0);
+    if (geteuid() != 0) {
+        char mount_path[1200];
+        snprintf(mount_path, sizeof(mount_path), "/var/lib/%s", rooted_appid);
+        pending_mount = mount_path;
+        mount_waits = 0;
+        mount_ready_after = 3;
+        assert(native_config_collect_persisted_candidates(&paths));
+        assert(mount_waits == 3);
+        mount_waits = 0;
+        mount_ready_after = 151;
+        assert(!native_config_load_persisted(&s, false));
+        assert(mount_waits == 150);
+        mount_waits = 0;
+        assert(!native_config_save_persisted(&s));
+        assert(mount_waits == 150);
+        assert(setenv("LGNOME_NATIVE_SETTINGS_PATH", high, 1) == 0);
+        mount_waits = 0;
+        assert(native_config_load_persisted(&s, false));
+        assert(s.wheel_step == 50 && mount_waits == 0);
+        unsetenv("LGNOME_NATIVE_SETTINGS_PATH");
+        pending_mount = NULL;
+    }
+    write_text(low, "{\"wheelStep\":61}");
+    assert(chmod(discovered, 0777) == 0);
+    native_settings_defaults(&s);
+    assert(native_config_load_persisted(&s, false));
+    assert(s.wheel_step == 61);
+    s.wheel_step = 62;
+    assert(native_config_save_persisted(&s));
+    native_settings_defaults(&s);
+    assert(native_config_load_file(&s, low, true));
+    assert(s.wheel_step == 62);
+    assert(stat(alternate_dir, &st) == 0 && (st.st_mode & 0777) == 0700);
+    assert(stat(low, &st) == 0 && (st.st_mode & 0777) == 0600);
+
+    assert(setenv("LGNOME_NATIVE_SETTINGS_PATH", high, 1) == 0);
+    assert(setenv("LGNOME_NATIVE_SETTINGS_DIR", alternate_dir, 1) == 0);
+    native_config_collect_persisted_candidates(&paths);
+    assert(paths.count == 12);
+    assert(strcmp(paths.paths[0], high) == 0);
+    native_settings_defaults(&s);
+    assert(native_config_load_persisted(&s, false));
+    assert(s.wheel_step == 50);
+    unsetenv("LGNOME_NATIVE_SETTINGS_PATH");
+    unsetenv("LGNOME_NATIVE_SETTINGS_DIR");
+
+    assert(chmod(alternate_dir, 0777) == 0);
+    native_config_collect_persisted_candidates(&paths);
+    assert(strcmp(paths.paths[0], discovered) == 0);
+    assert(paths.count == 9);
+    assert(chmod(alternate_dir, 0700) == 0);
+    assert(setenv("APPID", appid, 1) == 0);
 
     assert(unlink(discovered) == 0);
     assert(unlink(private_home) == 0);

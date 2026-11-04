@@ -1,21 +1,18 @@
-//! MS-RDPEDISP resolution requests and layout-based keyframe refresh.
+//! MS-RDPEDISP resolution requests.
 
 #![forbid(unsafe_code)]
 
 use ironrdp_displaycontrol::client::DisplayControlClient;
 use ironrdp_displaycontrol::pdu::{
-    DisplayControlMonitorLayout, DisplayControlPdu, MonitorLayoutEntry,
+    DeviceScaleFactor, DisplayControlMonitorLayout, DisplayControlPdu, MonitorLayoutEntry,
+    MonitorOrientation,
 };
 use std::sync::{Arc, Mutex};
 
-use ironrdp_dvc::{
-    DvcChannelListener, DvcClientProcessor, DvcMessage, DvcProcessor, DynamicChannelId,
-};
-use ironrdp_session::ActiveStage;
-use ironrdp_svc::SvcMessage;
+use ironrdp_dvc::{DvcChannelListener, DvcClientProcessor, DvcMessage, DynamicChannelId};
 
 use super::egfx::NativeGfxState;
-use super::{CallbackSink, NativeError, RdpLogLevel, LOG_TARGET_GRAPHICS};
+use super::{CallbackSink, RdpLogLevel, LOG_TARGET_GRAPHICS};
 
 /// Request the configured resolution when the DVC opens; errors preserve the existing session.
 pub(super) fn make_display_control(
@@ -50,12 +47,19 @@ pub(super) fn make_display_control(
             );
             return Ok(Vec::new());
         }
-        let layout = match DisplayControlMonitorLayout::new_single_primary_monitor(
-            width,
-            height,
-            Some(scale),
-            None,
-        ) {
+        let layout = MonitorLayoutEntry::new_primary(width, height)
+            .and_then(|entry| entry.with_desktop_scale_factor(scale))
+            .map(|entry| {
+                entry
+                    .with_device_scale_factor(DeviceScaleFactor::Scale100Percent)
+                    .with_orientation(if width < height {
+                        MonitorOrientation::Portrait
+                    } else {
+                        MonitorOrientation::Landscape
+                    })
+            })
+            .and_then(|entry| DisplayControlMonitorLayout::new(&[entry]));
+        let layout = match layout {
             Ok(layout) => layout,
             Err(e) => {
                 sink.log(
@@ -100,33 +104,12 @@ impl DvcChannelListener for DisplayControlFactory {
     }
 }
 
-/// Re-encodes the current single-monitor layout for `RequestRefresh`, when the
-/// server opened the display-control channel (mirror-mode grd does not).
-pub(super) fn encode_refresh_layout(
-    active: &mut ActiveStage,
-    width: u16,
-    height: u16,
-    scale: u32,
-) -> Result<Option<Vec<SvcMessage>>, NativeError> {
-    let (width, height) =
-        MonitorLayoutEntry::adjust_display_size(u32::from(width), u32::from(height));
-    match active.get_dvc::<DisplayControlClient>() {
-        Some(dvc) => match (dvc.channel_id(), dvc.processor()) {
-            (channel_id, client) if client.ready() => client
-                .encode_single_primary_monitor(channel_id, width, height, Some(scale), None)
-                .map_err(|e| NativeError::protocol(format!("refresh layout encode: {e}")))
-                .map(Some),
-            _ => Ok(None),
-        },
-        None => Ok(None),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use ironrdp_core::{Decode as _, ReadCursor};
     use ironrdp_displaycontrol::pdu::DisplayControlCapabilities;
+    use ironrdp_dvc::DvcProcessor;
 
     /// Include the DISPLAYCONTROL_HEADER, as sent on the wire.
     fn display_caps_payload(max_num_monitors: u32, factor_a: u32, factor_b: u32) -> Vec<u8> {

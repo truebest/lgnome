@@ -6,6 +6,7 @@
 #ifdef LGNOME_TARGET_WEBOS
 
 #include <SDL.h>
+#include "native_statistics.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -34,6 +35,7 @@ void native_cursor_reassert_for_activity(App *app);
 void native_drain_evdev_input(App *app, SDL_Window *window);
 void native_drain_evdev_mouse(App *app, SDL_Window *window);
 void native_drain_evdev_keyboard(App *app);
+bool native_handle_statistics_key(App *app, NativeStatisticsKey key, bool down, bool repeat);
 void native_wait_for_loop_tick(App *app, uint32_t delay_ms);
 
 #endif

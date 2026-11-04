@@ -48,3 +48,25 @@ void native_settings_defaults(NativeSettings *settings) {
 bool native_desktop_scale_valid(uint16_t scale) {
     return scale == 100 || scale == 150 || scale == 200;
 }
+
+bool native_certificate_fingerprint_valid(const char *sha256) {
+    if (!sha256 || strlen(sha256) != 64) return false;
+    for (const char *p = sha256; *p; ++p) {
+        if (!(*p >= '0' && *p <= '9') && !(*p >= 'a' && *p <= 'f') && !(*p >= 'A' && *p <= 'F')) return false;
+    }
+    return true;
+}
+
+const char *native_session_trusted_certificate(const NativeSessionConfig *session) {
+    const NativeCertificateTrust *trust = &session->certificate_trust;
+    return trust->port == session->port && strcmp(trust->host, session->host) == 0 &&
+                   native_certificate_fingerprint_valid(trust->sha256) ? trust->sha256 : "";
+}
+
+bool native_session_trust_certificate(NativeSessionConfig *session, const char *sha256) {
+    if (!native_certificate_fingerprint_valid(sha256)) return false;
+    memcpy(session->certificate_trust.sha256, sha256, 65);
+    memcpy(session->certificate_trust.host, session->host, sizeof(session->host));
+    session->certificate_trust.port = session->port;
+    return true;
+}

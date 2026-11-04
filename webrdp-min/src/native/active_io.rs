@@ -3,6 +3,8 @@
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::TryRecvError;
 
+use super::graphics::Event;
+use super::graphics_channel::NativeGraphicsChannel;
 use ironrdp_connector::connection_activation::ConnectionActivationState;
 use ironrdp_connector::Sequence as _;
 use ironrdp_core::WriteBuf;
@@ -22,7 +24,7 @@ use super::media_mailbox::{
     CameraSubmission, PendingMediaBatch, PreparedAudioSend, PreparedCameraSend,
 };
 use super::transport::{hex_prefix, TlsStream};
-use super::{rdpedisp, NativeError, NativeWorker, RdpLogLevel};
+use super::{NativeError, NativeWorker, RdpLogLevel};
 
 const MAX_CANVAS_BYTES: u32 = 64 * 1024 * 1024;
 
@@ -201,9 +203,9 @@ impl NativeWorker {
         Ok(())
     }
 
-    fn send_dvc_messages(
+    fn send_dvc_messages<T: std::io::Write>(
         &mut self,
-        tls: &mut TlsStream,
+        tls: &mut T,
         active: &mut ActiveStage,
         channel_id: u32,
         messages: Vec<DvcMessage>,
@@ -275,37 +277,43 @@ impl NativeWorker {
             ControlCommand::SuppressOutput { allow_display } => {
                 self.send_suppress_output(tls, active, full_rect, allow_display)?;
             }
-            ControlCommand::RequestRefresh => {
-                // Layout resubmission forces a grd IDR when Display Control is available; also try Refresh Rect.
-                let layout_messages = rdpedisp::encode_refresh_layout(
-                    active,
-                    width,
-                    height,
-                    self.config.desktop_scale_factor,
-                )?;
-                if let Some(messages) = layout_messages {
-                    let frame = active.encode_dvc_messages(messages).map_err(|e| {
-                        NativeError::protocol(format!("refresh layout DVC encode: {e}"))
+            ControlCommand::RequestRefresh { cookie } => {
+                let reset = active
+                    .get_dvc_mut::<NativeGraphicsChannel>()
+                    .and_then(|mut dvc| {
+                        let channel_id = dvc.channel_id();
+                        dvc.processor_mut()
+                            .request_protocol_reset()
+                            .map(|pdu| (channel_id, pdu))
+                    });
+                if reset.is_some() {
+                    let mut gfx = self.gfx.lock().map_err(|_| {
+                        NativeError::protocol("native graphics state lock poisoned")
                     })?;
-                    self.write_all(tls, &frame, "refresh monitor layout")?;
+                    gfx.queue.reset(false);
+                    gfx.frames.clear();
+                    gfx.surface_origins.clear();
+                    drop(gfx);
+                }
+                self.graphics().submit(Event::Refresh(cookie));
+                if let Some((channel_id, pdu)) = reset {
+                    self.send_dvc_messages(
+                        tls,
+                        active,
+                        channel_id,
+                        vec![Box::new(pdu)],
+                        "graphics reset",
+                    )?;
                     self.callbacks.log(
                         RdpLogLevel::Info,
                         LOG_TARGET_GRAPHICS,
                         format_args!(
-                            "refresh requested: re-submitted monitor layout for a fresh keyframe"
+                            "refresh requested: resetting graphics channel without reconnect"
                         ),
                     );
-                } else {
-                    self.callbacks.log(
-                        RdpLogLevel::Warning,
-                        LOG_TARGET_GRAPHICS,
-                        format_args!(
-                            "refresh requested but the display-control channel is unavailable; \
-                             relying on Refresh Rect only"
-                        ),
-                    );
+                    return Ok(());
                 }
-
+                // Older graphics versions cannot reset; leave the monitor layout alone.
                 let pdu = ShareDataPdu::RefreshRectangle(RefreshRectanglePdu {
                     areas_to_refresh: vec![full_rect],
                 });
@@ -314,6 +322,13 @@ impl NativeWorker {
                     .encode_static(&mut buf, pdu)
                     .map_err(|e| NativeError::protocol(format!("refresh rect encode: {e}")))?;
                 self.write_all(tls, buf.filled(), "refresh rect")?;
+                self.callbacks.log(
+                    RdpLogLevel::Info,
+                    LOG_TARGET_GRAPHICS,
+                    format_args!(
+                        "refresh requested: full desktop rectangle, monitor layout unchanged"
+                    ),
+                );
             }
         }
         Ok(())
@@ -404,8 +419,9 @@ impl NativeWorker {
                         "reactivation offered an unusable static channel chunk size ({static_channel_chunk_size})"
                     )));
                 }
-                self.callbacks
-                    .desktop_size(desktop_size.width, desktop_size.height);
+                self.graphics().reset(false);
+                self.graphics()
+                    .submit(Event::Desktop(desktop_size.width, desktop_size.height));
                 self.write_all(tls, out.filled(), "reactivation finalized")?;
                 self.phase_deadline = None;
                 tls.sock.phase_deadline = None;
@@ -437,41 +453,30 @@ impl NativeWorker {
     }
 
     pub(super) fn drain_gfx(&mut self) -> Result<(), NativeError> {
-        let (video_units, bitmap_units, unsupported_graphics, graphics_size) = match self.gfx.lock()
-        {
-            Ok(mut shared) => {
-                let graphics_size = if shared.graphics_size_pending {
-                    shared.graphics_size_pending = false;
-                    Some((shared.graphics_width, shared.graphics_height))
-                } else {
-                    None
-                };
-                (
-                    std::mem::take(&mut shared.pending_video),
-                    std::mem::take(&mut shared.pending_bitmap),
-                    shared.unsupported_graphics.take(),
-                    graphics_size,
-                )
+        let mut shared = self
+            .gfx
+            .lock()
+            .map_err(|_| NativeError::protocol("graphics state lock poisoned"))?;
+        if let Some(error) = shared.queue.error() {
+            return Err(NativeError::protocol(error));
+        }
+        if let Some(error) = shared.unsupported_graphics.take() {
+            return Err(NativeError::no_avc420(error));
+        }
+        Ok(())
+    }
+
+    pub(super) fn drain_graphics_acks<T: std::io::Write>(
+        &mut self,
+        tls: &mut T,
+        active: &mut ActiveStage,
+    ) -> Result<(), NativeError> {
+        if let Some(mut dvc) = active.get_dvc_mut::<NativeGraphicsChannel>() {
+            let channel_id = dvc.channel_id();
+            let messages = dvc.processor_mut().take_ready();
+            if !messages.is_empty() {
+                self.send_dvc_messages(tls, active, channel_id, messages, "graphics callback ACK")?;
             }
-            Err(_) => return Err(NativeError::protocol("native graphics state lock poisoned")),
-        };
-        if let Some(detail) = unsupported_graphics {
-            return Err(NativeError::no_avc420(detail));
-        }
-        // Dispatched before video/bitmap units so both the ss4s/H.264 and RemoteFX paths
-        // see the server's real graphics output size before processing this batch's frames.
-        if let Some((width, height)) = graphics_size {
-            let width = width.min(u32::from(u16::MAX)) as u16;
-            let height = height.min(u32::from(u16::MAX)) as u16;
-            self.callbacks.desktop_size(width, height);
-        }
-        for unit in bitmap_units {
-            self.callbacks.bitmap_update(&unit);
-        }
-        for unit in video_units {
-            let pts = self.next_pts90k;
-            self.next_pts90k = self.next_pts90k.wrapping_add(self.frame_pts_step.max(1));
-            self.callbacks.video_au(unit.codec, &unit.data, pts);
         }
         Ok(())
     }
@@ -482,50 +487,50 @@ mod tests {
     use super::*;
 
     #[test]
-    fn drain_preserves_codec_per_au_across_a_batch() {
-        use super::super::abi::{RDP_VIDEO_CODEC_H264, RDP_VIDEO_CODEC_H265};
+    fn drain_preserves_codec_and_auxiliary_order_across_a_batch() {
+        use super::super::abi::{
+            RDP_VIDEO_CODEC_H264, RDP_VIDEO_CODEC_H265, RDP_VIDEO_FLAG_AVC444_AUX,
+        };
         use super::super::egfx::NativeVideoUnit;
         use std::sync::Mutex;
 
         extern "C" fn video(
             ctx: *mut core::ffi::c_void,
             codec: u32,
+            flags: u32,
             _data: *const u8,
             _len: usize,
             _pts: u64,
         ) {
-            let seen = unsafe { &*ctx.cast::<Mutex<Vec<u32>>>() };
-            seen.lock().unwrap().push(codec);
+            let seen = unsafe { &*ctx.cast::<Mutex<Vec<(u32, u32)>>>() };
+            seen.lock().unwrap().push((codec, flags));
         }
 
         let (mut worker, _tx) = super::super::tests::test_worker();
-        let seen = Mutex::new(Vec::<u32>::new());
-        worker.callbacks.callbacks.ctx = (&seen as *const Mutex<Vec<u32>>).cast_mut().cast();
+        let seen = Mutex::new(Vec::<(u32, u32)>::new());
+        worker.callbacks.callbacks.ctx = (&seen as *const Mutex<Vec<(u32, u32)>>).cast_mut().cast();
         worker.callbacks.callbacks.on_video_au = Some(video);
-        for codec in [
-            RDP_VIDEO_CODEC_H265,
-            RDP_VIDEO_CODEC_H264,
-            RDP_VIDEO_CODEC_H265,
-        ] {
-            worker
-                .gfx
-                .lock()
-                .unwrap()
-                .pending_video
-                .push(NativeVideoUnit {
+        let sequence = [
+            (RDP_VIDEO_CODEC_H265, 0),
+            (RDP_VIDEO_CODEC_H264, 0),
+            (RDP_VIDEO_CODEC_H264, RDP_VIDEO_FLAG_AVC444_AUX),
+            (RDP_VIDEO_CODEC_H264, 0),
+        ];
+        for (codec, flags) in sequence {
+            worker.gfx.lock().unwrap().queue.submit(Event::Video(
+                NativeVideoUnit {
                     codec,
+                    flags,
                     data: vec![1],
-                });
+                },
+                0,
+            ));
         }
+        let executor = worker.graphics().start(worker.callbacks).unwrap();
         worker.drain_gfx().unwrap();
-        assert_eq!(
-            *seen.lock().unwrap(),
-            [
-                RDP_VIDEO_CODEC_H265,
-                RDP_VIDEO_CODEC_H264,
-                RDP_VIDEO_CODEC_H265
-            ]
-        );
+        assert!(worker.graphics().barrier(std::time::Duration::from_secs(1)));
+        drop(executor);
+        assert_eq!(*seen.lock().unwrap(), sequence);
     }
     use ironrdp_core::decode;
     use ironrdp_pdu::rdp::headers::{ShareControlHeader, ShareControlPdu};
@@ -589,7 +594,7 @@ mod tests {
         }
         assert_eq!(worker.graphics_dimensions(&image).unwrap(), (1920, 1080));
         for control in [
-            ControlCommand::RequestRefresh,
+            ControlCommand::RequestRefresh { cookie: 0 },
             ControlCommand::SuppressOutput {
                 allow_display: true,
             },
@@ -631,7 +636,7 @@ mod tests {
             let mut stage = active_stage();
             let mut image = new_image(1, 1).unwrap();
             stage
-                .process(&mut image, Action::FastPath, &malformed)
+                .process(&mut image, Action::FastPath, &malformed, None)
                 .unwrap();
             let mut wire = Vec::new();
             worker
@@ -646,7 +651,7 @@ mod tests {
             assert_eq!(frames, count);
             wire.clear();
             stage
-                .process(&mut image, Action::FastPath, &malformed)
+                .process(&mut image, Action::FastPath, &malformed, None)
                 .unwrap();
             worker
                 .recover_bitmap(&mut wire, &mut stage, &image)
@@ -656,7 +661,8 @@ mod tests {
     }
 
     #[test]
-    fn refresh_layout_uses_current_egfx_dimensions() {
+    fn refresh_preserves_layout_with_ready_display_control() {
+        use super::super::egfx::{NativeGfxHandler, NativeVideoUnit};
         use ironrdp_core::encode_vec;
         use ironrdp_displaycontrol::{
             client::DisplayControlClient,
@@ -666,16 +672,57 @@ mod tests {
             CreateRequestPdu, DrdynvcClientPdu, DrdynvcDataPdu, DrdynvcServerPdu,
         };
         use ironrdp_dvc::{DrdynvcClient, DvcProcessor};
+        use ironrdp_egfx::pdu::{
+            CapabilitiesConfirmPdu, CapabilitiesV107Flags, CapabilitySet, GfxPdu,
+        };
         use ironrdp_svc::SvcProcessor;
-        for scale in [100, 150, 200] {
+        extern "C" fn on_refresh(ctx: *mut core::ffi::c_void, cookie: u32) {
+            unsafe {
+                *ctx.cast::<u32>() = cookie;
+            }
+        }
+        for (scale, graphics_reset) in [100, 150, 200]
+            .into_iter()
+            .flat_map(|scale| [false, true].map(|reset| (scale, reset)))
+        {
             let (mut worker, _tx) = super::super::tests::test_worker();
             worker.config.desktop_scale_factor = scale;
+            let mut refresh_cookie = 0u32;
+            worker.callbacks.callbacks.ctx = core::ptr::addr_of_mut!(refresh_cookie).cast();
+            worker.callbacks.callbacks.on_refresh_started = Some(on_refresh);
             let mut display = DisplayControlClient::new(|_| Ok(Vec::new()));
             let caps: DisplayControlPdu = DisplayControlCapabilities::new(1, 8192, 8192)
                 .unwrap()
                 .into();
             display.process(7, &encode_vec(&caps).unwrap()).unwrap();
+            let caps = CapabilitySet::V10_7 {
+                flags: CapabilitiesV107Flags::SMALL_CACHE | CapabilitiesV107Flags::AVC_THIN_CLIENT,
+            };
             let mut dvc = DrdynvcClient::new().with_dynamic_channel(display);
+            if graphics_reset {
+                let graphics = NativeGraphicsChannel::new(
+                    Box::new(NativeGfxHandler::new(worker.gfx.clone(), false)),
+                    worker.gfx.clone(),
+                );
+                dvc = dvc.with_dynamic_channel(graphics);
+                dvc.process(
+                    &encode_vec(&DrdynvcServerPdu::Create(CreateRequestPdu::new(
+                        5,
+                        ironrdp_egfx::CHANNEL_NAME.to_owned(),
+                    )))
+                    .unwrap(),
+                )
+                .unwrap();
+                let confirm =
+                    GfxPdu::CapabilitiesConfirm(CapabilitiesConfirmPdu::from_typed(&caps));
+                let payload =
+                    ironrdp_graphics::zgfx::wrap_uncompressed(&encode_vec(&confirm).unwrap());
+                dvc.get_dvc_mut::<NativeGraphicsChannel>()
+                    .unwrap()
+                    .processor_mut()
+                    .process(5, &payload)
+                    .unwrap();
+            }
             dvc.process(
                 &encode_vec(&DrdynvcServerPdu::Create(CreateRequestPdu::new(
                     7,
@@ -703,6 +750,15 @@ mod tests {
                 let mut gfx = worker.gfx.lock().unwrap();
                 gfx.graphics_width = 1920;
                 gfx.graphics_height = 1080;
+                gfx.surface_origins.insert(1, (0, 0));
+                gfx.queue.submit(Event::Video(
+                    NativeVideoUnit {
+                        codec: 1,
+                        flags: 0,
+                        data: vec![1],
+                    },
+                    0,
+                ));
             }
             let mut wire = Vec::new();
             worker
@@ -710,29 +766,51 @@ mod tests {
                     &mut wire,
                     &mut stage,
                     &mut image,
-                    ControlCommand::RequestRefresh,
+                    ControlCommand::RequestRefresh { cookie: 37 },
                 )
                 .unwrap();
+            {
+                let executor = worker.graphics().start(worker.callbacks).unwrap();
+                assert!(worker.graphics().barrier(std::time::Duration::from_secs(1)));
+                drop(executor);
+            }
+            assert_eq!(refresh_cookie, 37);
             let info = ironrdp_pdu::find_size(&wire).unwrap().unwrap();
-            let X224(McsMessage::SendDataRequest(data)) = decode(&wire[..info.length]).unwrap()
-            else {
-                panic!("MCS request expected")
-            };
-            let DrdynvcClientPdu::Data(DrdynvcDataPdu::Data(data)) =
-                decode(&data.user_data[8..]).unwrap()
-            else {
-                panic!("DVC data expected")
-            };
-            let DisplayControlPdu::MonitorLayout(layout) = decode(data.data()).unwrap() else {
-                panic!("monitor layout expected")
-            };
-            assert_eq!(layout.monitors()[0].dimensions(), (1920, 1080));
-            assert_eq!(layout.monitors()[0].desktop_scale_factor(), Some(scale));
+            assert_eq!(wire.len(), info.length, "refresh must send only one PDU");
+            if graphics_reset {
+                let X224(McsMessage::SendDataRequest(data)) = decode(&wire).unwrap() else {
+                    panic!("MCS request expected")
+                };
+                let DrdynvcClientPdu::Data(data) = decode(&data.user_data[8..]).unwrap() else {
+                    panic!("DVC data expected")
+                };
+                assert_eq!(data.channel_id(), 5);
+                let DrdynvcDataPdu::Data(data) = data else {
+                    panic!("unfragmented data expected")
+                };
+                let GfxPdu::CapabilitiesAdvertise(advertise) = decode(data.data()).unwrap() else {
+                    panic!("graphics reset expected")
+                };
+                assert_eq!(
+                    advertise,
+                    ironrdp_egfx::pdu::CapabilitiesAdvertisePdu::from_typed(&[caps])
+                );
+                let gfx = worker.gfx.lock().unwrap();
+                assert!(gfx.queue.videos().is_empty());
+                assert!(gfx.surface_origins.is_empty());
+                assert_eq!((gfx.graphics_width, gfx.graphics_height), (1920, 1080));
+                assert!(stage
+                    .get_dvc::<DisplayControlClient>()
+                    .unwrap()
+                    .processor()
+                    .ready());
+                continue;
+            }
             assert_eq!(
-                layout.monitors()[0].device_scale_factor().unwrap().value(),
-                100
+                worker.gfx.lock().unwrap().surface_origins.get(&1),
+                Some(&(0, 0))
             );
-            let ShareDataPdu::RefreshRectangle(refresh) = share_data(&wire[info.length..]) else {
+            let ShareDataPdu::RefreshRectangle(refresh) = share_data(&wire) else {
                 panic!("refresh rect expected")
             };
             assert_eq!(

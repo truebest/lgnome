@@ -24,6 +24,7 @@ typedef struct NativeAudioJitterController {
     uint32_t last_arrival_ms;
     uint32_t last_timestamp_ms;
     uint32_t last_target_change_ms;
+    uint32_t pending_variation_ms;
     unsigned seen_underruns;
     NativeAudioJitterSample samples[NATIVE_AUDIO_JITTER_SAMPLES];
     uint16_t histogram[NATIVE_AUDIO_JITTER_BUCKETS];

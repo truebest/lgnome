@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int expect_true(int condition, const char *name) {
@@ -291,6 +292,23 @@ static int test_annexb_prefix_detection(void) {
     return failures;
 }
 
+static int test_annexb_long_payload_boundaries(void) {
+    uint8_t data[4096];
+    int failures = 0;
+    for (size_t offset = 1024; offset < 1088; ++offset) {
+        memset(data, 0xff, sizeof(data));
+        memcpy(data, "\0\0\1\x67", 4);
+        memcpy(data + offset, "\0\0\0\1\x68", 5);
+        memcpy(data + sizeof(data) - 4, "\0\0\1\x65", 4);
+        NativeH264Info info;
+        failures += expect_true(native_h264_scan_annexb(data, sizeof(data), &info) == NATIVE_H264_OK &&
+            info.nal_count == 3 && info.can_seed_decoder && info.sps.len == offset - 3 &&
+            info.pps.data == data + offset + 4,
+            "Annex-B prefixes across alignments and at final valid position");
+    }
+    return failures;
+}
+
 int main(void) {
     int failures = 0;
     failures += test_sps_pps_idr_matrix();
@@ -298,5 +316,6 @@ int main(void) {
     failures += test_invalid_and_truncated_avc();
     failures += test_raw_au_classification();
     failures += test_annexb_prefix_detection();
+    failures += test_annexb_long_payload_boundaries();
     return failures ? 1 : 0;
 }

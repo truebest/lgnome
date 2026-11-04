@@ -647,7 +647,40 @@ static void test_mixer_settings_validation(void) {
     }
 }
 
+static void test_certificate_trust_round_trip(void) {
+    static const char fingerprint[] = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    NativeSettings original = make_defaults();
+    NativeSessionConfig *session = &original.sessions[NATIVE_SESSION_SLOT_GREEN];
+    assert(!native_session_trusted_certificate(session)[0]);
+    assert(!native_session_trust_certificate(session, "invalid"));
+    assert(native_session_trust_certificate(session, fingerprint));
+    FILE *file = tmpfile();
+    assert(file && native_settings_write_json(&original, file));
+    rewind(file);
+    char json[16384];
+    size_t len = fread(json, 1, sizeof(json) - 1, file);
+    json[len] = 0;
+    fclose(file);
+    NativeSettings loaded = make_defaults();
+    assert(native_settings_apply_json(&loaded, json, "certificate test"));
+    NativeSessionConfig *copy = &loaded.sessions[NATIVE_SESSION_SLOT_GREEN];
+    assert(strcmp(native_session_trusted_certificate(copy), fingerprint) == 0);
+    copy->port++;
+    assert(!native_session_trusted_certificate(copy)[0]);
+    copy->port--;
+    strcpy(copy->host, "other-server");
+    assert(!native_session_trusted_certificate(copy)[0]);
+    NativeSettings before = loaded;
+    assert(!native_settings_apply_json(&loaded, "{\"trustedCertificateSha256\":\"bad\"}", "certificate test"));
+    assert(memcmp(&before, &loaded, sizeof(loaded)) == 0);
+    native_session_config_defaults(copy);
+    assert(!native_session_trusted_certificate(copy)[0] && !copy->certificate_trust.sha256[0]);
+    assert(native_settings_apply_json(&loaded, "{\"host\":\"legacy\",\"password\":\"test\"}", "legacy"));
+    assert(!native_session_trusted_certificate(copy)[0]);
+}
+
 int main(void) {
+    test_certificate_trust_round_trip();
     test_mixer_settings_validation();
     test_json_boundaries();
     test_maximum_escaped_round_trip();

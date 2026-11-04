@@ -206,6 +206,7 @@ bool ui_profile_action_pending(const NativePreconnectUi *ui) {
 
 /* Any one-shot request at all, including the capture-settings save. */
 bool ui_any_action_pending(const NativePreconnectUi *ui) {
+    if (ui && ui->certificate_visible) return true;
     return ui_profile_action_pending(ui) || ui->capture_save_pending;
 }
 

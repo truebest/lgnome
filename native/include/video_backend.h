@@ -8,8 +8,24 @@
 #include "h264_annexb.h"
 #include "hevc_annexb.h"
 #include "media_backend.h"
+#include "native_decoder_stats.h"
 
 typedef struct NativeVideo NativeVideo;
+
+typedef struct NativeVideoDiagnostics {
+    bool timing_valid;
+    uint32_t play_us_ewma, play_us_max, errors;
+    bool queue_valid;
+    int queue_frames;
+    uint32_t sampled_ms;
+} NativeVideoDiagnostics;
+
+/* Caller serializes with feed/close. Reads cached data; never calls the vendor API. */
+void native_video_set_diagnostics(NativeVideo *video, bool enabled);
+NativeVideoDiagnostics native_video_get_diagnostics(const NativeVideo *video, uint32_t now_ms);
+
+/* Caller serializes with feed/close. Reads backend counters, not the vendor API. */
+NativeDecoderStats native_video_get_decoder_stats(const NativeVideo *video);
 
 /* Fixed for the lifetime of the decoder track. */
 typedef enum NativeVideoCodec {
@@ -46,7 +62,8 @@ uint16_t native_video_height(const NativeVideo *video);
 /* Feed one access unit from RDPEGFX: H.264 either AVC length-prefixed or Annex-B,
  * HEVC always Annex-B. The implementation derives decoder-seed/keyframe state from
  * the bytes and normalizes them to Annex-B before passing them to the backend; no
- * transport hint is accepted. */
-NativeVideoResult native_video_feed(NativeVideo *video, const uint8_t *data, size_t len, uint64_t pts90k);
+ * transport keyframe hint is accepted. decode_only preserves references while
+ * suppressing this image at decoder output. */
+NativeVideoResult native_video_feed(NativeVideo *video, const uint8_t *data, size_t len, uint64_t pts90k, bool decode_only);
 
 #endif

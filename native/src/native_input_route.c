@@ -263,6 +263,19 @@ static bool native_evdev_confirm_key(uint16_t code) {
     return code == 28 /* KEY_ENTER */ || code == 96 /* KEY_KPENTER */ || code == 352 /* KEY_OK */;
 }
 
+bool native_handle_statistics_key(App *app, NativeStatisticsKey key, bool down, bool repeat) {
+    if (!key || !app->streaming_visible || app->mixer_overlay_visible ||
+        !native_preconnect_ui_statistics_enabled(app->preconnect_ui)) return false;
+    if (app->window_unfocused || app->app_backgrounded) {
+        native_preconnect_ui_statistics_reset_focus(app->preconnect_ui);
+        return true;
+    }
+    bool hub = false;
+    bool handled = native_preconnect_ui_statistics_key(app->preconnect_ui, key, down, repeat, &hub);
+    if (hub) native_show_hub(app);
+    return handled;
+}
+
 void native_drain_evdev_keyboard(App *app) {
     if (!native_evdev_input_keyboard_active(&app->evdev_input)) {
         return;
@@ -299,6 +312,18 @@ void native_drain_evdev_keyboard(App *app) {
                  * the up edge (both edges stay swallowed either way). */
                 native_mixer_overlay_evdev_key(app, events[i].code, events[i].down);
                 continue;
+            }
+            if (events[i].from_remote) {
+                NativeStatisticsKey key = NATIVE_STATS_KEY_NONE;
+                switch (events[i].code) {
+                case 105: key = NATIVE_STATS_KEY_LEFT; break;
+                case 106: key = NATIVE_STATS_KEY_RIGHT; break;
+                case 103: key = NATIVE_STATS_KEY_UP; break;
+                case 108: key = NATIVE_STATS_KEY_DOWN; break;
+                case 1: case 158: key = NATIVE_STATS_KEY_BACK; break;
+                case 28: case 96: case 352: key = NATIVE_STATS_KEY_OK; break;
+                }
+                if (native_handle_statistics_key(app, key, events[i].down, false)) continue;
             }
             if (events[i].from_remote && native_evdev_confirm_key(events[i].code)) {
                 /* Open HUB on remote release before dropping the grab; USB Enter remains an RDP key. */
@@ -348,6 +373,7 @@ void native_drain_evdev_input(App *app, SDL_Window *window) {
         case NATIVE_EVENT_RESET:
             if (native_evdev_input_take_reset(&app->evdev_input)) {
                 native_flush_held_inputs(app);
+                native_preconnect_ui_statistics_reset_focus(app->preconnect_ui);
                 app->wheel_accumulator = 0;
                 app->hub_open_key_held = false;
                 app->hub_open_button_held = false;
@@ -435,6 +461,7 @@ void native_stop_streaming_input(App *app) {
     }
     /* Flush releases for anything held BEFORE dropping the grab: once the grab is gone the
      * up-events go to the overlay, not RDP, and the server would keep the drag/key stuck. */
+    native_preconnect_ui_statistics_reset_focus(app->preconnect_ui);
     native_flush_held_inputs(app);
     pthread_mutex_lock(&app->video_lock);
     native_input_set_active(&app->input, false);

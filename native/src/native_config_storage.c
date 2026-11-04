@@ -11,6 +11,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 #ifdef LGNOME_TARGET_WEBOS
@@ -179,7 +180,27 @@ bool native_settings_save_file(const NativeSettings *settings, const char *path)
 }
 
 #ifdef LGNOME_TARGET_WEBOS
-static void native_config_collect_persisted_candidates(NativeConfigPathCandidates *candidates) {
+static bool native_config_wait_private_mount(const char *dir) {
+    for (unsigned attempt = 0; ; attempt++) {
+        struct stat st;
+        if (lstat(dir, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != 0 ||
+            st.st_uid == geteuid() || (st.st_mode & 0777) != 0700) {
+            return true;
+        }
+        /* The root-owned placeholder becomes app-owned when the startup hook mounts it. */
+        if (attempt == 0) {
+            clog(cLogLevelInfo, "waiting for private settings mount: %s", dir);
+        }
+        if (attempt == 150) {
+            clog(cLogLevelError, "private settings mount unavailable; refusing fallback: %s", dir);
+            return false;
+        }
+        const struct timespec delay = {.tv_nsec = 100000000};
+        (void)nanosleep(&delay, NULL);
+    }
+}
+
+static bool native_config_collect_persisted_candidates(NativeConfigPathCandidates *candidates) {
     memset(candidates, 0, sizeof(*candidates));
 
     /* User-provided overrides are trusted (from_env=true): they are honored for reads in
@@ -188,17 +209,27 @@ static void native_config_collect_persisted_candidates(NativeConfigPathCandidate
     (void)native_config_add_candidate_path(candidates, getenv("LGNOME_NATIVE_SETTINGS_PATH"), true);
     (void)native_config_add_candidate_dir(candidates, getenv("LGNOME_NATIVE_SETTINGS_DIR"), true);
 
+    const char *appid = getenv("APPID");
+    if (!appid || !appid[0]) {
+        appid = native_config_app_id;
+    }
+
+    /* Root-provisioned storage is outside Developer Mode's recursive chmod at boot. */
+    char private_dir[NATIVE_PERSISTED_CONFIG_PATH_MAX];
+    int pn = snprintf(private_dir, sizeof(private_dir), "/var/lib/%s", appid);
+    if (pn > 0 && (size_t)pn < sizeof(private_dir)) {
+        if (candidates->count == 0 && !native_config_wait_private_mount(private_dir)) return false;
+        if (native_config_dir_is_secure(private_dir)) {
+            (void)native_config_add_candidate_dir(candidates, private_dir, false);
+        }
+    }
+
     char *pref_path = SDL_GetPrefPath("truebest", "lgnome");
     if (pref_path) {
         (void)native_config_add_candidate_dir(candidates, pref_path, false);
         SDL_free(pref_path);
     } else {
         clog(cLogLevelWarning, "failed to resolve SDL pref path: %s", SDL_GetError());
-    }
-
-    const char *appid = getenv("APPID");
-    if (!appid || !appid[0]) {
-        appid = native_config_app_id;
     }
 
     /* Preferred location (user choice): the IPK ships <approot>/settings with mode
@@ -241,6 +272,7 @@ static void native_config_collect_persisted_candidates(NativeConfigPathCandidate
     if (n > 0 && (size_t)n < sizeof(fallback_dir)) {
         (void)native_config_add_candidate_dir(candidates, fallback_dir, false);
     }
+    return true;
 }
 
 typedef enum NativeConfigLoadOutcome {
@@ -279,7 +311,7 @@ bool native_config_load_persisted(NativeSettings *settings, bool force_ignore) {
     }
 
     NativeConfigPathCandidates candidates;
-    native_config_collect_persisted_candidates(&candidates);
+    if (!native_config_collect_persisted_candidates(&candidates)) return false;
 
     /* Load from the highest-priority candidate whose file exists and parses. Writability plays
      * no part in load ordering (an env override on a read-only mount must still win over a
@@ -323,7 +355,7 @@ bool native_config_load_persisted(NativeSettings *settings, bool force_ignore) {
 
 bool native_config_save_persisted(const NativeSettings *settings) {
     NativeConfigPathCandidates candidates;
-    native_config_collect_persisted_candidates(&candidates);
+    if (!native_config_collect_persisted_candidates(&candidates)) return false;
     size_t save_index;
     if (!native_config_find_persisted_save_candidate(&candidates, &save_index)) {
         clog(cLogLevelWarning, "no writable persisted config directory found");

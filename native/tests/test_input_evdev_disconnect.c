@@ -64,7 +64,28 @@ static void test_terminal_poll_failure_publishes_reset(void) {
     close(input.wake_fd); assert(pthread_mutex_destroy(&input.lock)==0);
 }
 
+static void test_remote_arrows_on_mouse_only_node(void) {
+    NativeEvdevInput input = {0};
+    NativeEvdevDevice remote = {.is_mouse = true, .is_remote = true};
+    const unsigned keys[] = {KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_DOWN, KEY_ENTER, KEY_KPENTER, KEY_OK, KEY_BACK, KEY_ESC};
+    for (unsigned i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        unsigned key = keys[i];
+        for (int value = 0; value <= 2; value++) {
+            struct input_event raw = {.type = EV_KEY, .code = key, .value = value};
+            assert(evdev_dispatch(&input, &remote, &raw));
+            NativeEvent emitted;
+            assert(native_event_queue_pop(&input.queue, NATIVE_EVENT_KEYBOARD, &emitted));
+            assert(emitted.data.keyboard.code == key && emitted.data.keyboard.from_remote);
+            assert(emitted.data.keyboard.down == (value != 0));
+        }
+    }
+    remote.is_remote = false;
+    struct input_event raw = {.type = EV_KEY, .code = KEY_LEFT, .value = 1};
+    assert(!evdev_dispatch(&input, &remote, &raw));
+}
+
 int main(void) {
+    test_remote_arrows_on_mouse_only_node();
     test_disconnect(false);
     test_disconnect(true);
     test_terminal_poll_failure_publishes_reset();

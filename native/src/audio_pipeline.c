@@ -350,10 +350,8 @@ static void pipeline_log_stats(NativeAudioPipelineImpl *pipeline) {
              atomic_load_explicit(&source->jitter_p95_ms, memory_order_relaxed),
              atomic_load_explicit(&source->correction_ppm, memory_order_relaxed), underruns, hard,
              atomic_load_explicit(&source->overflows, memory_order_relaxed));
-        /* Both are audible, and both used to be visible only at debug level, which no
-         * field log carries. Reported per window rather than per event. */
         if (underruns != pipeline->reported_underruns[i] || hard != pipeline->reported_hard_corrections[i]) {
-            clog(cLogLevelWarning, "source %d audible corrections: %u starved, %u trimmed (queue=%ums target=%ums)", i,
+            clog(cLogLevelWarning, "source %d queue events: %u starved, %u trimmed (queue=%ums target=%ums)", i,
                  underruns - pipeline->reported_underruns[i], hard - pipeline->reported_hard_corrections[i],
                  native_audio_source_queue_ms(source),
                  atomic_load_explicit(&source->target_delay_ms, memory_order_relaxed));

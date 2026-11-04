@@ -82,6 +82,7 @@ pub struct RdpConfig {
     pub camera_height: u16,
     pub camera_fps: u16,
     pub desktop_scale_factor: u16,
+    pub trusted_certificate_sha256: *const c_char,
 }
 
 #[repr(C)]
@@ -94,8 +95,8 @@ pub struct RdpCallbacks {
     pub on_log:
         Option<extern "C" fn(*mut core::ffi::c_void, RdpLogLevel, *const c_char, *const c_char)>,
     pub on_desktop_size: Option<extern "C" fn(*mut core::ffi::c_void, u16, u16)>,
-    /// Per-AU RDP_VIDEO_CODEC_* and bytes, borrowed for the synchronous callback.
-    pub on_video_au: Option<extern "C" fn(*mut core::ffi::c_void, u32, *const u8, usize, u64)>,
+    /// Per-AU codec, flags and bytes, borrowed for the synchronous callback.
+    pub on_video_au: Option<extern "C" fn(*mut core::ffi::c_void, u32, u32, *const u8, usize, u64)>,
     pub on_bitmap_update: Option<
         extern "C" fn(*mut core::ffi::c_void, u16, u32, u32, u32, u32, u32, *const u8, usize),
     >,
@@ -121,10 +122,13 @@ pub struct RdpCallbacks {
     /// Negotiated PCM capture packet shape for MS-RDPEAI.
     pub on_audio_input_start: Option<extern "C" fn(*mut core::ffi::c_void, u64, u32, u16, u32)>,
     pub on_audio_input_stop: Option<extern "C" fn(*mut core::ffi::c_void, u64)>,
+    pub on_refresh_started: Option<extern "C" fn(*mut core::ffi::c_void, u32)>,
+    pub on_certificate: Option<extern "C" fn(*mut core::ffi::c_void, *const c_char, *const c_char)>,
 }
 
 pub const RDP_VIDEO_CODEC_H264: u32 = 0;
 pub const RDP_VIDEO_CODEC_H265: u32 = 1;
+pub const RDP_VIDEO_FLAG_AVC444_AUX: u32 = 1;
 
 pub const RDP_POINTER_STATE_HIDDEN: u32 = 0;
 pub const RDP_POINTER_STATE_DEFAULT: u32 = 1;
@@ -191,6 +195,7 @@ mod tests {
     fn ffi_struct_layout_is_c_compatible() {
         assert_eq!(RDP_VIDEO_CODEC_H264, 0);
         assert_eq!(RDP_VIDEO_CODEC_H265, 1);
+        assert_eq!(RDP_VIDEO_FLAG_AVC444_AUX, 1);
         assert_eq!(align_of::<RdpConfig>(), align_of::<*const c_char>());
         assert_eq!(offset_of!(RdpConfig, host), 0);
         assert_eq!(offset_of!(RdpConfig, port), size_of::<*const c_char>());
@@ -212,7 +217,11 @@ mod tests {
             offset_of!(RdpConfig, desktop_scale_factor),
             5 * size_of::<*const c_char>() + 16
         );
-        assert_eq!(size_of::<RdpConfig>(), 6 * size_of::<*const c_char>() + 16);
+        assert_eq!(
+            offset_of!(RdpConfig, trusted_certificate_sha256),
+            6 * size_of::<*const c_char>() + 16
+        );
+        assert_eq!(size_of::<RdpConfig>(), 7 * size_of::<*const c_char>() + 16);
         assert_eq!(
             align_of::<RdpCallbacks>(),
             align_of::<*mut core::ffi::c_void>()
@@ -260,8 +269,16 @@ mod tests {
                 > offset_of!(RdpCallbacks, on_audio_input_start)
         );
         assert_eq!(
-            size_of::<RdpCallbacks>(),
+            offset_of!(RdpCallbacks, on_refresh_started),
             17 * size_of::<*mut core::ffi::c_void>()
+        );
+        assert_eq!(
+            offset_of!(RdpCallbacks, on_certificate),
+            18 * size_of::<*mut core::ffi::c_void>()
+        );
+        assert_eq!(
+            size_of::<RdpCallbacks>(),
+            19 * size_of::<*mut core::ffi::c_void>()
         );
     }
 
@@ -283,5 +300,44 @@ const _: () = {
         core::mem::offset_of!(RdpConfig, desktop_scale_factor)
             == 5 * core::mem::size_of::<*const c_char>() + 16
     );
-    assert!(core::mem::size_of::<RdpConfig>() == 6 * core::mem::size_of::<*const c_char>() + 16);
+    assert!(core::mem::size_of::<RdpConfig>() == 7 * core::mem::size_of::<*const c_char>() + 16);
+    assert!(
+        core::mem::offset_of!(RdpConfig, trusted_certificate_sha256)
+            == 6 * core::mem::size_of::<*const c_char>() + 16
+    );
+    assert!(
+        core::mem::offset_of!(RdpCallbacks, on_certificate)
+            == 18 * core::mem::size_of::<*const c_char>()
+    );
+    assert!(core::mem::size_of::<RdpCallbacks>() == 19 * core::mem::size_of::<*const c_char>());
 };
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RdpNetworkStats {
+    pub generation: u64,
+    pub sampled_ms: u64,
+    pub observed_ms: u64,
+    pub started_ms: u64,
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+    pub last_rx_ms: u64,
+    pub report_ms: u64,
+    pub base_rtt_ms_at: u64,
+    pub bandwidth_ms_at: u64,
+    pub reports: u64,
+    pub active: u32,
+    pub rate_valid: u32,
+    pub rx_kbps: u32,
+    pub tx_kbps: u32,
+    pub average_rtt_ms: u32,
+    pub base_rtt_ms: u32,
+    pub bandwidth_kbps: u32,
+    pub tcp_valid: u32,
+    pub tcp_srtt_us: u32,
+    pub tcp_rttvar_us: u32,
+    pub tcp_rto_us: u32,
+    pub tcp_unacked: u32,
+    pub tcp_cwnd: u32,
+    pub tcp_retransmits: u32,
+}
