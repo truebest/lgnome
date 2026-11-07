@@ -11,8 +11,8 @@ typedef struct NativeSessionSlot NativeSessionSlot;
 /* Single compressed-video ingest path; classifies raw AU bytes before routing. The
  * switch replay feeds cached AUs through it so it takes the same path as live input. */
 void native_video_ingest_au(NativeSessionSlot *slot, NativeVideoCodec codec, const uint8_t *data, size_t len,
-                           uint64_t pts90k);
+                           uint64_t pts90k, bool decode_only);
 /* Caller holds app->video_lock throughout a snapshot batch. */
-void native_video_ingest_au_locked(NativeSessionSlot *slot, const uint8_t *data, size_t len, uint64_t pts90k);
+void native_video_ingest_au_locked(NativeSessionSlot *slot, const uint8_t *data, size_t len, uint64_t pts90k, bool replay, bool decode_only);
 
 #endif

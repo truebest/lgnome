@@ -13,10 +13,6 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#ifdef LGNOME_TARGET_WEBOS
-#include <SDL.h>
-#endif
-
 #include "config_paths.h"
 #include "native_config.h"
 #include "settings_json.h"
@@ -24,10 +20,6 @@
 #include "clog.h"
 
 clog_define(g_native_log_config_storage, cLogLevelInfo, "native");
-
-#ifdef LGNOME_TARGET_WEBOS
-static const char native_config_app_id[] = "com.truebest.lgnome.native";
-#endif
 
 /* Reads the whole file at `path` into a NUL-terminated heap buffer with a single open.
  *   missing file (open fails):            *existed=false, *out=NULL, returns true
@@ -47,10 +39,14 @@ static bool native_config_read_file(const char *path, char **out, bool *existed,
     }
     *existed = true;
     struct stat st;
-    /* chmod cannot revoke another process's existing writable descriptor. */
     if (private_file &&
         (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != geteuid() ||
-         (st.st_mode & (S_IWGRP | S_IWOTH)))) {
+         st.st_nlink != 1)) {
+        close(fd);
+        return false;
+    }
+    if (private_file && (st.st_mode & 0777) != 0600 &&
+        (fchmod(fd, 0600) != 0 || fstat(fd, &st) != 0)) {
         close(fd);
         return false;
     }
@@ -81,8 +77,15 @@ static bool native_config_read_file(const char *path, char **out, bool *existed,
     }
 
     size_t read_count = fread(json, 1, (size_t)size, file);
+    struct stat after;
+    bool changed = private_file &&
+                   (fstat(fd, &after) != 0 || st.st_size != after.st_size ||
+                    st.st_mtim.tv_sec != after.st_mtim.tv_sec ||
+                    st.st_mtim.tv_nsec != after.st_mtim.tv_nsec ||
+                    st.st_ctim.tv_sec != after.st_ctim.tv_sec ||
+                    st.st_ctim.tv_nsec != after.st_ctim.tv_nsec);
     fclose(file);
-    if (read_count != (size_t)size || memchr(json, '\0', read_count)) {
+    if (changed || read_count != (size_t)size || memchr(json, '\0', read_count)) {
         free(json);
         clog(cLogLevelError, "failed to read config file: %s", path);
         return false;
@@ -124,8 +127,8 @@ bool native_config_load_file(NativeSettings *settings, const char *path, bool re
     return native_config_load_file_internal(settings, path, required, true);
 }
 
-static bool native_settings_save_file_checked(const NativeSettings *settings, const char *path,
-                                              bool private_dir) {
+static bool native_config_write_file_checked(const NativeSettings *settings, const char *json,
+                                             const char *path, bool private_dir) {
     char dir[NATIVE_PERSISTED_CONFIG_PATH_MAX];
     if (!native_config_parent_dir(path, dir, sizeof(dir))) return false;
     const char *name = strrchr(path, '/');
@@ -157,7 +160,7 @@ static bool native_settings_save_file_checked(const NativeSettings *settings, co
         close(dir_fd);
         return false;
     }
-    bool ok = native_settings_write_json(settings, file);
+    bool ok = settings ? native_settings_write_json(settings, file) : fputs(json, file) >= 0;
     long size = ftell(file);
     if (size < 0 || (unsigned long)size > NATIVE_CONFIG_MAX_FILE) ok = false;
     if (ok && (fflush(file) != 0 || fsync(fd) != 0)) ok = false;
@@ -174,73 +177,35 @@ static bool native_settings_save_file_checked(const NativeSettings *settings, co
     return ok;
 }
 
+static bool native_settings_save_file_checked(const NativeSettings *settings, const char *path,
+                                              bool private_dir) {
+    return native_config_write_file_checked(settings, NULL, path, private_dir);
+}
+
 bool native_settings_save_file(const NativeSettings *settings, const char *path) {
     return native_settings_save_file_checked(settings, path, false);
 }
 
 #ifdef LGNOME_TARGET_WEBOS
-static void native_config_collect_persisted_candidates(NativeConfigPathCandidates *candidates) {
+static bool native_config_collect_persisted_candidates(NativeConfigPathCandidates *candidates) {
     memset(candidates, 0, sizeof(*candidates));
-
-    /* User-provided overrides are trusted (from_env=true): they are honored for reads in
-     * priority order even on a read-only or foreign-owned mount. Discovered locations below
-     * must pass the ownership/permission check before their contents are written or trusted. */
     (void)native_config_add_candidate_path(candidates, getenv("LGNOME_NATIVE_SETTINGS_PATH"), true);
     (void)native_config_add_candidate_dir(candidates, getenv("LGNOME_NATIVE_SETTINGS_DIR"), true);
 
-    char *pref_path = SDL_GetPrefPath("truebest", "lgnome");
-    if (pref_path) {
-        (void)native_config_add_candidate_dir(candidates, pref_path, false);
-        SDL_free(pref_path);
-    } else {
-        clog(cLogLevelWarning, "failed to resolve SDL pref path: %s", SDL_GetError());
-    }
-
-    const char *appid = getenv("APPID");
-    if (!appid || !appid[0]) {
-        appid = native_config_app_id;
-    }
-
-    /* Preferred location (user choice): the IPK ships <approot>/settings with mode
-     * 01777 (tools/build-native-webos.sh) because the install tree is root-owned on the
-     * TV; the app-private euid-suffixed subdir inside follows the exact trust model of
-     * the /tmp fallback -- but on persistent storage. The dev-mode jail sets HOME to the
-     * app root itself (verified live; SDL_GetPrefPath is what points at bin/). */
     const char *home = getenv("HOME");
     if (home && home[0] && strcmp(home, "/") != 0) {
-        char inapp_dir[NATIVE_PERSISTED_CONFIG_PATH_MAX];
-        int an = snprintf(inapp_dir, sizeof(inapp_dir), "%s/settings/%lu", home, (unsigned long)geteuid());
-        if (an > 0 && (size_t)an < sizeof(inapp_dir)) {
-            (void)native_config_add_candidate_dir(candidates, inapp_dir, false);
+        char path[NATIVE_PERSISTED_CONFIG_PATH_MAX];
+        int n = snprintf(path, sizeof(path), "%s/settings/%lu/%s", home, (unsigned long)geteuid(),
+                         NATIVE_PERSISTED_CONFIG_FILENAME);
+        if (n > 0 && (size_t)n < sizeof(path)) {
+            (void)native_config_add_candidate_path(candidates, path, false);
         }
     }
-
-    (void)native_config_add_candidate_app_dir(candidates, "/var/luna/preferences/%s", appid);
-    (void)native_config_add_candidate_app_dir(candidates, "/media/developer/apps/usr/palm/data/%s", appid);
-    /* Dev-mode app data commonly lives on cryptofs (persistent ext4). */
-    (void)native_config_add_candidate_app_dir(candidates, "/media/cryptofs/apps/usr/palm/data/%s", appid);
-    (void)native_config_add_candidate_app_dir(candidates, "/media/internal/%s", appid);
-
-    /* /media/developer is the ONE persistent ext4 the dev-mode jail maps read-write
-     * (verified live via /proc/self/mounts -- every conventional data dir above is
-     * root-owned or a read-only mount for this app's uid). Its temp/ is world-writable
-     * like /tmp, so an app-private euid-suffixed subdir passes the exact ownership
-     * checks the /tmp fallback below relies on -- but it survives TV power cycles, which
-     * tmpfs does not (observed live: settings vanished on the first cold boot). */
-    char devtemp_dir[NATIVE_PERSISTED_CONFIG_PATH_MAX];
-    int dn = snprintf(devtemp_dir, sizeof(devtemp_dir), "/media/developer/temp/%s-%lu", appid,
-                      (unsigned long)geteuid());
-    if (dn > 0 && (size_t)dn < sizeof(devtemp_dir)) {
-        (void)native_config_add_candidate_dir(candidates, devtemp_dir, false);
+    if (candidates->count == 0) {
+        clog(cLogLevelError, "persistent settings path is unavailable");
+        return false;
     }
-
-    (void)native_config_add_candidate_app_dir(candidates, "/var/run/%s", appid);
-
-    char fallback_dir[NATIVE_PERSISTED_CONFIG_PATH_MAX];
-    int n = snprintf(fallback_dir, sizeof(fallback_dir), "/tmp/%s-%lu", appid, (unsigned long)geteuid());
-    if (n > 0 && (size_t)n < sizeof(fallback_dir)) {
-        (void)native_config_add_candidate_dir(candidates, fallback_dir, false);
-    }
+    return true;
 }
 
 typedef enum NativeConfigLoadOutcome {
@@ -252,7 +217,8 @@ typedef enum NativeConfigLoadOutcome {
 /* Load one candidate with a single open, distinguishing "no file here" from "file is
  * corrupt" so the caller can fall through to lower-priority candidates in either case. */
 static NativeConfigLoadOutcome native_config_try_load_candidate(NativeSettings *settings, const char *path,
-                                                                bool private_file) {
+                                                                bool private_file, char **validated_json) {
+    if (validated_json) *validated_json = NULL;
     char *json = NULL;
     bool existed = false;
     if (!native_config_read_file(path, &json, &existed, private_file)) {
@@ -263,10 +229,12 @@ static NativeConfigLoadOutcome native_config_try_load_candidate(NativeSettings *
     }
 
     bool ok = native_settings_apply_json(settings, json, path);
-    free(json);
     if (!ok) {
+        free(json);
         return NATIVE_CONFIG_LOAD_INVALID;
     }
+    if (validated_json) *validated_json = json;
+    else free(json);
     return NATIVE_CONFIG_LOAD_OK;
 }
 
@@ -279,42 +247,39 @@ bool native_config_load_persisted(NativeSettings *settings, bool force_ignore) {
     }
 
     NativeConfigPathCandidates candidates;
-    native_config_collect_persisted_candidates(&candidates);
+    if (!native_config_collect_persisted_candidates(&candidates)) return false;
 
-    /* Load from the highest-priority candidate whose file exists and parses. Writability plays
-     * no part in load ordering (an env override on a read-only mount must still win over a
-     * stale writable copy), and a corrupt higher-priority file must not hide a valid
-     * lower-priority one. Discovered (non-env) directories must be owned by us and not
-     * other-writable before their contents are trusted, so a local attacker cannot plant a
-     * settings.json (pointing at their own RDP host) for us to load. */
     for (size_t i = 0; i < candidates.count; i++) {
         if (!candidates.from_env[i]) {
             char dir[NATIVE_PERSISTED_CONFIG_PATH_MAX];
-            if (!native_config_parent_dir(candidates.paths[i], dir, sizeof(dir))) {
-                continue;
-            }
+            if (!native_config_parent_dir(candidates.paths[i], dir, sizeof(dir))) return false;
             if (!native_config_dir_secure_or_heal(dir)) {
-                /* Never silent: a foreign-owned directory here made saved settings
-                 * vanish without a trace in the log once already. */
                 struct stat st;
-                if (stat(dir, &st) == 0) {
-                    clog(cLogLevelWarning,
-                         "persisted-config candidate skipped (dir not private): %s uid=%lu mode=%lo", dir,
-                         (unsigned long)st.st_uid, (unsigned long)(st.st_mode & 07777));
-                }
-                continue;
+                if (lstat(dir, &st) != 0 && errno == ENOENT) continue;
+                clog(cLogLevelError, "persistent settings directory is unavailable: %s", dir);
+                return false;
             }
         }
 
+        NativeSettings loaded = *settings;
+        char *json = NULL;
         NativeConfigLoadOutcome outcome = native_config_try_load_candidate(
-            settings, candidates.paths[i], !candidates.from_env[i]);
-        if (outcome == NATIVE_CONFIG_LOAD_MISSING) {
-            continue;
-        }
+            &loaded, candidates.paths[i], !candidates.from_env[i], &json);
+        if (outcome == NATIVE_CONFIG_LOAD_MISSING) continue;
         if (outcome == NATIVE_CONFIG_LOAD_INVALID) {
-            clog(cLogLevelWarning, "ignored invalid persisted config: %s", candidates.paths[i]);
+            clog(cLogLevelWarning, "invalid persisted config: %s", candidates.paths[i]);
+            if (!candidates.from_env[i]) return false;
             continue;
         }
+        /* Replace the inode so an earlier writable descriptor cannot alter future loads. */
+        bool protected = candidates.from_env[i] ||
+                         native_config_write_file_checked(NULL, json, candidates.paths[i], true);
+        free(json);
+        if (!protected) {
+            clog(cLogLevelError, "failed to protect persisted config: %s", candidates.paths[i]);
+            return false;
+        }
+        *settings = loaded;
         clog(cLogLevelInfo, "loaded persisted config: %s", candidates.paths[i]);
         return true;
     }
@@ -323,7 +288,7 @@ bool native_config_load_persisted(NativeSettings *settings, bool force_ignore) {
 
 bool native_config_save_persisted(const NativeSettings *settings) {
     NativeConfigPathCandidates candidates;
-    native_config_collect_persisted_candidates(&candidates);
+    if (!native_config_collect_persisted_candidates(&candidates)) return false;
     size_t save_index;
     if (!native_config_find_persisted_save_candidate(&candidates, &save_index)) {
         clog(cLogLevelWarning, "no writable persisted config directory found");
@@ -339,7 +304,7 @@ bool native_config_save_persisted(const NativeSettings *settings) {
         }
         NativeSettings existing = *settings;
         if (native_config_try_load_candidate(&existing, candidates.paths[i],
-                                             !candidates.from_env[i]) == NATIVE_CONFIG_LOAD_OK) {
+                                             !candidates.from_env[i], NULL) == NATIVE_CONFIG_LOAD_OK) {
             if (save_index > i) {
                 clog(cLogLevelError, "loaded settings location is not writable");
                 return false;

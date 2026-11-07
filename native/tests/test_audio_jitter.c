@@ -138,6 +138,56 @@ static void test_large_block_floor_and_restart(void) {
     assert(result.target_delay_ms == NATIVE_AUDIO_JITTER_TARGET_MAX_MS);
 }
 
+static void test_drained_untimestamped_audio_restarts_arrival_measurement(void) {
+    const uint32_t timestamps[][2] = {{0, 0}, {1000, 1000}, {1000, 999}};
+    for (unsigned i = 0; i < sizeof(timestamps) / sizeof(*timestamps); i++) {
+        NativeAudioJitterController controller;
+        native_audio_jitter_reset(&controller, 0, 0);
+        (void)update(&controller, 20, timestamps[i][0], 0, 60);
+        NativeAudioJitterUpdate result = update(&controller, 280, timestamps[i][1], 1, 60);
+        assert(result.target_action == NATIVE_AUDIO_JITTER_TARGET_UNCHANGED);
+        assert(result.target_delay_ms == 60 && result.jitter_p95_ms == 0);
+        assert(!result.talkspurt && controller.count == 0);
+
+        result = update(&controller, 300, timestamps[i][1], 1, 60);
+        assert(result.target_delay_ms == 60 && controller.count == 1);
+        result = update(&controller, 301, timestamps[i][1], 1, 60);
+        assert(result.target_delay_ms == 60);
+        result = update(&controller, 820, 0, 2, 60);
+        assert(result.talkspurt && result.target_delay_ms == 60);
+        result = update(&controller, 840, 0, 2, 60);
+        assert(result.target_delay_ms == 60 && controller.count == 1);
+
+        result = native_audio_jitter_update(&controller, 8928, 48000, 0, 1100, 3, 60);
+        assert(result.target_action == NATIVE_AUDIO_JITTER_TARGET_RAISE);
+        assert(result.target_delay_ms == 206);
+    }
+}
+
+static void test_capture_pause_and_network_delay_are_separate(void) {
+    NativeAudioJitterController controller;
+    native_audio_jitter_reset(&controller, 0, 0);
+    (void)update(&controller, 20, 1000, 0, 60);
+    NativeAudioJitterUpdate result = update(&controller, 280, 1260, 1, 60);
+    assert(result.target_delay_ms == 60 && result.jitter_p95_ms == 0);
+
+    result = update(&controller, 540, 1280, 2, 60);
+    assert(result.target_action == NATIVE_AUDIO_JITTER_TARGET_RAISE);
+    assert(result.target_delay_ms == 260);
+
+    native_audio_jitter_reset(&controller, 0, 0);
+    (void)update(&controller, 20, 0, 0, 60);
+    result = update(&controller, 280, 0, 0, 60);
+    assert(result.target_delay_ms == 260);
+
+    native_audio_jitter_reset(&controller, 0, 0);
+    (void)update(&controller, 20, 0, 0, 60);
+    result = update(&controller, 280, 0, 1, 60);
+    assert(result.target_delay_ms == 60);
+    result = update(&controller, 280, 0, 1, 60);
+    assert(result.target_delay_ms == 260 && result.jitter_p95_ms == 150);
+}
+
 static void test_history_and_decay_are_independent_of_clock_wrap(void) {
     NativeAudioJitterController reference, wrapped;
     uint32_t now = 1000u;
@@ -169,6 +219,8 @@ int main(void) {
     test_quantile_bucket_clamp_and_expiry();
     test_decay_and_underrun_holdoff();
     test_large_block_floor_and_restart();
+    test_drained_untimestamped_audio_restarts_arrival_measurement();
+    test_capture_pause_and_network_delay_are_separate();
     test_history_and_decay_are_independent_of_clock_wrap();
     return 0;
 }

@@ -292,6 +292,19 @@ void native_handle_sdl_event(App *app, SDL_Window *window, SDL_Renderer *rendere
     }
     case SDL_KEYDOWN:
     case SDL_KEYUP:
+        if (!app->mixer_overlay_visible) {
+            NativeStatisticsKey key = NATIVE_STATS_KEY_NONE;
+            switch (event->key.keysym.sym) {
+            case SDLK_LEFT: key = NATIVE_STATS_KEY_LEFT; break;
+            case SDLK_RIGHT: key = NATIVE_STATS_KEY_RIGHT; break;
+            case SDLK_UP: key = NATIVE_STATS_KEY_UP; break;
+            case SDLK_DOWN: key = NATIVE_STATS_KEY_DOWN; break;
+            case SDLK_ESCAPE: key = NATIVE_STATS_KEY_BACK; break;
+            }
+            if (event->key.keysym.scancode == 482) key = NATIVE_STATS_KEY_BACK;
+            if (native_sdl_confirm_key(&event->key)) key = NATIVE_STATS_KEY_OK;
+            if (native_handle_statistics_key(app, key, event->type == SDL_KEYDOWN, event->key.repeat != 0)) break;
+        }
         /* The USB keyboard is read from grabbed /dev/input (input_evdev); there is no SDL
          * keyboard path. SDL keys here belong to the ungrabbed webOS remote: its colour
          * keys navigate sessions, central OK opens HUB, and the channel rocker rings

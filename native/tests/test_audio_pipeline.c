@@ -57,6 +57,29 @@ static int average_left(const int16_t *samples, size_t frames, size_t begin) {
     return (int)(sum / (int64_t)(frames - begin));
 }
 
+static void test_passive_flow_counters(void) {
+    NativeAudioPipeline pipeline = {0};
+    FakeClock clock = {0};
+    NativeAudioSourceStats before, after;
+    int16_t output[480 * 2];
+    assert(native_audio_pipeline_init_with_clock(&pipeline, fake_now, &clock));
+    assert(native_audio_pipeline_set_source_format(&pipeline, 0, 48000, 2));
+    assert(native_audio_pipeline_get_source_stats(&pipeline, 0, &before));
+    assert(before.received_frames == 0 && before.output_frames == 0);
+    push_constant(&pipeline, 0, 4800, 2, 1000, 0);
+    assert(native_audio_pipeline_get_source_stats(&pipeline, 0, &after));
+    assert(after.received_frames == 4800 && after.output_frames == 0);
+    assert(after.input_sample_rate == 48000);
+    assert(native_audio_pipeline_read_s16(&pipeline, output, 480));
+    assert(native_audio_pipeline_get_source_stats(&pipeline, 0, &after));
+    assert(after.received_frames == 4800 && after.output_frames > 0);
+    native_audio_pipeline_close_source(&pipeline, 0);
+    assert(native_audio_pipeline_set_source_format(&pipeline, 0, 44100, 1));
+    assert(native_audio_pipeline_get_source_stats(&pipeline, 0, &after));
+    assert(after.generation != before.generation && after.input_sample_rate == 44100);
+    native_audio_pipeline_destroy(&pipeline);
+}
+
 static void test_init_and_validation(void) {
     assert(!native_audio_pipeline_init(NULL));
     NativeAudioPipeline pipeline = {0};
@@ -265,6 +288,47 @@ static void test_timestamp_wrap_fallback_and_silence_reset(void) {
     assert(native_audio_pipeline_get_source_stats(&pipeline, 0, &stats));
     assert(stats.target_delay_ms == 60);
     assert(stats.jitter_p95_ms == 0);
+    native_audio_pipeline_destroy(&pipeline);
+}
+
+static void test_untimestamped_pauses_preserve_target_and_other_source(void) {
+    NativeAudioPipeline pipeline;
+    FakeClock clock;
+    setup(&pipeline, &clock);
+    assert(native_audio_pipeline_set_source_format(&pipeline, 0, 48000, 2));
+    assert(native_audio_pipeline_set_source_format(&pipeline, 1, 48000, 2));
+    const unsigned pauses[] = {80, 260, 500, 520, 2000};
+    uint32_t elapsed = 0;
+    int16_t out[NATIVE_AUDIO_PIPELINE_BLOCK_FRAMES * 2];
+    NativeAudioSourceStats foreground, background;
+    for (unsigned cycle = 0; cycle < sizeof(pauses) / sizeof(*pauses); cycle++) {
+        for (unsigned phase = 0; phase < 2; phase++) {
+            unsigned duration = phase ? pauses[cycle] : 2000;
+            for (unsigned tick = 0; tick < duration; tick += 10, elapsed += 10) {
+                clock.now_ms = initial_clock_ms + elapsed;
+                if (tick % 20 == 0 && phase == 0)
+                    push_constant(&pipeline, 0, 960, 2, 500, 0);
+                if (elapsed % 20 == 0)
+                    push_constant(&pipeline, 1, 960, 2, 700, 1000 + elapsed);
+                assert(native_audio_pipeline_read_s16(&pipeline, out, NATIVE_AUDIO_PIPELINE_BLOCK_FRAMES));
+                assert(native_audio_pipeline_get_source_stats(&pipeline, 0, &foreground));
+                assert(foreground.target_delay_ms <= 60);
+                if (elapsed > 1000 && phase && tick > 400) {
+                    assert(foreground.queue_ms == 0);
+                    int mixed = average_left(out, NATIVE_AUDIO_PIPELINE_BLOCK_FRAMES, 32);
+                    assert(mixed > 650 && mixed < 750);
+                }
+                if (phase == 0 && tick > 500) {
+                    int mixed = average_left(out, NATIVE_AUDIO_PIPELINE_BLOCK_FRAMES, 32);
+                    assert(mixed > 1150 && mixed < 1250);
+                }
+            }
+        }
+    }
+    assert(foreground.underruns >= sizeof(pauses) / sizeof(*pauses));
+    assert(foreground.hard_corrections == 0 && foreground.overflows == 0);
+    assert(native_audio_pipeline_get_source_stats(&pipeline, 1, &background));
+    assert(background.underruns == 0 && background.hard_corrections == 0 && background.overflows == 0);
     native_audio_pipeline_destroy(&pipeline);
 }
 
@@ -945,6 +1009,7 @@ static void test_with_fake_clock(void) {
     test_jitter_target_growth_and_decay();
     test_packet_cadence_without_corrections();
     test_timestamp_wrap_fallback_and_silence_reset();
+    test_untimestamped_pauses_preserve_target_and_other_source();
     test_talkspurt_drops_pre_gap_frames();
     test_large_packet_after_gap();
     test_format_generation_rechecked_before_ring_read();
@@ -970,6 +1035,7 @@ static void test_with_fake_clock(void) {
 }
 
 int main(void) {
+    test_passive_flow_counters();
     test_with_fake_clock();
     /* Run the same audio/duck/meter expectations across monotonic wrap,
      * including a render tick at exactly zero. */

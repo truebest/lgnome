@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <sched.h>
 #include <stdio.h>
 #include <string.h>
 #include "native_app.h"
@@ -15,6 +16,46 @@
 #include "native_pointer.h"
 
 static int grabs, overlay_hides, stops, fader_updates;
+static unsigned slot_stops, barrier_calls;
+static RdpSession *blocked_graphics;
+static App *barrier_owner;
+static int presents, statistics_draws, statistics_cycles;
+static bool statistics_enabled, statistics_visible, statistics_dirty;
+static NativeDecoderStats decoder_stats;
+bool native_preconnect_ui_statistics_enabled(const NativePreconnectUi *ui) { (void)ui; return statistics_enabled; }
+bool native_preconnect_ui_statistics_visible(NativePreconnectUi *ui, bool show) {
+    (void)ui;
+    bool changed = statistics_visible != show;
+    statistics_visible = show;
+    return changed;
+}
+bool native_preconnect_ui_statistics_prepare(NativePreconnectUi *ui, const NativeDiagnosticsSnapshot *s) {
+    (void)ui; (void)s;
+    bool dirty = statistics_dirty;
+    statistics_dirty = false;
+    return dirty;
+}
+static NativeStatisticsNavigation statistics_navigation;
+void native_preconnect_ui_statistics_reset_focus(NativePreconnectUi *ui) {
+    (void)ui;
+    native_statistics_focus_reset(&statistics_navigation);
+}
+bool native_preconnect_ui_statistics_key(NativePreconnectUi *ui, NativeStatisticsKey key, bool down, bool repeat, bool *hub) {
+    (void)ui;
+    *hub = false;
+    if (!statistics_enabled || !statistics_visible) return false;
+    unsigned before = statistics_navigation.tab;
+    bool result = native_statistics_key(&statistics_navigation, key, down, repeat, hub);
+    if (before != statistics_navigation.tab) statistics_cycles += key == NATIVE_STATS_KEY_RIGHT ? 1 : -1;
+    return result;
+}
+void native_preconnect_ui_statistics_draw(NativePreconnectUi *ui) { (void)ui; statistics_draws++; }
+void native_video_set_diagnostics(NativeVideo *video, bool enabled) { (void)video; (void)enabled; }
+NativeVideoDiagnostics native_video_get_diagnostics(const NativeVideo *video, uint32_t now_ms) {
+    (void)video; (void)now_ms;
+    return (NativeVideoDiagnostics){.timing_valid = decoder_stats.available};
+}
+
 static SDL_Window *keyboard_focus;
 static bool ui_visible, fail_survivor;
 static uint32_t ticks = 10000;
@@ -60,6 +101,7 @@ int SDL_RenderClear(SDL_Renderer *r) {
 
 void SDL_RenderPresent(SDL_Renderer *r) {
     (void)r;
+    presents++;
 }
 
 int SDL_GetRendererOutputSize(SDL_Renderer *renderer, int *width, int *height) {
@@ -118,6 +160,33 @@ void native_evdev_input_stop_with_buttons(NativeEvdevInput *input, uint8_t *butt
 bool native_evdev_input_keyboard_active(NativeEvdevInput *input) {
     (void)input;
     return true;
+}
+
+static NativeKeyboardEv keyboard_events[8];
+static size_t keyboard_count;
+static int rdp_key_events;
+size_t native_evdev_input_pop_keyboard_batch(NativeEvdevInput *input, NativeKeyboardEv *out, size_t cap) {
+    (void)input;
+    assert(cap >= keyboard_count);
+    memcpy(out, keyboard_events, keyboard_count * sizeof(*out));
+    size_t count = keyboard_count;
+    keyboard_count = 0;
+    return count;
+}
+bool native_mixer_overlay_consumes_evdev_key(uint16_t code) { return code == 105 || code == 106; }
+void native_mixer_overlay_evdev_key(App *app, uint16_t code, bool down) { (void)app; (void)code; (void)down; }
+bool native_input_linux_keycode_to_rdp(uint32_t code, uint8_t *scancode, bool *extended) {
+    *scancode = code == 105 ? 0x4b : 0x4d;
+    *extended = true;
+    return true;
+}
+bool native_input_key(NativeInput *input, uint8_t scancode, bool down, bool extended) {
+    (void)input; (void)scancode; (void)down; (void)extended;
+    rdp_key_events++;
+    return true;
+}
+void native_track_key(App *app, uint8_t scancode, bool extended, bool down) {
+    (void)app; (void)scancode; (void)extended; (void)down;
 }
 
 
@@ -208,12 +277,10 @@ void native_system_volume_rebaseline(App *a) {
     (void)a;
 }
 
-void native_switch_watchdog_baseline(App *a, NativeSessionSlot *s) {
-    a->switch_baseline_frames=atomic_load(&s->video_ok_frames);
-}
-
-void native_switch_watchdog_start(App *a, uint32_t t) {
-    a->switch_deadline_ticks=ticks+t;
+void native_prepare_pending_switch(App *app, int target) {
+    (void)app;
+    (void)target;
+    assert(!"unexpected snapshot preparation");
 }
 
 void rdp_set_suppress_output(RdpSession *s, bool b) {
@@ -221,7 +288,8 @@ void rdp_set_suppress_output(RdpSession *s, bool b) {
     (void)b;
 }
 
-void rdp_request_refresh(RdpSession *s) {
+void rdp_request_refresh(RdpSession *s, uint32_t cookie) {
+    (void)cookie;
     (void)s;
 }
 
@@ -265,6 +333,7 @@ void native_mixer_overlay_force_hide(App *a) {
 }
 
 void native_stop_slot(App *a, int i) {
+    slot_stops++;
     a->sessions[i].rdp=NULL;
     atomic_store(&a->sessions[i].current_state, RDP_STATE_IDLE);
     atomic_store(&a->sessions[i].session_failed, false);
@@ -533,6 +602,9 @@ static void init(App *app) {
     grabs = overlay_hides = stops = fader_updates = 0;
     keyboard_focus = NULL;
     fail_survivor = false;
+    blocked_graphics = NULL;
+    barrier_owner = app;
+    slot_stops = barrier_calls = 0;
 }
 
 static void finish(App *app) {
@@ -600,6 +672,92 @@ static void test_survivor_failure_returns_to_ui(void) {
     assert(!native_any_slot_connected(&app) && !app.streaming_visible && ui_visible);
     native_session_supervisor_tick(&app, NULL);
     assert(!app.streaming_visible && ui_visible);
+    finish(&app);
+}
+
+static void init_switch(App *app) {
+    init(app);
+    ticks = 10000;
+    app->streaming_visible = true;
+    app->media = (NativeMedia *)1;
+    ui_visible = false;
+    for (int i = 0; i < 2; i++) {
+        app->sessions[i].rdp = (RdpSession *)(uintptr_t)(i + 1);
+        atomic_store(&app->sessions[i].current_state, RDP_STATE_ACTIVE);
+    }
+}
+
+static void test_busy_graphics_switch_retries_until_callbacks_finish(void) {
+    for (int blocked = 0; blocked < 2; blocked++) {
+        App app;
+        init_switch(&app);
+        blocked_graphics = app.sessions[blocked].rdp;
+        assert(!native_complete_session_switch(&app, 1));
+        assert(atomic_load(&app.active_index) == 0);
+        assert(app.pending_switch_target == 1 && app.pending_switch_graphics);
+        native_switch_tick(&app);
+        assert(atomic_load(&app.active_index) == 0 && app.pending_switch_target == 1);
+        assert(slot_stops == 0 && app.media);
+        blocked_graphics = NULL;
+        native_switch_tick(&app);
+        assert(atomic_load(&app.active_index) == 1);
+        assert(app.pending_switch_target == -1 && !app.pending_switch_graphics);
+        finish(&app);
+    }
+}
+
+static void test_deferred_switch_timeout_keeps_busy_handoff_pending(void) {
+    App app;
+    init_switch(&app);
+    app.pending_switch_target = 1;
+    app.pending_switch_deadline_ticks = ticks;
+    app.sessions[1].suppressed = true;
+    blocked_graphics = app.sessions[0].rdp;
+    native_switch_tick(&app);
+    assert(atomic_load(&app.active_index) == 0);
+    assert(app.pending_switch_target == 1 && app.pending_switch_graphics);
+    blocked_graphics = NULL;
+    native_switch_tick(&app);
+    assert(atomic_load(&app.active_index) == 1 && app.pending_switch_target == -1);
+    finish(&app);
+}
+
+static void test_busy_handoff_cancels_when_the_target_fails(void) {
+    App app;
+    init_switch(&app);
+    blocked_graphics = app.sessions[1].rdp;
+    assert(!native_complete_session_switch(&app, 1));
+    unsigned before = barrier_calls;
+    atomic_store(&app.sessions[1].session_failed, true);
+    native_switch_tick(&app);
+    assert(atomic_load(&app.active_index) == 0);
+    assert(app.pending_switch_target == -1 && !app.pending_switch_graphics);
+    assert(barrier_calls == before && slot_stops == 0);
+    finish(&app);
+}
+
+static void test_survivor_waits_for_graphics_before_failed_slot_teardown(void) {
+    App app;
+    init_switch(&app);
+    atomic_store(&app.sessions[0].session_failed, true);
+    atomic_store(&app.sessions[0].terminal_state, RDP_STATE_NETWORK_ERROR);
+    blocked_graphics = app.sessions[1].rdp;
+    native_session_supervisor_tick(&app, NULL);
+    assert(app.pending_switch_target == 1 && app.pending_switch_graphics);
+    assert(app.sessions[0].rdp && app.sessions[1].rdp && slot_stops == 0);
+    assert(app.streaming_visible && app.media && !ui_visible);
+    app.sessions[2].rdp = (RdpSession *)3;
+    atomic_store(&app.sessions[2].current_state, RDP_STATE_ACTIVE);
+    native_switch_tick(&app);
+    unsigned before = barrier_calls;
+    native_session_supervisor_tick(&app, NULL);
+    assert(barrier_calls == before && slot_stops == 0);
+    blocked_graphics = NULL;
+    native_switch_tick(&app);
+    native_session_supervisor_tick(&app, NULL);
+    assert(atomic_load(&app.active_index) == 1 && app.pending_switch_target == -1);
+    assert(!app.sessions[0].rdp && app.sessions[1].rdp && slot_stops == 1);
+    assert(app.streaming_visible && app.media && !ui_visible);
     finish(&app);
 }
 
@@ -693,13 +851,301 @@ static void test_mixer_motion_recovers_lost_release(void) {
     finish(&app);
 }
 
+static void test_statistics_remote_tabs(void) {
+    App app;
+    init(&app);
+    app.streaming_visible = true;
+    statistics_enabled = statistics_visible = true;
+    statistics_cycles = 0;
+    SDL_Event event = {.type = SDL_KEYDOWN};
+    event.key.keysym.sym = SDLK_RIGHT;
+    native_handle_sdl_event(&app, NULL, NULL, &event);
+    assert(statistics_cycles == 1);
+    event.key.repeat = 1;
+    native_handle_sdl_event(&app, NULL, NULL, &event);
+    assert(statistics_cycles == 1);
+    event.key.repeat = 0;
+    event.type = SDL_KEYUP;
+    native_handle_sdl_event(&app, NULL, NULL, &event);
+    assert(statistics_cycles == 1);
+    event.type = SDL_KEYDOWN;
+    event.key.keysym.sym = SDLK_LEFT;
+    native_handle_sdl_event(&app, NULL, NULL, &event);
+    assert(statistics_cycles == 0);
+    app.window_unfocused = true;
+    native_handle_sdl_event(&app, NULL, NULL, &event);
+    app.window_unfocused = false;
+    app.app_backgrounded = true;
+    native_handle_sdl_event(&app, NULL, NULL, &event);
+    app.app_backgrounded = false;
+    app.mixer_overlay_visible = true;
+    native_handle_sdl_event(&app, NULL, NULL, &event);
+    app.mixer_overlay_visible = false;
+    app.streaming_visible = false;
+    native_handle_sdl_event(&app, NULL, NULL, &event);
+    app.streaming_visible = true;
+    statistics_visible = false;
+    native_handle_sdl_event(&app, NULL, NULL, &event);
+    statistics_visible = true;
+    statistics_enabled = false;
+    native_handle_sdl_event(&app, NULL, NULL, &event);
+    statistics_visible = false;
+    assert(statistics_cycles == 0 && grabs == 0);
+    finish(&app);
+}
+
+static void test_statistics_grabbed_remote_and_usb_arrows(void) {
+    App app;
+    init(&app);
+    app.streaming_visible = app.evdev_input.started = true;
+    statistics_enabled = statistics_visible = true;
+    statistics_cycles = rdp_key_events = 0;
+    keyboard_events[0] = (NativeKeyboardEv){.code = 106, .down = true, .from_remote = true};
+    keyboard_events[1] = keyboard_events[0];
+    keyboard_events[2] = (NativeKeyboardEv){.code = 106, .down = false, .from_remote = true};
+    keyboard_count = 3;
+    native_drain_evdev_keyboard(&app);
+    assert(statistics_cycles == 1 && rdp_key_events == 0);
+    for (int i = 0; i < 3; i++) keyboard_events[i].from_remote = false;
+    keyboard_count = 3;
+    native_drain_evdev_keyboard(&app);
+    assert(statistics_cycles == 1 && rdp_key_events == 3);
+    keyboard_events[0] = (NativeKeyboardEv){.code = 105, .down = true, .from_remote = true};
+    keyboard_events[1] = (NativeKeyboardEv){.code = 105, .down = false, .from_remote = true};
+    app.mixer_overlay_visible = true;
+    keyboard_count = 2;
+    native_drain_evdev_keyboard(&app);
+    assert(statistics_cycles == 1 && rdp_key_events == 3);
+    app.mixer_overlay_visible = false;
+    keyboard_count = 2;
+    native_drain_evdev_keyboard(&app);
+    assert(statistics_cycles == 0 && rdp_key_events == 3);
+    app.window_unfocused = true;
+    keyboard_count = 2;
+    native_drain_evdev_keyboard(&app);
+    assert(statistics_cycles == 0 && rdp_key_events == 3);
+    app.window_unfocused = false;
+    statistics_enabled = false;
+    keyboard_count = 2;
+    native_drain_evdev_keyboard(&app);
+    assert(statistics_cycles == 0 && rdp_key_events == 5);
+    statistics_visible = false;
+    finish(&app);
+}
+
+static void test_statistics_controls_on_both_routes(unsigned tab) {
+    App app; init(&app);
+    app.streaming_visible = app.evdev_input.started = true;
+    statistics_enabled = statistics_visible = true;
+    statistics_navigation = (NativeStatisticsNavigation){.tab = tab};
+    unsigned *category = tab == NATIVE_STATS_VIDEO ? &statistics_navigation.video_category : &statistics_navigation.network_category;
+    native_statistics_focus_reset(&statistics_navigation);
+    SDL_Event event = {.type = SDL_KEYDOWN};
+    event.key.keysym.sym = SDLK_DOWN;
+    native_handle_sdl_event(&app, NULL, NULL, &event);
+    event.type = SDL_KEYUP; native_handle_sdl_event(&app, NULL, NULL, &event);
+    assert(statistics_navigation.focus == 1);
+    keyboard_events[0] = (NativeKeyboardEv){.code = 28, .down = true, .from_remote = true};
+    keyboard_events[1] = (NativeKeyboardEv){.code = 28, .down = false, .from_remote = true};
+    keyboard_count = 2; native_drain_evdev_keyboard(&app);
+    assert(*category == 1 && app.streaming_visible);
+    keyboard_events[0].code = keyboard_events[1].code = 108;
+    keyboard_count = 2; native_drain_evdev_keyboard(&app);
+    assert(statistics_navigation.focus == 2);
+    event.type = SDL_KEYDOWN; event.key.keysym.sym = SDLK_RETURN;
+    native_handle_sdl_event(&app, NULL, NULL, &event);
+    event.type = SDL_KEYUP; native_handle_sdl_event(&app, NULL, NULL, &event);
+    assert(statistics_navigation.help && app.streaming_visible);
+    keyboard_events[0].code = keyboard_events[1].code = 158;
+    keyboard_count = 2; native_drain_evdev_keyboard(&app);
+    assert(!statistics_navigation.help && statistics_navigation.focus == 2);
+    keyboard_count = 2; native_drain_evdev_keyboard(&app);
+    assert(statistics_navigation.focus == 0);
+    keyboard_events[0].code = 28; keyboard_count = 1; native_drain_evdev_keyboard(&app);
+    native_stop_streaming_input(&app);
+    assert(!statistics_navigation.held && *category == 1);
+    statistics_enabled = statistics_visible = false;
+    finish(&app);
+}
+
+static void test_statistics_composes_one_frame_without_grabbing_input(void) {
+    App app;
+    SDL_Renderer renderer = {0};
+    init(&app);
+    app.streaming_visible = true;
+    app.indicator_slot = -1;
+    statistics_enabled = true;
+    statistics_visible = false;
+    statistics_dirty = true;
+    presents = statistics_draws = 0;
+    int old_grabs = grabs;
+    native_present_streaming_frame(&app, &renderer, NULL);
+    assert(presents == 1 && statistics_draws == 1 && grabs == old_grabs);
+    for (int i = 0; i < 10; i++) native_present_streaming_frame(&app, &renderer, NULL);
+    assert(presents == 1 && statistics_draws == 1);
+    statistics_dirty = true;
+    native_present_streaming_frame(&app, &renderer, NULL);
+    assert(presents == 2 && statistics_draws == 2);
+    app.rgba = (NativeRgbaSurface *)1;
+    app.rgba_owner_slot = 0;
+    app.rgba_owner_epoch = 0;
+    native_present_streaming_frame(&app, &renderer, NULL);
+    assert(presents == 3 && statistics_draws == 3);
+    app.rgba = NULL;
+    native_present_streaming_frame(&app, &renderer, NULL);
+    assert(presents == 4 && statistics_draws == 4);
+    native_present_streaming_frame(&app, &renderer, NULL);
+    assert(presents == 4);
+    statistics_enabled = false;
+    native_present_streaming_frame(&app, &renderer, NULL);
+    assert(presents == 5 && !statistics_visible);
+    native_present_streaming_frame(&app, &renderer, NULL);
+    assert(presents == 5);
+    finish(&app);
+}
+
+static void test_ready_session_does_not_hide_certificate_prompt(void) {
+    App app;
+    init(&app);
+    NativeSettings settings = {0};
+    SDL_Window window = {0};
+    app.certificate_prompt_active = true;
+    app.sessions[0].rdp = (RdpSession *)1;
+    atomic_store(&app.sessions[0].current_state, RDP_STATE_ACTIVE);
+    ui_visible = true;
+    native_streaming_transition_tick(&app, NULL, &settings, &window);
+    assert(!app.streaming_visible && ui_visible && grabs == 0);
+    app.certificate_prompt_active = false;
+    native_streaming_transition_tick(&app, NULL, &settings, &window);
+    assert(app.streaming_visible && !ui_visible);
+    finish(&app);
+}
+
+typedef struct DiagnosticsSampler {
+    App *app;
+    atomic_bool entered, returned;
+} DiagnosticsSampler;
+
+static void *sample_diagnostics(void *ctx) {
+    DiagnosticsSampler *sampler = ctx;
+    atomic_store(&sampler->entered, true);
+    native_diagnostics_tick(sampler->app);
+    atomic_store(&sampler->returned, true);
+    return NULL;
+}
+
+static void test_statistics_requires_decoder_owner(void) {
+    App app;
+    init(&app);
+    statistics_enabled = true;
+    decoder_stats = (NativeDecoderStats){.available = true, .primary_total = 150, .pending = 3};
+    atomic_store(&app.sessions[0].connect_epoch, 1);
+    app.video_owner_slot = 0;
+    app.video_owner_epoch = 1;
+    native_diagnostics_tick(&app);
+    assert(app.diagnostics.snapshot.decoder.available);
+    assert(app.diagnostics.snapshot.ndl.timing_valid);
+    assert(app.diagnostics.snapshot.decoder.primary_total == 150);
+    assert(app.diagnostics.snapshot.decoder.pending == 3);
+
+    atomic_store(&app.active_index, 1);
+    atomic_store(&app.sessions[1].connect_epoch, 2);
+    native_diagnostics_tick(&app);
+    assert(app.diagnostics.snapshot.slot == 1);
+    assert(!app.diagnostics.snapshot.decoder.available);
+    assert(!app.diagnostics.snapshot.ndl.timing_valid);
+    assert(app.diagnostics.snapshot.decoder.primary_total == 0);
+    assert(app.diagnostics.snapshot.decoder.pending == 0);
+
+    app.video_owner_slot = 1;
+    app.diagnostics.sampled = false;
+    native_diagnostics_tick(&app);
+    assert(!app.diagnostics.snapshot.decoder.available);
+    assert(!app.diagnostics.snapshot.ndl.timing_valid);
+
+    app.video_owner_epoch = 2;
+    app.diagnostics.sampled = false;
+    native_diagnostics_tick(&app);
+    assert(app.diagnostics.snapshot.decoder.available);
+    assert(app.diagnostics.snapshot.ndl.timing_valid);
+    assert(app.diagnostics.snapshot.decoder.primary_total == 150);
+    assert(app.diagnostics.snapshot.decoder.pending == 3);
+
+    atomic_store(&app.sessions[1].video_via_bitmap, true);
+    app.diagnostics.sampled = false;
+    native_diagnostics_tick(&app);
+    assert(!app.diagnostics.snapshot.decoder.available);
+    assert(!app.diagnostics.snapshot.ndl.timing_valid);
+    decoder_stats = (NativeDecoderStats){0};
+    statistics_enabled = false;
+    finish(&app);
+}
+
+static void test_statistics_waits_for_busy_decoder(void) {
+    App app;
+    init(&app);
+    statistics_enabled = true;
+    native_diagnostics_tick(&app);
+    assert(app.diagnostics.sampled && !app.diagnostics.snapshot.rates.valid);
+    app.diagnostics.sampled_ms -= NATIVE_DIAGNOSTICS_INTERVAL_MS;
+    app.diagnostics.window.at_ms -= NATIVE_DIAGNOSTICS_INTERVAL_MS;
+    pthread_mutex_lock(&app.video_lock);
+    DiagnosticsSampler sampler = {.app = &app};
+    pthread_t thread;
+    assert(pthread_create(&thread, NULL, sample_diagnostics, &sampler) == 0);
+    while (!atomic_load(&sampler.entered)) sched_yield();
+    const struct timespec feed_delay = {.tv_nsec = 20000000};
+    nanosleep(&feed_delay, NULL);
+    assert(!atomic_load(&sampler.returned));
+    app.sessions[0].diagnostics.received = 30;
+    app.sessions[0].diagnostics.bytes = 1000000;
+    app.sessions[0].diagnostics.bytes_auxiliary = 250000;
+    pthread_mutex_unlock(&app.video_lock);
+    assert(pthread_join(thread, NULL) == 0);
+    assert(app.diagnostics.snapshot.counters.received == 30);
+    NativeDiagnosticsRates rates = app.diagnostics.snapshot.rates;
+    assert(rates.valid && rates.input_mbps > 0 && rates.input_auxiliary_mbps == rates.input_mbps / 4);
+    statistics_enabled = false;
+    native_diagnostics_tick(&app);
+    assert(!app.diagnostics.enabled && !app.diagnostics.sampled);
+    finish(&app);
+}
+
 int main(void) {
+    test_ready_session_does_not_hide_certificate_prompt();
+    test_statistics_remote_tabs();
+    test_statistics_controls_on_both_routes(NATIVE_STATS_VIDEO);
+    test_statistics_controls_on_both_routes(NATIVE_STATS_NETWORK);
+    test_statistics_grabbed_remote_and_usb_arrows();
+    test_statistics_requires_decoder_owner();
+    test_statistics_waits_for_busy_decoder();
+    test_statistics_composes_one_frame_without_grabbing_input();
     test_focus_controls_grab_and_input_arming();
     test_survivor_failure_returns_to_ui();
     test_rgba_transition_releases_mixer_ownership();
     test_drag_cannot_survive_lost_button_state();
     test_mixer_motion_recovers_lost_release();
     test_mixer_motion_preserves_handoff_buttons();
+    test_busy_graphics_switch_retries_until_callbacks_finish();
+    test_deferred_switch_timeout_keeps_busy_handoff_pending();
+    test_busy_handoff_cancels_when_the_target_fails();
+    test_survivor_waits_for_graphics_before_failed_slot_teardown();
     puts("PASS native-runtime");
     return 0;
+}
+
+NativeDecoderStats native_video_get_decoder_stats(const NativeVideo *video) { (void)video; return decoder_stats; }
+
+int rdp_session_get_network_stats(RdpSession *session, RdpNetworkStats *out) {
+    (void)session;
+    *out = (RdpNetworkStats){0};
+    return 0;
+}
+
+bool rdp_graphics_barrier(RdpSession *session, uint32_t timeout_ms) {
+    assert(timeout_ms == 500);
+    assert(pthread_mutex_trylock(&barrier_owner->video_lock) == 0);
+    pthread_mutex_unlock(&barrier_owner->video_lock);
+    barrier_calls++;
+    return !session || session != blocked_graphics;
 }

@@ -20,6 +20,7 @@
 #include "native_rgba_owner.h"
 #include "native_sdl_events.h"
 #include "native_session.h"
+#include "native_rdp_media.h"
 #include "native_settings.h"
 #include "native_switch.h"
 
@@ -147,6 +148,7 @@ int native_run_app_loop(App *app, NativeSettings *settings) {
             native_pump_preconnect_system_events(app, window, renderer, ui, &window_width, &window_height);
         }
 
+        native_audio_media_tick(app);
         native_switch_tick(app);
         native_system_volume_tick(app);
 
@@ -154,6 +156,7 @@ int native_run_app_loop(App *app, NativeSettings *settings) {
         native_hub_runtime_publish(app, ui);
         native_streaming_transition_tick(app, ui, settings, window);
 
+        native_diagnostics_tick(app);
         if (app->streaming_visible) {
             native_present_streaming_frame(app, renderer, &present_logged);
         }

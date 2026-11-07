@@ -7,6 +7,9 @@
 #include <backend_ndl/backend_ndl.h>
 
 #include "media_backend.h"
+#include "native_decoder_stats.h"
+
+NativeDecoderStats native_media_ndl_decoder_stats(NativeMedia *media);
 
 BackendNdl *native_media_ndl_backend(NativeMedia *media);
 BackendNdlResult native_media_ndl_configure_video(NativeMedia *media,

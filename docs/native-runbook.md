@@ -49,6 +49,29 @@ Host tests and an ARMv7 package build check the transport and decoder boundary.
 They do not establish HEVC playback, 4K60, or mixed-codec switching on a TV; those
 still require a device smoke test with the matching server.
 
+## Graphics worker
+
+Each RDP session dispatches owned video AUs, bitmap updates, desktop sizes and
+refresh boundaries through one serial graphics worker. Network/audio processing
+continues while the video callback feeds NDL. Main/aux AUs retain wire order and
+the existing 90 kHz PTS sequence. Audio sink creation runs on the main loop.
+
+The queue includes the running callback: at most 32 data events and 256 total
+events per session, with 64 MiB of queued/running payloads across the application
+and a 32 MiB limit per video AU. Overflow terminates the session explicitly;
+it never sheds individual AUs from the decoder reference chain. EGFX ACKs keep
+IronRDP's payloads and wait for their frame's callback completion, which does
+not measure physical display. Resets cancel queued graphics and stale ACKs.
+
+`rdp_graphics_barrier()` waits for previously accepted callbacks before replay,
+slot handoff or media teardown. Call outside callbacks and media locks, with no
+concurrent session stop. A handoff whose callbacks are still busy stays pending
+and retries on later SDL ticks; failover retains the failed slot until ownership
+has moved to the survivor. `rdp_session_stop()` cancels pending work and joins both
+workers before callback context can be released. Graphics and audio callbacks
+may overlap; callback payloads remain borrowed only until return. Rebuild C and
+Rust together; callback table layout is unchanged.
+
 ## Multi-RDP Sessions (red/green/yellow/blue)
 
 The app can hold up to four simultaneous RDP sessions to different servers, mapped to
@@ -79,8 +102,69 @@ the TV remote's color buttons in the remote's own order: red, green, yellow, blu
   widget and while a connection is pending; holding Esc dismisses only one layer.
 - **HUB D-pad navigation**: LEFT/RIGHT move across all four computer cards, UP enters
   the selected card's action controls, and the remaining directions move between
-  Connect/Resume, Edit, Help, and the selected card. OK activates the focused element.
+  Connect/Resume, Edit, Capture, Stats, Help, and the selected card. OK activates the focused element.
   Colour keys and CH +/- remain optional direct shortcuts.
+- **Stats** starts off; the HUB button toggles the native 960x680 overlay at the top left, in the
+  1920x1080 UI coordinate space; a 3840x2160 RDP desktop does not scale its fonts.
+  Overview, Video, Audio, Network, Performance and Diagnostics share one fixed panel without
+  scrolling. Titles use 16 px, card values 22 px and details 12 px IBM Plex fonts.
+  The profile, stream format and connection state remain visible. Video activity is
+  separate: an idle desktop can legitimately stop sending access units.
+- **Statistics navigation**: LEFT/RIGHT on the tab row selects a tab; OK opens HUB
+  on release. DOWN enters the Video/Audio/Network category selector, then Metric notes;
+  other tabs go directly to notes. UP/DOWN moves focus, LEFT/RIGHT or OK changes the selected category, and OK
+  opens notes (LEFT/RIGHT pages through their source/scope details). BACK closes notes first, then returns to the tabs. The focus outline
+  and footer explain the current action. Both SDL and grabbed remote nodes use one
+  handler. Metric notes use the footer as their focus target, without a permanent label
+  above the charts. Both input paths respect mixer priority;
+  repeat presses and unmatched releases do not activate
+  controls. USB keyboard and mouse input still belongs to RDP. Hiding the panel or
+  losing focus resets held buttons and focus, while retaining tab and categories.
+- **Statistics sources**: widgets read metric descriptors and `NativeDiagnosticsSnapshot`
+  directly. Valid values, Collecting, Stale, Unavailable and Not measured are distinct;
+  unknown measurements are never replaced with zero. Notes identify producer, scope and
+  availability. Reference fields without instruments (including presented FPS, A/V offset,
+  packet loss and physical latency) remain Not measured. Lifetime underruns alone do not
+  color Audio as faulty. Audio always lists all four slots, including disconnected ones.
+- **Network**: four cards (receive/transmit throughput, RTT p95, packet loss), two charts
+  (connection throughput and latency/variation), and Connection/Delivery/Recovery groups
+  use the same fixed panel. State comes from the RDP worker; TCP/TLS describes the active
+  transport. Session uptime reuses the HUB clock and includes automatic reconnects.
+  Socket throughput, RTT, interface, packet delivery and recovery counters are not
+  instrumented: fields say Not measured and charts remain empty. Video AU bitrate,
+  audio jitter and RDP processing time are not substitutes for connection measurements.
+  No synthetic network samples, whole-TV traffic counters or new C/Rust ABI are used.
+- **History**: sampling remains 500 ms while Stats is enabled, including under HUB.
+  Charts always show the last 30 seconds. Each series stores at most 61 samples
+  with monotonic modulo-32-bit timestamps. Charts use X coordinates in tenths of a second
+  (0..300), and independently scale Y into 0..1000 while labeling real units.
+  Legends pair each series label with a dot in its line color; side-axis colors remain.
+  Missing history stays empty; sampling gaps over one second break continuous series.
+  Video input shows AU/s and total Mbit/s with independent axes. These are payloads at
+  the existing synchronous C graphics callback, excluding transport overhead;
+  auxiliary AVC444 data is included, and cached replay is excluded.
+  Decoder output and its card use the existing primary-frame counter delta every 500 ms,
+  including real zero output on a static desktop. Auxiliary pictures are excluded;
+  missing samples leave gaps. It is not presentation or screen FPS.
+  The audio buffer and target reuse the existing source snapshots. Audio flow uses passive
+  32-bit counters: incoming PCM (including overflow rejects) and frames produced by SRC,
+  excluding synthetic underrun silence. Rates are ms of audio per second (1000 at realtime);
+  unsigned deltas handle counter wrap. Queue age is not measured. Profile/graphics changes and observed audio
+  connection/format changes start new histories; disabling Stats clears history.
+  Underruns and overflow trims preserve buffer history.
+- **Measurement scope**: decoder timing uses matched backend_ndl frame events and
+  bounded five-second histograms. Reports older than 7.5 seconds are Stale. Live decoder
+  counters supply primary output rate and pending depth; these are not screen FPS.
+  Audio jitter, target delay, SRC correction and correction counters come directly from
+  the existing audio source snapshot. RDP processing, separate graphics-executor metrics,
+  PCM age, pump timings and dropped PCM counts are Not measured. The statistics overlay adds no audio storage or C/Rust callbacks.
+  NDL call EWMA, maximum and errors describe submission during the current decoder load,
+  not decode or physical presentation latency. App CPU uses 100% per core; RSS is resident
+  process memory. Per-core bars cover all TV processes from `/proc/stat`, excluding idle
+  and I/O wait. Missing cores are hidden; cores awaiting a sample show Collecting.
+  Bitmap/HEVC paths leave unsupported decoder fields unmeasured. Widgets are created
+  once; only the active tab refreshes on the UI thread. The SDL line-renderer fix is
+  required by chart/focus drawing. Statistics does not change saved profiles.
 - **Connection status**: `REBOOT`, `SHUTDOWN`, `SIGNED OUT`, and `CLOSED` identify
   normal session endings in grey. `REPLACED`, `TIMED OUT`, `LOST`, and `FAILED` are
   amber; protocol, graphics, and server failures remain red `ERROR`. The selected
@@ -213,6 +297,15 @@ the TV remote's color buttons in the remote's own order: red, green, yellow, blu
   raise the target immediately;
   underruns postpone decay. Stable delivery can lower it by at most 10ms per five
   seconds, never below the cadence-derived floor or 40ms.
+  Queue exhaustion itself does not raise the target. On the first packet after an
+  underrun without a usable timestamp delta, arrival measurement restarts from that
+  packet: the missing interval may be server-suppressed silence. The interval is
+  held for one packet; a catch-up packet within half a decoded block contributes
+  it as delivery jitter, otherwise it is discarded. Without useful timestamps,
+  an isolated delayed packet without catch-up cannot be classified reliably.
+  Underflows remain counted. Timestamped delivery stalls and untimestamped jitter
+  that does not exhaust the queue still update the target. Timestamp gaps do not
+  raise the block-duration floor. Queue-event logs do not prove an audible defect.
 - Queue error beyond 10ms changes each source's SRC ratio smoothly, capped at +/-0.5%
   by a 50ms error, with a slow drift term for mismatched producer/DAC clocks. A backlog
   over target by `max(80ms, target)` fades out for 5ms, drops old frames to
@@ -228,15 +321,25 @@ the TV remote's color buttons in the remote's own order: red, green, yellow, blu
   SRC ppm, underrun, hard-correction, and overflow counters are logged as one snapshot no
   more often than every three seconds.
 - A backgrounded session's graphics are paused server-side via TS_SUPPRESS_OUTPUT_PDU.
-  Because grd resumes with a delta frame and rejects Refresh Rect, switching back forces
-  a fresh IDR by re-submitting the Display Control monitor layout (grd rebuilds its
-  encode session on every layout PDU, even an identical one → RESET_GRAPHICS + IDR). If
-  no decodable frame arrives within 2s of a switch (e.g. grd mirror mode has no Display
-  Control channel), the client reconnects that session once — a fresh connection always
-  starts with an IDR — and remembers the slot as refresh-ineffective, so later switches
-  skip the doomed wait.
+  A fresh keyframe is requested with a graphics-channel protocol reset (RDPGFX
+  CapsAdvertise, standard V10.3-V10.7), preserving the negotiated capabilities. This
+  resets the server encoder without reconnecting RDP or closing audio channels. In-flight
+  graphics are discarded until the new CapsConfirm. Monitor layout, resolution and DPI
+  are unchanged; resending an identical layout can disconnect some Windows servers.
+  Older/private graphics versions fall back to Refresh Rect. If no decodable frame
+  arrives within 2s, the client reconnects once and remembers that slot as
+  refresh-ineffective, so later switches skip the unsuccessful refresh wait.
+- **Background preparation for responsive video servers**: leaving an active compressed
+  stream requests its next IDR into the snapshot cache immediately. The existing switch
+  tick suppresses the server after the IDR arrives and retains the 500ms quiet window.
+  Returning after preparation replays the cache and resumes normally; a quick return
+  waits for the same in-flight preparation without requesting another refresh.
+  Snapshot acceptance and active recovery wait for `on_refresh_started` with the matching
+  request cookie, so an old frame cannot satisfy the cache or recovery watchdog before
+  the worker resets graphics.
+  This callback is appended to the C/Rust ABI (144 bytes on 64-bit, 72 on ARM32).
 - **IDR-snapshot backgrounding** (refresh-ineffective slots): a plain suppress would
-  strand such a slot behind an unusable delta chain (grd emits its only IDR at connect),
+  strand such a slot behind an unusable delta chain when its server ignores refresh,
   so leaving its stream instead reconnects the slot invisibly — behind the new active
   screen — and caches the fresh connection's compressed IDR (+ any deltas racing the
   suppress) in an 8MB/slot AU snapshot; the server is suppressed once the IDR is in
@@ -259,7 +362,8 @@ the TV remote's color buttons in the remote's own order: red, green, yellow, blu
   CURRENT slot's key cancels the deferred switch. Trade-off accepted deliberately: the
   hidden reconnect of a backgrounding slot interrupts that session's own audio in the
   mix for ~1-2s (`source N ran dry` + a one-cut backlog trim on rejoin) — the price of
-  instant switch-backs on servers that only ever emit their connect IDR.
+  instant switch-backs on servers that only emit an IDR on connection. Continuous audio
+  is preferred, but a bounded reconnect remains the fallback for recovering video.
 - **Channel-rocker ring switching**: during streaming CH_UP/CH_DOWN zap through the
   connected slots (red → green → yellow → blue → red; empty slots are skipped and stay
   reachable via their color buttons). Handled on both delivery paths like the color
@@ -386,18 +490,29 @@ The hub's setup drawer saves a profile immediately on **Save** or **Save and con
 a failed first connection does not discard the optional profile name, address, username,
 domain, password, or FPS. **Delete profile** removes that colour's saved credentials after
 confirmation. The camera-icon drawer saves app-global camera and microphone settings
-independently. Unsaved drafts in other drawers are never included. The save path is
-resolved from a candidate list (each rejection is logged with its reason); on the TV the
-winner is the in-app
-`<approot>/settings/<euid>/settings.json` — the IPK ships `settings/` mode 01777 because
-the install tree is root-owned, and the app creates a private 0700 subdir inside (same
-trust model as /tmp). Verified on device: this survives app restarts, package
-reinstalls AND TV power cycles; `/media/developer/temp/<appid>-<euid>` is the next
-candidate (persistent ext4), and the tmpfs `/tmp/<appid>-<euid>` fallback is last —
-loading scans the same priority order, so settings migrate upward on the next save.
-Saved files use mode 0600. Discovered files writable by a group or other users are
-ignored even after their directory is tightened to 0700; loading then tries the next
-candidate. Restore such files only from a trusted backup or save the profiles again.
+independently. Unsaved drafts in other drawers are never included. The default save/load path is
+`<approot>/settings/<euid>/settings.json` on every TV. The IPK ships the `settings/`
+parent with mode 01777; the application creates its own 0700 UID directory and
+writes settings atomically with mode 0600, including file and directory fsync.
+No root startup hook, bind mount, SDL preference directory, or temporary-directory
+fallback is used. Explicit `LGNOME_NATIVE_SETTINGS_PATH` / `LGNOME_NATIVE_SETTINGS_DIR`
+overrides retain priority.
+
+Developer Mode may widen file and directory permissions during boot or installation.
+The application repairs its own directory to 0700 and its owned regular settings
+file to 0600 before parsing. Symlinks, hard links, foreign-owned files/directories,
+and files changed during the read are rejected. A successful load replaces the
+settings inode atomically, preserving the validated file bytes without adding launch
+overrides, so a previously opened writable descriptor cannot change future loads.
+Recovery trusts ownership of the existing application file; it cannot
+authenticate changes made before permission repair. An invalid or inaccessible
+existing settings file fails startup instead of silently loading empty profiles.
+
+For TVs previously using the root-only storage workaround, back up the current
+settings, move an unchanged copy into the app-owned UID directory, and disable the
+old startup hook. Keep the previous root storage as a backup; it is no longer read
+by default. Verify both application restart and physical power removal on each TV.
+
 Explicit webOS launch params or CLI flags override loaded settings (flat launch/CLI keys
 target the green slot). Set `LGNOME_IGNORE_SAVED_CONFIG=1` for a one-off launch that
 ignores saved UI settings.
@@ -441,8 +556,8 @@ cmake --build /tmp/lgnome-native-rust-build
 The product webOS build requires:
 
 - webOS buildroot toolchain;
-- initialized `third_party/backend_ndl`, `third_party/IronRDP`,
-  `third_party/lvgl`, and `third_party/miniaudio` submodules;
+- initialized `third_party/backend_ndl` and `third_party/IronRDP` submodules;
+- network access on the first build to download the pinned LVGL and miniaudio ZIPs and libopus;
 - SDL2 for the webOS target;
 - Rust target support for `armv7-unknown-linux-gnueabi`.
 
@@ -719,8 +834,8 @@ open item.
 - H.264-capable sessions should use the NDL hardware path; if the server cannot provide H.264,
   verify native RemoteFX bitmap updates reach the SDL RGBA presenter.
 - A Windows host can confirm `V10_7{SMALL_CACHE}` yet remain on Uncompressed/ClearCodec
-  while frame acknowledgments are active. The native worker sends one
-  `SUSPEND_FRAME_ACKNOWLEDGEMENT` response and then stops acknowledging frames, telling the
+  while frame acknowledgments are active. The production baseline sent one
+  `SUSPEND_FRAME_ACKNOWLEDGEMENT` response and then stopped acknowledging frames, telling the
   server not to apply EGFX backpressure; on the validated host and continuous-motion
   workload this changes the session to H.264 after roughly 7-8 seconds. Once H.264 is live, Windows can
   continue sending RemoteFX/ClearCodec still-region refinements. The native shell holds the
@@ -784,7 +899,7 @@ open item.
 Initialize pinned native dependencies:
 
 ```sh
-git submodule update --init third_party/backend_ndl third_party/IronRDP third_party/lvgl third_party/miniaudio
+git submodule update --init third_party/backend_ndl third_party/IronRDP
 ```
 
 See `third_party/PROVENANCE.md` for pinned commits, licenses, and the Moonlight reference boundary.
@@ -804,13 +919,29 @@ EGFX logs the advertised capability sets and the server-confirmed set separately
 ResetGraphics reports the actual graphics size. The first H.264 base-view AU and first
 bitmap rectangle after each reset identify the observed payload path. An H.264 base
 view alone does not establish AVC420 negotiation: AVC444 can also carry that view, and
-its dropped auxiliary data is reported separately. Surface mappings are debug-level.
+its auxiliary data is reported separately. Surface mappings are debug-level.
 Decoder-open records include slot, connection epoch, dimensions, AU framing, and
 SPS/PPS/IDR presence. No compressed payload bytes are logged.
 
-The tested Windows host needs V10 capabilities for H.264; AVC_THIN_CLIENT requests
-its YUV420 view. The NDL decoder presents every submitted AU, so the client drops
-AVC444 auxiliary chroma rather than displaying it as an image. H.264 callbacks feed
+The tested Windows host needs V10 capabilities for H.264; AVC_THIN_CLIENT advertises
+a preference for YUV444. AVC444 AUs retain wire order through the C callback's
+`RDP_VIDEO_FLAG_AVC444_AUX` flag. Every main and auxiliary AU reaches the same
+NDL decoder, including
+auxiliary deltas. LC0 produces main then auxiliary, LC1 main only, and LC2
+auxiliary only; the existing parser determines these roles. Annex-B/length-prefixed
+validation, decoder seeding, snapshot bounds and ordinary error handling remain.
+No concatenation of independent encoder streams or software decoding is used.
+
+The package keeps the lgnome app ID and saved profiles, with title `lgnome`.
+At RDP receipt, the client maps AVC444 auxiliary identity to a `decode_only`
+bit carried alongside each AU through snapshot caching and replay. Original
+H.264 bytes are preserved; framing normalization remains in the NDL adapter.
+`backend_ndl_feed_video_ex()` receives this metadata and CONFIG_ONLY for AUs
+without an image. No SVC prefixes are inserted. Both views retain their reference
+chain in one hardware decoder; the library suppresses auxiliary output after
+matching unique internal PTS tokens. Main output regains its original timestamp.
+There is no GPU chroma reconstruction.
+Test one explicitly selected saved profile at a time. H.264 callbacks feed
 the hardware plane directly and leave IronRDP's unused compositor disabled.
 SolidFill, SurfaceToSurface and CacheToSurface are currently ignored: they are not
 needed to present complete H.264 frames, but may leave stale pixels in bitmap-only
@@ -822,6 +953,83 @@ by the decoder, not displayed
 frames or server frame boundaries. AU/s and compressed-input bitrate cannot establish
 screen FPS or end-to-end latency. Static desktops may produce few AUs without any
 performance problem. Compare the same moving scene when changing modes.
+For this experiment, `slot_received`, `slot_auxiliary` and `slot_accepted` are
+connection-scoped input counters. Auxiliary input must be nonzero before claiming
+the mixed stream was tested; an AVC420-only session is a baseline. A difference
+between received and accepted counts must be investigated as an input loss, even
+if the application keeps running. Neither equality nor NDL PLAYING proves correct
+display of the reconstructed desktop.
+
+The webOS build enables backend_ndl's optional GStreamer module. NDL retains
+pipeline creation and hardware resource ownership; the library owns its scoped
+interposition, metadata, bounded queues, picture matching and latched errors.
+Video and audio app types are selected independently; lgnome chooses RTC for
+H.264 and PCM and leaves the existing HEVC route at DEFAULT.
+The H.264 pipeline uses `RTC` for its decoder, video sink and PCM audio sink.
+RTC retains the firmware's `omxh264dec1`/DVO path, which exposes decoded buffers
+for auxiliary-output filtering, and enables low-delay decoding. The DIRECTMEDIA
+video path uses `rvdec`/`rvsink2` and bypasses these output pad probes.
+Audio uses `sync=false, async=false`; the adaptive mixer queue is unchanged.
+
+The firmware copies NDL's millisecond timestamps directly into GstBuffer PTS.
+Both appsrc tracks convert them to nanoseconds. Decoder tokens follow the
+presentation timeline and advance by one millisecond only to distinguish
+colliding or backward timestamps. Main output regains its original PTS.
+Picture matching is bounded to 128 pending pictures, flush-aware and independent
+of AU parity. QoS decoding skips are disabled. The visible image remains the
+primary 4:2:0 view; full-chroma reconstruction is not implemented.
+
+Video submission uses GStreamer's streaming thread with a nonblocking queue capped
+at 512 buffers and 32 MiB. Flush and close release queued buffers; overflow or a
+failed push reports a terminal decoder error through the NDL adapter. RDP dispatch
+and snapshot replay do not wait for the decoder to drain. Configuration-only
+H.264 buffers pass through without a pending-picture entry.
+Normal graphics frame acknowledgments remain enabled.
+Five-second decoder counters report returned pictures,
+suppressed outputs and buffers forwarded toward the sink; they do not measure
+physical presentation. An optional library frame callback supplies original PTS,
+monotonic submission/output times and the suppression decision for statistics.
+All ten discovered vendor app types are selectable through the library API;
+selection does not establish their compatibility on a given TV. See backend_ndl's
+README for API contracts and known firmware limits. Windows codec selection with acknowledgments enabled has not been
+revalidated. See [`tools/avc444-rpc-probe/README.md`](../tools/avc444-rpc-probe/README.md)
+for hardware routing, test methods and measurement limits.
+
+The 2026-10-25 target test on SDK 9.1.1 covered one three-minute black-background
+motion-and-tone run per server fidelity mode. Both negotiated RDPEGFX 10.7 at a
+3840x2160 desktop: low used AVC420; default used AVC444v2 and suppressed auxiliary
+decoder outputs. Neither run accumulated the input queue or reported a metadata
+matching error. This firmware constructs elements through
+`gst_element_factory_create`; backend_ndl tracks that entry point as well as
+`gst_element_factory_make`. Audio reported startup/end corrections in both runs;
+the previously observed correction during motion did not recur in these trials.
+This does not establish physical panel FPS, subjective audio quality, compatibility
+of other app types, or full 4:4:4 reconstruction.
+
+A bounded capture reproduced corruption when decoded without auxiliary
+AUs. Keeping the single auxiliary IDR made all 33 base frames pixel-identical to
+decoding both views in wire order; forwarding only its SPS/PPS did not help. This
+establishes the missing reference reset in that capture, not independence from all
+auxiliary deltas for every encoder. No desktop capture is shipped as a fixture.
+The video callback ABI is now `on_video_au(ctx, codec, flags, data, len, pts90k)`;
+rebuild C and Rust together. Struct sizes/offsets remain unchanged on ARM32 and host.
+TV acceptance with the retained auxiliary IDR: a fresh Windows connection and
+repeated red/green switches produced a clean, stable picture confirmed by the user.
+Logs confirmed auxiliary IDR retention before cached handoffs and continued NDL
+H.264 at 3840x2160. Codec selection, desktop scale, and decoding backend were unchanged.
+
+An isolated NDL replay on webOS SDK 8.3.0 also checked auxiliary presentation.
+The 3840x2160 capture was replayed in wire order at its recorded arrival intervals,
+with continuous silent PCM on the shared media pipeline. Stopping after an auxiliary
+AU and capturing the hardware video plane showed its chroma image, not the desktop.
+All 59 submitted AUs were accepted in each full-stream trial. Auxiliary PTS values of
+zero, the preceding base frame's PTS, and media time minus 1000 ms all still displayed
+the auxiliary image. The last variant also failed with render-queue threshold 2.
+The control retaining only base AUs and the auxiliary IDR showed a normal desktop.
+These tests rule out those timestamp/queue tricks on this firmware; they do not rule
+out a lower-level decoder API with separate output control. No full YUV444
+reconstruction was tested. The replay harness and private captures are not shipped;
+the tested production build was restored afterward.
 
 ### Mouse and keyboard event ordering
 
@@ -867,6 +1075,91 @@ The existing guard against sending a layout when server dimensions already match
 remains in place. Scaling does not change WDDM, codec selection, NDL decoding, or
 pixel-coordinate input mapping.
 
-The C/Rust `RdpConfig` ABI appends `desktop_scale_factor` (uint16/u16): offset 56,
-size 64 on 64-bit hosts; offset 36, size 40 on ARM32. Rebuild C and Rust together.
+The C/Rust `RdpConfig.desktop_scale_factor` (uint16/u16) is at offset 56 on
+64-bit hosts and offset 36 on ARM32. Rebuild C and Rust together.
 Zero at the ABI boundary defaults to 100; other values must be 100, 150, or 200.
+
+### Server certificate trust
+
+Before sending any CredSSP authentication traffic, the native client checks the
+server certificate's chain, validity dates and server name against the bundled
+Mozilla roots (`webpki-roots`). A certificate that fails verification opens a
+modal with the endpoint, reason and SHA-256 fingerprint. Compare that fingerprint
+with the certificate on the intended server before choosing Connect. Cancel is
+focused by default; Back also cancels. Headless clients without a certificate
+callback reject unverified certificates.
+
+Connect alone trusts the certificate for the current connection and its automatic
+reconnections. The initially unchecked "Don't ask again" box stores the exception
+in that profile: `trustedCertificateHost`, `trustedCertificatePort` and
+`trustedCertificateSha256`. Only that exact endpoint and certificate bypass PKI
+warnings, including expiry/name/issuer errors. A different certificate always asks
+again, even if it would otherwise pass PKI validation. Changing the profile's
+address or port makes the old exception inapplicable; deleting the profile clears
+it. Old profiles have no exception and ask on their first unverified connection.
+Trust is stored before continuing when requested; a failed save leaves the dialog
+open so the user can retry, connect once, or cancel. Password storage is unchanged.
+
+The worker waits without sending authentication data and can be stopped while the
+dialog is open. After acceptance it opens a fresh connection and checks the approved
+fingerprint again, since the server may have timed out during the dialog.
+
+The C/Rust ABI appends `RdpConfig.trusted_certificate_sha256` (nullable string,
+copied at session start) and `RdpCallbacks.on_certificate` (borrowed strings during
+the callback). Reply with `rdp_confirm_certificate(session, fingerprint, accept)`;
+stale or duplicate replies return false. Rebuild both sides together. On 64-bit
+hosts the appended offsets are 64/144 and struct sizes 72/152; on ARM32 they are
+40/72 and sizes 44/76, respectively.
+
+### Decoder statistics integration
+
+The HUD-styled statistics retains its 960x680 layout and existing font sizes.
+The adapter observes backend_ndl's public video status and frame-event API; it does
+not replace decoding or change output filtering, profiles, timestamps or buffering.
+Decoder generations reset the timing history. The RDP worker, frame acknowledgements,
+audio pipeline and session lifecycle remain those of main.
+
+### Passive Network telemetry
+
+Network keeps the existing 960x680 layout. `RdpNetworkStats` (144 bytes on host
+and ARMv7) and `rdp_session_get_network_stats()` extend the C ABI without changing
+callbacks. The getter copies a bounded snapshot with `try_lock` and never waits
+for socket I/O. The UI calls it outside `video_lock`; callers retain the session
+lifetime. A null/absent/busy source returns 0 and clears the output.
+
+The active worker publishes every 500 ms, without another thread or queue.
+`PollingSocket` counts successful read/write bytes from Active onward, including
+partial operations and TLS overhead, excluding IP/TCP headers and retransmitted
+bytes. Read/write calls are not packets. Normal 10 ms polling timeouts do not
+increment any failure counter. RX is server-to-TV; TX is TV-to-server. Throughput
+uses counter deltas across five seconds (up to one sampling interval of scheduling
+slop); the first five seconds are Collecting. Idle windows legitimately show zero.
+A bounded 12-sample worker history supplies rates; UI graphs retain 30 seconds.
+
+Active-stage IronRDP Auto-Detect reports supply average RTT, lowest RTT and server
+bandwidth in kbit/s, per [MS-RDPBCGR 2.2.14.1.5](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/228ffc5c-b60c-4d3e-9781-ac613f822fdf).
+The 0x0840, 0x0880 and 0x08c0 variants update only fields present in that report.
+Zero RTT is valid. The server bandwidth estimate is not interface speed.
+Connect-time negotiation and existing Auto-Detect responses are unchanged.
+
+Linux TCP_INFO is sampled from the same socket: SRTT, RTTVAR and RTO are converted
+from microseconds to milliseconds for display; unacknowledged segments, congestion
+window (segments) and total outgoing retransmitted segments are TV-sender metrics.
+Returned length gates each field in the fixed Linux UAPI prefix. Missing fields
+or unsupported TCP_INFO remain Not measured and never affect the connection.
+RTTVAR is not delivery jitter; retransmissions are not a video packet-loss rate.
+The TCP retransmission total covers the socket lifetime, including its handshake.
+
+All network timestamps, including the getter's `observed_ms`, share one Rust
+monotonic clock. UI time is used only to position history points, never subtracted
+from a Rust timestamp. Each connection receives a generation and fresh counters;
+profile switches and reconnects clear chart history. Snapshots and individual RDP
+fields older than 7.5 seconds are Stale. Missing initial reports are Collecting;
+disconnected sources are Unavailable. A missing optional RDP field keeps its own
+previous timestamp rather than being refreshed by another field's report.
+
+`LGNOME_LOG='rdp=debug'` enables one aggregate `network telemetry` line at most
+every five seconds per connection, with byte totals, rates, report count, RDP RTT,
+server bandwidth, TCP support mask, SRTT and outgoing retransmissions. It contains
+no addresses, credentials or payloads. Logging configuration must reach the app's
+environment; setting it only on the host's `ares-launch` command does not do that.

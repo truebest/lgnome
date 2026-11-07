@@ -171,7 +171,7 @@ void native_preconnect_ui_open_setup(NativePreconnectUi *ui, int slot) {
 
 bool native_preconnect_ui_request_connect(NativePreconnectUi *ui, int slot) {
     if (!ui || slot < 0 || slot >= NATIVE_SETTINGS_MAX_SESSIONS ||
-        ui->onboarding_visible || ui->capture_settings_visible ||
+        ui->certificate_visible || ui->onboarding_visible || ui->capture_settings_visible ||
         ui->capture_save_pending) {
         return false;
     }

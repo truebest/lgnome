@@ -74,7 +74,7 @@ $HOME/.local/opt/arm-webos-linux-gnueabi_sdk-buildroot/share/buildroot/toolchain
 Initialize the pinned dependencies from the repository root:
 
 ```sh
-git submodule update --init third_party/backend_ndl third_party/IronRDP third_party/lvgl third_party/miniaudio
+git submodule update --init third_party/backend_ndl third_party/IronRDP
 ```
 
 Their pinned revisions and licenses are recorded in

@@ -5,6 +5,8 @@
 #include "native_rdp_callback_parts.h"
 
 #include <stdatomic.h>
+#include <stdio.h>
+#include <string.h>
 
 #include "native_app.h"
 #include "native_rdp_state.h"
@@ -146,6 +148,18 @@ static void on_audio_input_stop(void *ctx, uint64_t generation) {
                                        generation);
 }
 
+static void on_certificate(void *ctx, const char *sha256, const char *reason) {
+    NativeSessionSlot *slot = (NativeSessionSlot *)ctx;
+    if (!slot || !slot->app->interactive_ui || !native_certificate_fingerprint_valid(sha256)) {
+        return;
+    }
+    pthread_mutex_lock(&slot->app->video_lock);
+    memcpy(slot->certificate_sha256, sha256, sizeof(slot->certificate_sha256));
+    (void)snprintf(slot->certificate_reason, sizeof(slot->certificate_reason), "%s", reason ? reason : "");
+    slot->certificate_pending = true;
+    pthread_mutex_unlock(&slot->app->video_lock);
+}
+
 /* The full callback table for one slot's RDP session; ctx is the slot itself. */
 RdpCallbacks native_rdp_callbacks(NativeSessionSlot *slot) {
     RdpCallbacks callbacks = {
@@ -162,6 +176,7 @@ RdpCallbacks native_rdp_callbacks(NativeSessionSlot *slot) {
         .on_camera_sample_request = on_camera_sample_request,
         .on_audio_input_start = on_audio_input_start,
         .on_audio_input_stop = on_audio_input_stop,
+        .on_certificate = slot && slot->app->interactive_ui ? on_certificate : NULL,
     };
     native_rdp_install_audio_callbacks(&callbacks);
     native_rdp_install_video_callbacks(&callbacks);

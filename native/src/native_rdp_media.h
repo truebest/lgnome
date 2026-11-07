@@ -12,6 +12,9 @@ typedef struct App App;
 NativeMedia *native_ensure_media_locked(App *app);
 void native_open_speculative_audio_locked(App *app);
 
+/* SDL thread consumes audio format requests without blocking the network worker. */
+void native_audio_media_tick(App *app);
+
 /* NDL pump -> shared media feed bridge (ctx is App). */
 void native_audio_pipeline_feed_cb(void *ctx, const int16_t *samples, size_t frames);
 

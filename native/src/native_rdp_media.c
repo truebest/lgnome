@@ -61,3 +61,35 @@ void native_open_speculative_audio_locked(App *app) {
     }
     pthread_mutex_unlock(&app->audio_lock);
 }
+
+void native_audio_media_tick(App *app) {
+    if (!atomic_exchange(&app->audio_open_requested, false)) {
+        return;
+    }
+    pthread_mutex_lock(&app->video_lock);
+    pthread_mutex_lock(&app->audio_lock);
+    if (!app->audio) {
+        NativeMedia *media = native_ensure_media_locked(app);
+        if (media) {
+            app->audio = native_audio_open(media, RDP_AUDIO_CODEC_PCM_S16LE,
+                                           NATIVE_AUDIO_PIPELINE_SAMPLE_RATE,
+                                           NATIVE_AUDIO_PIPELINE_CHANNELS);
+        }
+        if (app->audio) {
+            if (app->video) {
+                /* Adding audio reloads the shared decoder; restart its reference chain. */
+                clog(cLogLevelNotice,
+                     "audio open reloaded the media pipeline; reopening video on next keyframe");
+                native_video_close(app->video);
+                app->video = NULL;
+                app->decoder_keyframe_pending = false;
+                atomic_store(&app->video_refresh_needed, true);
+            }
+        } else {
+            clog(cLogLevelWarning,
+                 "audio sink unavailable (PCM 48000Hz 2ch); continuing with silent video");
+        }
+    }
+    pthread_mutex_unlock(&app->audio_lock);
+    pthread_mutex_unlock(&app->video_lock);
+}

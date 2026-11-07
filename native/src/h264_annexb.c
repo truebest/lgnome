@@ -108,7 +108,10 @@ static bool annexb_prefix_at(const uint8_t *data, size_t len, size_t pos, size_t
 }
 
 static bool find_annexb_prefix(const uint8_t *data, size_t len, size_t pos, size_t *prefix_pos, size_t *prefix_len) {
-    while (pos + 3 <= len) {
+    while (pos < len && len - pos >= 3) {
+        const uint8_t *zero = memchr(data + pos, 0, len - pos - 2);
+        if (!zero) return false;
+        pos = (size_t)(zero - data);
         if (annexb_prefix_at(data, len, pos, prefix_len)) {
             *prefix_pos = pos;
             return true;

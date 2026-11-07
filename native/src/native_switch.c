@@ -14,11 +14,16 @@
 
 clog_define(g_native_log_switch, cLogLevelInfo, "native");
 
-/* Snapshot the ACTIVE slot's decode counter BEFORE issuing any resume/refresh
- * request: the requested keyframe may decode immediately, and a later baseline
- * would satisfy the watchdog spuriously. */
+/* Gate old callbacks and take the watchdog baseline under the same video lock.
+ * Only frames after the matching worker acknowledgement can satisfy recovery. */
 void native_switch_watchdog_baseline(App *app, NativeSessionSlot *active) {
+    pthread_mutex_lock(&app->video_lock);
+    active->refresh_waiting = true;
+    if (++active->refresh_cookie == 0) {
+        ++active->refresh_cookie;
+    }
     app->switch_baseline_frames = atomic_load(&active->video_ok_frames);
+    pthread_mutex_unlock(&app->video_lock);
 }
 
 /* Start the watchdog window AFTER the requests are submitted: a state-changing
@@ -32,6 +37,7 @@ void native_switch_watchdog_start(App *app, uint32_t timeout_ms) {
 /* Per-tick bookkeeping: worker-side refresh requests, snapshot backgrounding and the
  * keyframe watchdog. */
 void native_switch_tick(App *app) {
+    bool switch_attempted = false;
     /* Snapshot backgrounding: once a hidden-reconnected slot has its connect IDR cached,
      * silence its server. Nothing further is transmitted after the cached AUs, so the
      * post-resume delta will reference exactly the state a replay rebuilds. A snapshot
@@ -68,8 +74,8 @@ void native_switch_tick(App *app) {
                 if (i == app->pending_switch_target) {
                     /* The deferred switch lost its cache (oversize IDR): answer the
                      * press with the immediate old-style switch rather than never. */
-                    app->pending_switch_target = -1;
                     native_complete_session_switch(app, i);
+                    switch_attempted = true;
                     continue;
                 }
             }
@@ -107,15 +113,14 @@ void native_switch_tick(App *app) {
                 /* Reached with the one retry spent (a stream that never feeds
                  * on_video_au, e.g. the bitmap path) or in no-reconnect test builds:
                  * answer the press with the immediate old-style switch. */
-                app->pending_switch_target = -1;
                 native_complete_session_switch(app, i);
+                switch_attempted = true;
                 continue;
             }
         }
     }
 
-    /* Deferred switch: complete once the target's cache is ready and its stream has
-     * been quiet past the suppress tail — the replay is then race-free and instant. */
+    /* Deferred handoff waits for graphics callbacks or a quiet, ready snapshot. */
     if (app->pending_switch_target >= 0) {
         int target = app->pending_switch_target;
         NativeSessionSlot *slot = &app->sessions[target];
@@ -124,11 +129,15 @@ void native_switch_tick(App *app) {
             clog(cLogLevelWarning, "deferred switch to %s abandoned (session gone)",
                  native_session_slot_name(target));
             app->pending_switch_target = -1;
+            app->pending_switch_graphics = false;
+        } else if (app->pending_switch_graphics) {
+            if (!switch_attempted) {
+                native_complete_session_switch(app, target);
+            }
         } else if (!slot->snapshot_pending && slot->suppressed && atomic_load(&slot->snapshot_idr_ready) &&
                    native_monotonic_ms() - atomic_load(&slot->snapshot_last_au_ms) >= NATIVE_SNAPSHOT_QUIET_MS) {
             clog(cLogLevelDebug, "%s stream is ready; completing the deferred switch",
                  native_session_slot_name(target));
-            app->pending_switch_target = -1;
             native_complete_session_switch(app, target);
         } else if (SDL_TICKS_PASSED(SDL_GetTicks(), app->pending_switch_deadline_ticks)) {
             /* The target never became cleanly ready — it keeps streaming through the
@@ -137,7 +146,6 @@ void native_switch_tick(App *app) {
              * forever with further presses ignored. */
             clog(cLogLevelWarning, "deferred switch to %s timed out after %ums; switching the old way",
                  native_session_slot_name(target), (unsigned)NATIVE_PENDING_SWITCH_TIMEOUT_MS);
-            app->pending_switch_target = -1;
             native_complete_session_switch(app, target);
         }
     }
@@ -146,7 +154,7 @@ void native_switch_tick(App *app) {
         NativeSessionSlot *active = native_active_slot(app);
         if (active->rdp && atomic_load(&active->current_state) == (int)RDP_STATE_ACTIVE) {
             native_switch_watchdog_baseline(app, active);
-            rdp_request_refresh(active->rdp);
+            rdp_request_refresh(active->rdp, active->refresh_cookie);
             native_switch_watchdog_start(app, NATIVE_SWITCH_KEYFRAME_TIMEOUT_MS);
         }
     }

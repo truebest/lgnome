@@ -25,6 +25,7 @@ typedef union SDL_Event { Uint32 type; SDL_KeyboardEvent key; SDL_MouseMotionEve
 #define SDL_BUTTON_LEFT 1
 #define SDL_BUTTON_LMASK 1u
 #define SDL_BLENDMODE_BLEND 1
+#define SDL_BLENDMODE_NONE 0
 #define SDL_PIXELFORMAT_BGRA32 1u
 #define SDL_VERSION_ATLEAST(a,b,c) 1
 #define SDL_TICKS_PASSED(a,b) ((int32_t)((b)-(a)) <= 0)
