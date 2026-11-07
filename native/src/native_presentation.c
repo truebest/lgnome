@@ -263,7 +263,53 @@ void native_present_mixer_overlay_frame(App *app, SDL_Renderer *renderer) {
     (void)renderer;
 }
 
+static void native_present_statistics_frame(App *app, SDL_Renderer *renderer, bool *logged) {
+    bool dirty = native_preconnect_ui_statistics_visible(app->preconnect_ui, true);
+    dirty |= native_preconnect_ui_statistics_prepare(app->preconnect_ui, &app->diagnostics.snapshot);
+    uint32_t now = SDL_GetTicks();
+    bool splash = app->switch_deadline_ticks && SDL_TICKS_PASSED(
+        now, app->switch_deadline_ticks - NATIVE_SWITCH_KEYFRAME_TIMEOUT_MS + 300u);
+    dirty |= splash != app->switch_splash_drawn;
+    app->switch_splash_drawn = splash;
+    if (app->indicator_slot >= 0 && SDL_TICKS_PASSED(now, app->indicator_until_ticks)) {
+        app->indicator_slot = -1;
+        app->indicator_drawn = false;
+        dirty = true;
+    }
+    dirty |= app->indicator_slot >= 0 && !app->indicator_drawn;
+    SDL_SetRenderTarget(renderer, NULL);
+    int rgba = native_draw_rgba_frame(app, renderer, logged);
+    if (rgba == 2 || rgba < 0) return;
+    if (!rgba) {
+        if (!dirty && app->video_plane_punched) return;
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+        if (splash) SDL_SetRenderDrawColor(renderer, 16, 20, 24, 255);
+        else SDL_SetRenderDrawColor(renderer, 0, 0, 0, 0);
+        SDL_RenderClear(renderer);
+        if (splash || app->indicator_slot >= 0) {
+            int width = NATIVE_LOCAL_SURFACE_WIDTH;
+            SDL_GetRendererOutputSize(renderer, &width, NULL);
+            native_set_slot_badge_color(renderer, splash ? atomic_load(&app->active_index) : app->indicator_slot);
+            SDL_Rect badge = {width - 72, 24, 48, 48};
+            SDL_RenderFillRect(renderer, &badge);
+            app->indicator_drawn = true;
+        }
+    }
+    native_preconnect_ui_statistics_draw(app->preconnect_ui);
+    SDL_RenderPresent(renderer);
+    app->video_plane_punched = rgba == 0;
+}
+
 void native_present_streaming_frame(App *app, SDL_Renderer *renderer, bool *logged) {
+    if (native_preconnect_ui_statistics_enabled(app->preconnect_ui) && !app->mixer_overlay_visible) {
+        native_present_statistics_frame(app, renderer, logged);
+        return;
+    }
+    if (native_preconnect_ui_statistics_visible(app->preconnect_ui, false)) {
+        native_present_invalidate(app);
+        app->indicator_drawn = false;
+        app->switch_splash_drawn = false;
+    }
     if (native_present_rgba_frame(app, renderer, logged) != 0) {
         if (app->mixer_overlay_visible) {
             app->mixer_overlay_dragging = false;

@@ -44,6 +44,15 @@ void native_stop_media(App *app) {
     if (!app) {
         return;
     }
+    for (int i = 0; i < NATIVE_SETTINGS_MAX_SESSIONS; i++) {
+        if (!rdp_graphics_barrier(app->sessions[i].rdp, 500)) {
+            clog(cLogLevelError, "graphics callback barrier timed out before media teardown");
+            atomic_store(&app->exit_code, 11);
+            atomic_store(&app->running, false);
+            return;
+        }
+    }
+    atomic_store(&app->audio_open_requested, false);
     pthread_mutex_lock(&app->video_lock);
     native_rgba_surface_close(app->rgba);
     app->rgba = NULL;
@@ -104,6 +113,7 @@ void native_stop_slot(App *app, int index) {
         native_capture_redirect_set_slot(&app->capture_redirect, index, NULL, false, false);
     }
     pthread_mutex_lock(&app->video_lock);
+    slot->certificate_pending = false;
     native_audio_pipeline_close_source(&app->audio_pipeline, index);
     slot->audio_routed = false;
     atomic_store(&slot->audio_codec, 0u);
@@ -112,6 +122,7 @@ void native_stop_slot(App *app, int index) {
     slot->audio_incompatible_logged = false;
     /* Whatever the cache held belongs to the connection that just died. */
     native_au_snapshot_reset(&slot->snapshot);
+    slot->refresh_waiting = false;
     slot->video_seen = false;
     slot->video_codec = NATIVE_VIDEO_CODEC_H264;
     atomic_store(&slot->video_via_bitmap, false);
@@ -221,6 +232,7 @@ bool native_slot_connect(App *app, int index, bool arm_snapshot) {
         .username = slot->config.username,
         .password = slot->config.password,
         .domain = slot->config.domain,
+        .trusted_certificate_sha256 = native_session_trusted_certificate(&slot->config),
         .width = slot->config.desktop_width,
         .height = slot->config.desktop_height,
         .desktop_scale_factor = slot->config.desktop_scale_factor,

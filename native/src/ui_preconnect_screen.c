@@ -59,6 +59,7 @@ static void screen_focus_hub(NativePreconnectUi *ui) {
     lv_group_add_obj(ui->group, ui->hero_action_btn);
     lv_group_add_obj(ui->group, ui->hero_edit_btn);
     lv_group_add_obj(ui->group, ui->capture_settings_btn);
+    lv_group_add_obj(ui->group, ui->statistics_btn);
     lv_group_add_obj(ui->group, ui->help_btn);
     lv_group_focus_obj(ui->slot_buttons[selected]);
     ui->rebuilding_group = false;
@@ -150,7 +151,12 @@ static void screen_apply(NativePreconnectUi *ui, NativeUiScreenId screen) {
         lv_obj_clear_flag(root, LV_OBJ_FLAG_HIDDEN);
         lv_obj_move_foreground(root);
     }
-    UI_SCREENS[screen].focus(ui);
+    if (ui->certificate_visible) {
+        lv_obj_move_foreground(ui->certificate_scrim);
+        native_ui_preconnect_certificate_focus(ui);
+    } else {
+        UI_SCREENS[screen].focus(ui);
+    }
     clog(cLogLevelTrace, "screen switched to %s", UI_SCREENS[screen].name);
 }
 
@@ -163,6 +169,7 @@ void native_ui_preconnect_screen_init(NativePreconnectUi *ui, NativeUiScreenId i
 }
 
 void native_ui_preconnect_screen_refocus(NativePreconnectUi *ui) {
+    if (ui && ui->certificate_visible) { native_ui_preconnect_certificate_focus(ui); return; }
     if (ui && ui->screen >= NATIVE_UI_SCREEN_HUB && ui->screen < NATIVE_UI_SCREEN_COUNT) {
         UI_SCREENS[ui->screen].focus(ui);
     }
@@ -235,6 +242,11 @@ static void ui_scroll_focused_into_view(NativePreconnectUi *ui) {
 }
 
 void native_ui_preconnect_back(NativePreconnectUi *ui) {
+    if (ui && ui->certificate_visible) {
+        ui->certificate_accept = false;
+        ui->certificate_answer_ready = true;
+        return;
+    }
     if (!ui || ui->hub_closing) {
         return;
     }
@@ -272,6 +284,12 @@ void native_ui_preconnect_form_key_event(lv_event_t *event) {
         return;
     }
     uint32_t key = lv_event_get_key(event);
+    if (ui->certificate_visible) {
+        if (key == LV_KEY_DOWN || key == LV_KEY_RIGHT) lv_group_focus_next(ui->group);
+        else if (key == LV_KEY_UP || key == LV_KEY_LEFT) lv_group_focus_prev(ui->group);
+        if (key != LV_KEY_ENTER) lv_event_stop_processing(event);
+        return;
+    }
     lv_obj_t *target = lv_event_get_target(event);
     if (target && lv_obj_check_type(target, &lv_dropdown_class) && lv_dropdown_is_open(target)) {
         return;

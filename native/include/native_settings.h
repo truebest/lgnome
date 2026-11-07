@@ -25,7 +25,14 @@
 #define NATIVE_SETTINGS_MIXER_MIN_DB (-60)
 #define NATIVE_SETTINGS_MIXER_MAX_DB 6
 
+typedef struct NativeCertificateTrust {
+    char host[NATIVE_SETTINGS_STRING_MAX];
+    uint16_t port;
+    char sha256[65];
+} NativeCertificateTrust;
+
 typedef struct NativeSessionConfig {
+    NativeCertificateTrust certificate_trust;
     /* Optional human-facing profile label. Empty keeps the color/host fallback used by
      * callers and by settings written before the field was introduced. */
     char name[NATIVE_SETTINGS_STRING_MAX];
@@ -86,6 +93,10 @@ typedef struct NativeSettings {
 
 /* Human-facing slot name ("green"/"yellow"); "?" for out-of-range indices. */
 const char *native_session_slot_name(int slot);
+
+bool native_certificate_fingerprint_valid(const char *sha256);
+const char *native_session_trusted_certificate(const NativeSessionConfig *session);
+bool native_session_trust_certificate(NativeSessionConfig *session, const char *sha256);
 
 bool native_desktop_scale_valid(uint16_t scale);
 

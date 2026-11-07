@@ -3,14 +3,18 @@
 mod abi;
 mod active;
 mod active_io;
+mod certificate;
 mod connection;
 mod disconnect;
 mod dvc;
 mod egfx;
 mod ffi;
+mod graphics;
+mod graphics_channel;
 mod input;
 mod logging;
 mod media_mailbox;
+mod network;
 mod rdpeai;
 mod rdpecam;
 mod rdpedisp;
@@ -51,6 +55,8 @@ use ironrdp_core::MonotonicInstant;
 
 #[derive(Clone)]
 struct NativeConfig {
+    trusted_certificate_sha256: String,
+    certificate_gate: Arc<certificate::CertificateGate>,
     host: String,
     port: u16,
     username: String,
@@ -76,6 +82,7 @@ struct NativeError {
     state: RdpState,
     reason: RdpDisconnectReason,
     retry_handoff: bool,
+    retry_certificate: bool,
     message: String,
 }
 
@@ -85,6 +92,7 @@ impl NativeError {
             state,
             reason: RdpDisconnectReason::None,
             retry_handoff: false,
+            retry_certificate: false,
             message: message.into(),
         }
     }
@@ -103,6 +111,7 @@ impl NativeError {
 }
 
 struct NativeWorker {
+    network: network::NetworkTracker,
     config: NativeConfig,
     callbacks: CallbackSink,
     rx: Receiver<WorkerCommand>,
@@ -121,8 +130,6 @@ struct NativeWorker {
     last_read_at: Option<MonotonicInstant>,
     // Retained factory for server-initiated reactivation.
     activation_factory: Option<ConnectionActivationFactory>,
-    next_pts90k: u64,
-    frame_pts_step: u64,
     // Discarded on initial activation; preserved across reactivation, including key releases.
     pending_input: Vec<InputCommand>,
     // Control commands buffered the same way (suppress-output toggles coalesce to the last
@@ -130,9 +137,13 @@ struct NativeWorker {
     pending_control: Vec<ControlCommand>,
     // Reapply background suppression after reconnect; fresh connections allow graphics.
     suppress_display_latched: bool,
+    graphics_output_needs_full_refresh: bool,
 }
 
 impl NativeWorker {
+    fn graphics(&self) -> Arc<graphics::GraphicsQueue> {
+        self.gfx.lock().unwrap().queue.clone()
+    }
     fn new(
         config: NativeConfig,
         callbacks: CallbackSink,
@@ -141,7 +152,8 @@ impl NativeWorker {
         media: Arc<MediaGate>,
         desired_camera_available: Arc<AtomicBool>,
     ) -> Self {
-        let fps = u64::from(config.fps.max(1));
+        let gfx = Arc::new(Mutex::new(NativeGfxState::default()));
+        gfx.lock().unwrap().queue.configure_pts(config.fps);
         let camera = rdpecam::CameraBridge::new(
             callbacks,
             config.camera_width,
@@ -150,6 +162,7 @@ impl NativeWorker {
         );
         let audio_input = rdpeai::AudioInputBridge::new(callbacks);
         Self {
+            network: network::NetworkTracker::default(),
             config,
             callbacks,
             rx,
@@ -158,7 +171,7 @@ impl NativeWorker {
             desired_camera_available,
             camera,
             audio_input,
-            gfx: Arc::new(Mutex::new(NativeGfxState::default())),
+            gfx,
             inbuf: Vec::new(),
             phase_deadline: None,
             write_deadline: Arc::new(Mutex::new(None)),
@@ -166,18 +179,25 @@ impl NativeWorker {
             suppress_output_support: false,
             last_read_at: None,
             activation_factory: None,
-            next_pts90k: 0,
-            frame_pts_step: 90_000 / fps,
             pending_input: Vec::new(),
             pending_control: Vec::new(),
             suppress_display_latched: false,
+            graphics_output_needs_full_refresh: false,
         }
     }
 
     fn run(&mut self) -> Result<(), NativeError> {
         // grd daemon handoffs disconnect normally and require a client reconnect.
         for attempt in 1..=MAX_SESSION_ATTEMPTS {
-            match self.run_session() {
+            let result = loop {
+                match self.run_session() {
+                    Err(error) if error.retry_certificate && !self.stop.load(Ordering::SeqCst) => {
+                        self.reset_session_state();
+                    }
+                    result => break result,
+                }
+            };
+            match result {
                 Ok(()) => return Ok(()),
                 Err(e) if e.should_retry(attempt, self.stop.load(Ordering::SeqCst)) => {
                     self.callbacks.log(
@@ -187,9 +207,11 @@ impl NativeWorker {
                             "server closed the session (attempt {attempt}/{MAX_SESSION_ATTEMPTS}); reconnecting"
                         ),
                     );
-                    self.callbacks
-                        .emit_state(RdpState::Reconnecting, "reconnecting after server handoff");
                     self.reset_session_state();
+                    self.graphics().submit(graphics::Event::State(
+                        RdpState::Reconnecting,
+                        "reconnecting after server handoff".into(),
+                    ));
                     thread::sleep(Duration::from_millis(1000));
                 }
                 Err(e) => return Err(e),
@@ -202,18 +224,29 @@ impl NativeWorker {
     fn reset_session_state(&mut self) {
         self.inbuf.clear();
         self.last_read_at = None;
+        self.graphics_output_needs_full_refresh = false;
         self.activation_factory = None;
         self.phase_deadline = None;
-        self.next_pts90k = 0;
         self.pending_input.clear();
-        // Preserve the newest suppression state across retry; discard old-session refreshes.
+        // Preserve suppression; a fresh connection replaces pending refreshes and releases their frame gates.
+        let graphics = self.graphics();
         for control in self.pending_control.drain(..) {
-            if let ControlCommand::SuppressOutput { allow_display } = control {
-                self.suppress_display_latched = !allow_display;
+            match control {
+                ControlCommand::SuppressOutput { allow_display } => {
+                    self.suppress_display_latched = !allow_display;
+                }
+                ControlCommand::RequestRefresh { cookie } => {
+                    graphics.submit(graphics::Event::Refresh(cookie));
+                }
             }
         }
         if let Ok(mut shared) = self.gfx.lock() {
-            *shared = NativeGfxState::default();
+            let queue = shared.queue.clone();
+            queue.reset(true);
+            *shared = NativeGfxState {
+                queue,
+                ..Default::default()
+            };
         }
         // Worker-only reconnect bypasses C teardown, including its cursor reset.
         self.callbacks.pointer_state(RDP_POINTER_STATE_DEFAULT);
@@ -221,10 +254,10 @@ impl NativeWorker {
 
     fn run_session(&mut self) -> Result<(), NativeError> {
         self.phase_deadline = Some(Instant::now() + transport::ESTABLISH_TIMEOUT);
-        self.callbacks.emit_state(
+        self.graphics().submit(graphics::Event::State(
             RdpState::Connecting,
             format!("connecting to {}:{}", self.config.host, self.config.port),
-        );
+        ));
 
         let mut tcp = match self.connect_tcp()? {
             Some(tcp) => tcp,
@@ -240,20 +273,26 @@ impl NativeWorker {
             return Ok(());
         }
 
-        self.callbacks
-            .emit_state(RdpState::Tls, "starting TLS security upgrade");
+        self.graphics().submit(graphics::Event::State(
+            RdpState::Tls,
+            "starting TLS security upgrade".into(),
+        ));
         let (mut tls, public_key) = self.upgrade_tls(tcp)?;
         connector.mark_security_upgrade_as_done();
 
         if !connector.should_perform_credssp() {
             return Err(NativeError::protocol("server did not select CredSSP/NLA"));
         }
-        self.callbacks
-            .emit_state(RdpState::Credssp, "performing CredSSP/NLA");
+        self.graphics().submit(graphics::Event::State(
+            RdpState::Credssp,
+            "performing CredSSP/NLA".into(),
+        ));
         self.run_credssp(&mut tls, &mut connector, public_key)?;
 
         let result = self.pump_connector(&mut tls, connector)?;
-        self.run_active(tls, result)
+        let result = self.run_active(tls, result);
+        self.network.close();
+        result
     }
 
     fn read_connector_pdu<T: Read>(
@@ -450,13 +489,10 @@ impl NativeWorker {
                                 .retain(|c| !matches!(c, ControlCommand::SuppressOutput { .. }));
                             self.pending_control.push(control);
                         }
-                        ControlCommand::RequestRefresh => {
-                            if !self
-                                .pending_control
-                                .contains(&ControlCommand::RequestRefresh)
-                            {
-                                self.pending_control.push(control);
-                            }
+                        ControlCommand::RequestRefresh { .. } => {
+                            self.pending_control
+                                .retain(|c| !matches!(c, ControlCommand::RequestRefresh { .. }));
+                            self.pending_control.push(control);
                         }
                     }
                 }
@@ -478,12 +514,29 @@ fn worker_main(
     stop: Arc<AtomicBool>,
     media: Arc<MediaGate>,
     desired_camera_available: Arc<AtomicBool>,
+    network: Arc<Mutex<abi::RdpNetworkStats>>,
+    graphics: Arc<graphics::GraphicsQueue>,
 ) {
     crate::init_logging();
     let _callback_sink_guard = CallbackSinkGuard::enter(callbacks);
     let mut worker =
         NativeWorker::new(config, callbacks, rx, stop, media, desired_camera_available);
-    match worker.run() {
+    worker.network.shared = network;
+    worker.gfx.lock().unwrap().queue = graphics.clone();
+    let executor = match graphics.start(callbacks) {
+        Ok(executor) => executor,
+        Err(err) => {
+            callbacks.emit_state(
+                RdpState::NetworkError,
+                format!("spawn graphics worker: {err}"),
+            );
+            callbacks.emit_state(RdpState::Stopped, "stopped");
+            return;
+        }
+    };
+    let result = worker.run();
+    drop(executor);
+    match result {
         Ok(()) => {}
         Err(err) => {
             if !worker.stop.load(Ordering::SeqCst) {
@@ -512,6 +565,8 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::sync_channel::<WorkerCommand>(4);
         let callbacks = RdpCallbacks::default();
         let config = NativeConfig {
+            trusted_certificate_sha256: String::new(),
+            certificate_gate: Arc::new(certificate::CertificateGate::default()),
             host: "test".to_owned(),
             port: 3389,
             username: String::new(),
@@ -568,8 +623,30 @@ mod tests {
     }
 
     #[test]
+    fn queued_refresh_acknowledges_the_latest_cookie() {
+        let (mut worker, tx) = test_worker();
+        for cookie in [11, 12] {
+            tx.send(WorkerCommand::Control(ControlCommand::RequestRefresh {
+                cookie,
+            }))
+            .unwrap();
+        }
+        assert!(!worker.drain_commands());
+        assert_eq!(
+            worker.pending_control,
+            vec![ControlCommand::RequestRefresh { cookie: 12 }]
+        );
+    }
+
+    #[test]
     fn retry_folds_pending_suppress_into_latch() {
+        extern "C" fn on_refresh(ctx: *mut std::ffi::c_void, cookie: u32) {
+            unsafe { *ctx.cast::<u32>() = cookie };
+        }
         let (mut worker, _tx) = test_worker();
+        let mut refresh_cookie = 0u32;
+        worker.callbacks.callbacks.ctx = core::ptr::addr_of_mut!(refresh_cookie).cast();
+        worker.callbacks.callbacks.on_refresh_started = Some(on_refresh);
         worker.inbuf.push(0);
         worker.last_read_at = Some(MonotonicInstant::from_millis(42));
 
@@ -578,8 +655,14 @@ mod tests {
         worker.pending_control.push(ControlCommand::SuppressOutput {
             allow_display: false,
         });
-        worker.pending_control.push(ControlCommand::RequestRefresh);
+        worker
+            .pending_control
+            .push(ControlCommand::RequestRefresh { cookie: 37 });
         worker.reset_session_state();
+        let executor = worker.graphics().start(worker.callbacks).unwrap();
+        assert!(worker.graphics().barrier(Duration::from_secs(1)));
+        drop(executor);
+        assert_eq!(refresh_cookie, 37);
         assert!(worker.inbuf.is_empty());
         assert_eq!(worker.last_read_at, None);
         assert!(worker.suppress_display_latched);

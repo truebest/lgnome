@@ -4,6 +4,10 @@
 #include <stdint.h>
 #include <stdio.h>
 
+typedef bool (*ExpectedGraphicsBarrier)(RdpSession *, uint32_t);
+_Static_assert(_Generic(&rdp_graphics_barrier, ExpectedGraphicsBarrier: 1, default: 0),
+               "rdp_graphics_barrier signature changed");
+
 _Static_assert(RDP_STATE_IDLE == 0, "RDP_STATE_IDLE value changed");
 _Static_assert(RDP_STATE_CONNECTING == 1, "RDP_STATE_CONNECTING value changed");
 _Static_assert(RDP_STATE_TLS == 2, "RDP_STATE_TLS value changed");
@@ -52,7 +56,8 @@ _Static_assert(sizeof(((RdpCallbacks *)0)->ctx) == sizeof(void *), "RdpCallbacks
 _Static_assert(RDP_VIDEO_CODEC_H264 == 0, "H.264 codec value changed");
 _Static_assert(RDP_VIDEO_CODEC_H265 == 1, "HEVC codec value changed");
 _Static_assert(sizeof(((RdpConfig *)0)->enable_hevc) == sizeof(uint8_t), "enable_hevc must stay uint8_t");
-typedef void (*ExpectedVideoAuCallback)(void *, uint32_t, const uint8_t *, size_t, uint64_t);
+_Static_assert(RDP_VIDEO_FLAG_AVC444_AUX == 1u, "AVC444 auxiliary flag changed");
+typedef void (*ExpectedVideoAuCallback)(void *, uint32_t, uint32_t, const uint8_t *, size_t, uint64_t);
 _Static_assert(_Generic(((RdpCallbacks *)0)->on_video_au, ExpectedVideoAuCallback: 1, default: 0),
                "RdpCallbacks.on_video_au signature changed");
 
@@ -93,7 +98,8 @@ _Static_assert(offsetof(RdpConfig, camera_width) == 50, "RdpConfig.camera_width 
 _Static_assert(offsetof(RdpConfig, camera_height) == 52, "RdpConfig.camera_height offset changed");
 _Static_assert(offsetof(RdpConfig, camera_fps) == 54, "RdpConfig.camera_fps offset changed");
 _Static_assert(offsetof(RdpConfig, desktop_scale_factor) == 56, "RdpConfig.desktop_scale_factor offset changed");
-_Static_assert(sizeof(RdpConfig) == 64, "RdpConfig size changed");
+_Static_assert(offsetof(RdpConfig, trusted_certificate_sha256) == 64, "certificate offset changed");
+_Static_assert(sizeof(RdpConfig) == 72, "RdpConfig size changed");
 
 _Static_assert(offsetof(RdpCallbacks, ctx) == 0, "RdpCallbacks.ctx offset changed");
 _Static_assert(offsetof(RdpCallbacks, on_state) == 8, "RdpCallbacks.on_state offset changed");
@@ -116,7 +122,9 @@ _Static_assert(offsetof(RdpCallbacks, on_audio_input_start) == 120,
                "RdpCallbacks.on_audio_input_start offset changed");
 _Static_assert(offsetof(RdpCallbacks, on_audio_input_stop) == 128,
                "RdpCallbacks.on_audio_input_stop offset changed");
-_Static_assert(sizeof(RdpCallbacks) == 136, "RdpCallbacks size changed");
+_Static_assert(offsetof(RdpCallbacks, on_refresh_started) == 136, "RdpCallbacks.on_refresh_started offset changed");
+_Static_assert(offsetof(RdpCallbacks, on_certificate) == 144, "certificate callback offset changed");
+_Static_assert(sizeof(RdpCallbacks) == 152, "RdpCallbacks size changed");
 #elif UINTPTR_MAX == UINT32_MAX
 _Static_assert(offsetof(RdpConfig, host) == 0, "RdpConfig.host offset changed");
 _Static_assert(offsetof(RdpConfig, port) == 4, "RdpConfig.port offset changed");
@@ -134,7 +142,8 @@ _Static_assert(offsetof(RdpConfig, camera_width) == 30, "RdpConfig.camera_width 
 _Static_assert(offsetof(RdpConfig, camera_height) == 32, "RdpConfig.camera_height offset changed");
 _Static_assert(offsetof(RdpConfig, camera_fps) == 34, "RdpConfig.camera_fps offset changed");
 _Static_assert(offsetof(RdpConfig, desktop_scale_factor) == 36, "RdpConfig.desktop_scale_factor offset changed");
-_Static_assert(sizeof(RdpConfig) == 40, "RdpConfig size changed");
+_Static_assert(offsetof(RdpConfig, trusted_certificate_sha256) == 40, "certificate offset changed");
+_Static_assert(sizeof(RdpConfig) == 44, "RdpConfig size changed");
 
 _Static_assert(offsetof(RdpCallbacks, ctx) == 0, "RdpCallbacks.ctx offset changed");
 _Static_assert(offsetof(RdpCallbacks, on_state) == 4, "RdpCallbacks.on_state offset changed");
@@ -157,7 +166,9 @@ _Static_assert(offsetof(RdpCallbacks, on_audio_input_start) == 60,
                "RdpCallbacks.on_audio_input_start offset changed");
 _Static_assert(offsetof(RdpCallbacks, on_audio_input_stop) == 64,
                "RdpCallbacks.on_audio_input_stop offset changed");
-_Static_assert(sizeof(RdpCallbacks) == 68, "RdpCallbacks size changed");
+_Static_assert(offsetof(RdpCallbacks, on_refresh_started) == 68, "RdpCallbacks.on_refresh_started offset changed");
+_Static_assert(offsetof(RdpCallbacks, on_certificate) == 72, "certificate callback offset changed");
+_Static_assert(sizeof(RdpCallbacks) == 76, "RdpCallbacks size changed");
 #else
 #error "Unsupported pointer width for RDP FFI layout test"
 #endif
@@ -167,3 +178,17 @@ int main(void) {
         sizeof(RdpConfig), sizeof(RdpCallbacks));
     return 0;
 }
+
+_Static_assert(sizeof(RdpNetworkStats) == 144, "RdpNetworkStats size changed");
+_Static_assert(offsetof(RdpNetworkStats, active) == 88, "network active offset changed");
+_Static_assert(offsetof(RdpNetworkStats, tcp_retransmits) == 140, "network TCP offset changed");
+
+#ifdef __linux__
+#include <linux/tcp.h>
+_Static_assert(offsetof(struct tcp_info, tcpi_rtt) == 68, "Linux TCP SRTT offset");
+_Static_assert(offsetof(struct tcp_info, tcpi_rttvar) == 72, "Linux TCP RTTVAR offset");
+_Static_assert(offsetof(struct tcp_info, tcpi_rto) == 8, "Linux TCP RTO offset");
+_Static_assert(offsetof(struct tcp_info, tcpi_unacked) == 24, "Linux TCP unacked offset");
+_Static_assert(offsetof(struct tcp_info, tcpi_snd_cwnd) == 80, "Linux TCP cwnd offset");
+_Static_assert(offsetof(struct tcp_info, tcpi_total_retrans) == 100, "Linux TCP retransmits offset");
+#endif

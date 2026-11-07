@@ -110,9 +110,22 @@ static bool apply_desktop_scale_json(NativeSessionConfig *session, const char *j
     return true;
 }
 
+static bool apply_certificate_trust_json(NativeSessionConfig *session, const char *json, const char *source) {
+    NativeCertificateTrust *trust = &session->certificate_trust;
+    if (!apply_json_string(json, "trustedCertificateHost", trust->host, sizeof(trust->host), source) ||
+        !apply_json_string(json, "trustedCertificateSha256", trust->sha256, sizeof(trust->sha256), source) ||
+        !apply_json_u16(json, "trustedCertificatePort", 0, UINT16_MAX, &trust->port, source)) return false;
+    if (trust->sha256[0] && !native_certificate_fingerprint_valid(trust->sha256)) {
+        clog(cLogLevelError, "invalid trusted certificate fingerprint in %s", source);
+        return false;
+    }
+    return true;
+}
+
 /* Session-object fields shared by the legacy flat format and session-array entries. */
 static bool apply_session_json(NativeSessionConfig *session, const char *json, const char *source) {
-    return apply_session_name_json(session, json, source) &&
+    return apply_certificate_trust_json(session, json, source) &&
+           apply_session_name_json(session, json, source) &&
            apply_desktop_scale_json(session, json, source) &&
            apply_json_string(json, "host", session->host, sizeof(session->host), source) &&
            apply_json_string(json, "username", session->username, sizeof(session->username), source) &&
@@ -317,6 +330,7 @@ static bool apply_sessions_array(NativeSettings *settings, const char *json, con
 bool native_settings_json_has_rdp_key(const char *json) {
     static const char *keys[] = {"sessions",          "host",       "username",   "password",
                                  "domain",            "port",
+                                 "trustedCertificateHost", "trustedCertificatePort", "trustedCertificateSha256",
                                  "fps",               "desktopWidth", "desktopHeight", "desktopScaleFactor",
                                  "wheelStep",  "wheelScrollDivisor",
                                  "audioCodec", "duckTriggers",
@@ -438,6 +452,10 @@ static bool write_session_json(const NativeSessionConfig *session, int slot, FIL
            write_json_string(file, session->username) && fprintf(file, ", \"password\": ") >= 0 &&
            write_json_string(file, session->password) && fprintf(file, ", \"domain\": ") >= 0 &&
            write_json_string(file, session->domain) &&
+           fprintf(file, ", \"trustedCertificateHost\": ") >= 0 &&
+           write_json_string(file, session->certificate_trust.host) &&
+           fprintf(file, ", \"trustedCertificatePort\": %u, \"trustedCertificateSha256\": ", (unsigned)session->certificate_trust.port) >= 0 &&
+           write_json_string(file, session->certificate_trust.sha256) &&
            fprintf(file,
                    ", \"fps\": %u, \"desktopWidth\": %u, \"desktopHeight\": %u, \"desktopScaleFactor\": %u, "
                    "\"duckTriggers\": %u, "

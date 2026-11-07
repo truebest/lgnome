@@ -35,7 +35,7 @@ void native_au_snapshot_reset(NativeAuSnapshot *snap) {
 }
 
 bool native_au_snapshot_append(NativeAuSnapshot *snap, const uint8_t *data, size_t len, bool valid_au,
-                               bool decoder_seed, uint64_t pts90k) {
+                               bool decoder_seed, uint64_t pts90k, bool decode_only) {
     if (!snap || !snap->armed) {
         return false;
     }
@@ -65,6 +65,7 @@ bool native_au_snapshot_append(NativeAuSnapshot *snap, const uint8_t *data, size
     snap->entries[snap->count].offset = snap->used;
     snap->entries[snap->count].len = len;
     snap->entries[snap->count].pts90k = pts90k;
+    snap->entries[snap->count].decode_only = decode_only;
     snap->used += len;
     snap->count++;
     return true;

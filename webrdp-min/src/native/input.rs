@@ -26,7 +26,7 @@ pub(super) enum ControlCommand {
     SuppressOutput { allow_display: bool },
     /// Ask the server for a fresh full frame / keyframe so a hardware decoder that lost
     /// its state (the shared webOS pipeline reloads on every track close) can resync.
-    RequestRefresh,
+    RequestRefresh { cookie: u32 },
 }
 
 #[derive(Debug)]

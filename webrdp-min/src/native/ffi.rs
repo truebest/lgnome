@@ -26,11 +26,14 @@ use super::{worker_main, NativeConfig};
 const INPUT_QUEUE_DEPTH: usize = 1024;
 
 pub struct RdpSession {
+    network: Arc<std::sync::Mutex<super::abi::RdpNetworkStats>>,
+    certificate_gate: Arc<super::certificate::CertificateGate>,
     stop: Arc<AtomicBool>,
     tx: SyncSender<WorkerCommand>,
     media: Arc<MediaGate>,
     desired_camera_available: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
+    graphics: Arc<super::graphics::GraphicsQueue>,
 }
 
 /// The pointer contract shared by every entry point below: `session` must be
@@ -68,7 +71,15 @@ unsafe fn copy_config(config: *const RdpConfig) -> Result<NativeConfig, &'static
         100 | 150 | 200 => u32::from(config.desktop_scale_factor),
         _ => return Err("desktop scale must be 100, 150 or 200"),
     };
+    let trusted_certificate_sha256 = unsafe { cstr_lossy(config.trusted_certificate_sha256) };
+    if !trusted_certificate_sha256.is_empty()
+        && !super::certificate::valid_fingerprint(&trusted_certificate_sha256)
+    {
+        return Err("invalid trusted certificate fingerprint");
+    }
     Ok(NativeConfig {
+        trusted_certificate_sha256,
+        certificate_gate: Arc::new(super::certificate::CertificateGate::default()),
         desktop_scale_factor,
         host,
         port: if config.port == 0 { 3389 } else { config.port },
@@ -143,6 +154,7 @@ pub unsafe extern "C" fn rdp_session_start(
         }
     };
 
+    let certificate_gate = Arc::clone(&config.certificate_gate);
     let (tx, rx) = sync_channel(INPUT_QUEUE_DEPTH);
     let stop = Arc::new(AtomicBool::new(false));
     let media = Arc::new(MediaGate::default());
@@ -150,7 +162,12 @@ pub unsafe extern "C" fn rdp_session_start(
     let worker_stop = Arc::clone(&stop);
     let worker_media = Arc::clone(&media);
     let worker_camera_available = Arc::clone(&desired_camera_available);
+    let network = Arc::new(std::sync::Mutex::new(super::abi::RdpNetworkStats::default()));
+    let worker_network = Arc::clone(&network);
     let worker_callbacks = callbacks;
+    let graphics = Arc::new(super::graphics::GraphicsQueue::default());
+    graphics.configure_pts(config.fps);
+    let worker_graphics = graphics.clone();
     let worker = match thread::Builder::new()
         .name("rdp-worker".to_owned())
         .spawn(move || {
@@ -161,6 +178,8 @@ pub unsafe extern "C" fn rdp_session_start(
                 worker_stop,
                 worker_media,
                 worker_camera_available,
+                worker_network,
+                worker_graphics,
             )
         }) {
         Ok(worker) => worker,
@@ -171,11 +190,14 @@ pub unsafe extern "C" fn rdp_session_start(
     };
 
     Box::into_raw(Box::new(RdpSession {
+        network,
+        certificate_gate,
         stop,
         tx,
         media,
         desired_camera_available,
         worker: Some(worker),
+        graphics,
     }))
 }
 
@@ -193,10 +215,23 @@ pub unsafe extern "C" fn rdp_session_stop(session: *mut RdpSession) {
     }
     let mut session = unsafe { Box::from_raw(session) };
     session.stop.store(true, Ordering::SeqCst);
+    session.graphics.cancel();
     let _ = session.tx.try_send(WorkerCommand::Stop);
     if let Some(worker) = session.worker.take() {
         let _ = worker.join();
     }
+}
+
+/// Wait for callbacks accepted before this call, including an in-flight callback.
+/// # Safety
+/// Call only outside callbacks and C media locks; session must be live or null.
+#[no_mangle]
+pub unsafe extern "C" fn rdp_graphics_barrier(session: *mut RdpSession, timeout_ms: u32) -> bool {
+    unsafe { session_from(session) }.is_none_or(|session| {
+        session
+            .graphics
+            .barrier(std::time::Duration::from_millis(u64::from(timeout_ms)))
+    })
 }
 
 /// # Safety
@@ -275,18 +310,17 @@ pub unsafe extern "C" fn rdp_set_suppress_output(session: *mut RdpSession, allow
     };
 }
 
-/// Ask the server for a fresh full frame / keyframe: re-submits the current monitor
-/// layout on the Display Control DVC (forces gnome-remote-desktop to recreate its encode
-/// session → RESET_GRAPHICS + IDR) and sends a full-screen Refresh Rect for servers that
-/// honor the classic path.
+/// Ask for a fresh full frame/keyframe by resetting the graphics channel when supported,
+/// otherwise send a full-screen Refresh Rect. Does not change the monitor layout.
+/// The worker echoes `cookie` through `on_refresh_started` before forwarding subsequent AUs.
 /// # Safety
 /// `session` must be null or a live pointer from `rdp_session_start` (see `session_from`).
 #[no_mangle]
-pub unsafe extern "C" fn rdp_request_refresh(session: *mut RdpSession) {
+pub unsafe extern "C" fn rdp_request_refresh(session: *mut RdpSession, cookie: u32) {
     unsafe {
         enqueue_command(
             session,
-            WorkerCommand::Control(ControlCommand::RequestRefresh),
+            WorkerCommand::Control(ControlCommand::RequestRefresh { cookie }),
         )
     };
 }
@@ -461,14 +495,78 @@ mod tests {
     }
 
     #[test]
-    fn camera_availability_atomic_retains_latest_desired_state() {
-        let (tx, _rx) = sync_channel(32);
+    fn network_snapshot_is_nonblocking_and_null_safe() {
+        let (tx, _rx) = sync_channel(1);
         let mut session = RdpSession {
+            network: Default::default(),
+            certificate_gate: Default::default(),
+            stop: Default::default(),
+            tx,
+            media: Default::default(),
+            desired_camera_available: Default::default(),
+            worker: None,
+            graphics: Default::default(),
+        };
+        let session_ptr = &mut session as *mut RdpSession;
+        let mut out = super::super::abi::RdpNetworkStats::default();
+        session.network.lock().unwrap().generation = 7;
+        assert_eq!(
+            unsafe { rdp_session_get_network_stats(session_ptr, &mut out) },
+            1
+        );
+        assert_eq!(out.generation, 7);
+        assert!(out.observed_ms > 0);
+        let _lock = session.network.lock().unwrap();
+        assert_eq!(
+            unsafe { rdp_session_get_network_stats(session_ptr, &mut out) },
+            0
+        );
+        assert_eq!(out.generation, 0);
+        assert_eq!(
+            unsafe { rdp_session_get_network_stats(ptr::null_mut(), &mut out) },
+            0
+        );
+        assert_eq!(
+            unsafe { rdp_session_get_network_stats(session_ptr, ptr::null_mut()) },
+            0
+        );
+    }
+
+    #[test]
+    fn barrier_abi_accepts_null_and_reports_pending_work() {
+        let _: unsafe extern "C" fn(*mut RdpSession, u32) -> bool = rdp_graphics_barrier;
+        assert!(unsafe { rdp_graphics_barrier(ptr::null_mut(), 0) });
+        let (tx, _rx) = sync_channel(1);
+        let mut session = RdpSession {
+            network: Default::default(),
+            certificate_gate: Arc::default(),
             stop: Arc::new(AtomicBool::new(false)),
             tx,
             media: Arc::new(MediaGate::default()),
             desired_camera_available: Arc::new(AtomicBool::new(false)),
             worker: None,
+            graphics: Arc::new(super::super::graphics::GraphicsQueue::default()),
+        };
+        session
+            .graphics
+            .submit(super::super::graphics::Event::Frame);
+        assert!(!unsafe { rdp_graphics_barrier(&mut session, 0) });
+        session.graphics.cancel();
+        assert!(unsafe { rdp_graphics_barrier(&mut session, 0) });
+    }
+
+    #[test]
+    fn camera_availability_atomic_retains_latest_desired_state() {
+        let (tx, _rx) = sync_channel(32);
+        let mut session = RdpSession {
+            network: Default::default(),
+            certificate_gate: Arc::new(super::super::certificate::CertificateGate::default()),
+            stop: Arc::new(AtomicBool::new(false)),
+            tx,
+            media: Arc::new(MediaGate::default()),
+            desired_camera_available: Arc::new(AtomicBool::new(false)),
+            worker: None,
+            graphics: Arc::new(super::super::graphics::GraphicsQueue::default()),
         };
         let session_ptr = &mut session as *mut RdpSession;
 
@@ -484,11 +582,14 @@ mod tests {
         let (tx, _rx) = sync_channel(32);
         let media = Arc::new(MediaGate::default());
         let mut session = RdpSession {
+            network: Default::default(),
+            certificate_gate: Arc::new(super::super::certificate::CertificateGate::default()),
             stop: Arc::new(AtomicBool::new(false)),
             tx,
             media: Arc::clone(&media),
             desired_camera_available: Arc::new(AtomicBool::new(false)),
             worker: None,
+            graphics: Arc::new(super::super::graphics::GraphicsQueue::default()),
         };
         let session_ptr = &mut session as *mut RdpSession;
         let camera = [1u8, 2, 3];
@@ -550,7 +651,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod scale_tests {
+mod config_tests {
     use super::*;
 
     #[test]
@@ -571,4 +672,62 @@ mod scale_tests {
             assert!(unsafe { copy_config(&config) }.is_err());
         }
     }
+
+    #[test]
+    fn copy_config_owns_the_validated_certificate_pin() {
+        let mut config: RdpConfig = unsafe { core::mem::zeroed() };
+        config.host = c"test".as_ptr();
+        assert!(unsafe { copy_config(&config) }
+            .unwrap()
+            .trusted_certificate_sha256
+            .is_empty());
+        let pin = std::ffi::CString::new("ab".repeat(32)).unwrap();
+        config.trusted_certificate_sha256 = pin.as_ptr();
+        let copied = unsafe { copy_config(&config) }.unwrap();
+        drop(pin);
+        assert_eq!(copied.trusted_certificate_sha256, "ab".repeat(32));
+        config.trusted_certificate_sha256 = c"invalid".as_ptr();
+        assert!(unsafe { copy_config(&config) }.is_err());
+    }
+}
+
+/// Resolve only the matching pending certificate request.
+///
+/// # Safety
+/// `session` follows the session pointer contract; `fingerprint` is a valid C string.
+#[no_mangle]
+pub unsafe extern "C" fn rdp_confirm_certificate(
+    session: *mut RdpSession,
+    fingerprint: *const c_char,
+    accept: bool,
+) -> bool {
+    let Some(session) = (unsafe { session_from(session) }) else {
+        return false;
+    };
+    session
+        .certificate_gate
+        .confirm(&unsafe { cstr_lossy(fingerprint) }, accept)
+}
+
+/// Copy a bounded telemetry snapshot without waiting for the network worker.
+/// # Safety
+/// Session follows the common lifetime contract; out must be writable or null.
+#[no_mangle]
+pub unsafe extern "C" fn rdp_session_get_network_stats(
+    session: *mut RdpSession,
+    out: *mut super::abi::RdpNetworkStats,
+) -> i32 {
+    let Some(out) = (unsafe { out.as_mut() }) else {
+        return 0;
+    };
+    *out = Default::default();
+    let Some(session) = (unsafe { session_from(session) }) else {
+        return 0;
+    };
+    let Ok(snapshot) = session.network.try_lock() else {
+        return 0;
+    };
+    *out = *snapshot;
+    out.observed_ms = super::network::now_ms();
+    1
 }

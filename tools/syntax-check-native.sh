@@ -14,6 +14,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 "$repo_root/tools/check-logging-policy.sh"
+miniaudio_dir="$(cmake -P "$repo_root/native/cmake/Miniaudio.cmake")"
 
 # Files that cannot be syntax-checked on a bare host:
 #   input_evdev.c   — includes libevdev headers (static lib in the webOS sysroot)
@@ -42,7 +43,7 @@ fi
   -I"$repo_root/native/src/ndl_adapter" \
   -I"$repo_root/third_party/backend_ndl/include" \
   -I"$repo_root/third_party/backend_ndl/src" \
-  -I"$repo_root/third_party/miniaudio" \
+  -I"$miniaudio_dir" \
   "${files[@]}" "$@"
 
 echo "syntax-check-native: checked ${#files[@]} files (skipped: ${excluded[*]})"

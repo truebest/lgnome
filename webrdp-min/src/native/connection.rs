@@ -4,6 +4,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 
+use super::graphics_channel::NativeGraphicsChannel;
 use ironrdp_connector::{
     ClientConnector, ClientConnectorState, Config, ConnectionResult, Credentials, DesktopSize,
     Sequence as _,
@@ -11,7 +12,6 @@ use ironrdp_connector::{
 use ironrdp_core::WriteBuf;
 use ironrdp_displaycontrol::client::DisplayControlClient;
 use ironrdp_dvc::DrdynvcClient;
-use ironrdp_egfx::client::GraphicsPipelineClient;
 use ironrdp_pdu::gcc::KeyboardType;
 use ironrdp_pdu::nego::SecurityProtocol;
 use ironrdp_pdu::rdp::capability_sets::MajorPlatformType;
@@ -22,7 +22,7 @@ use x509_cert::der::Decode as _;
 use super::egfx::NativeGfxHandler;
 use super::logging::LOG_TARGET_TRANSPORT;
 use super::transport::{
-    install_rustls_provider, is_timeout, random_array, NoCertificateVerification, PollingSocket,
+    install_rustls_provider, is_timeout, random_array, HandshakeSignatureVerifier, PollingSocket,
     TlsStream, CONNECT_TIMEOUT, IO_POLL_TIMEOUT,
 };
 use super::{
@@ -153,16 +153,13 @@ impl NativeWorker {
 
         let mut connector = ClientConnector::new(config, client_addr);
         let mut drdynvc = DrdynvcClient::new()
-            .with_dynamic_channel(
-                GraphicsPipelineClient::new(
-                    Box::new(NativeGfxHandler::new(
-                        Arc::clone(&self.gfx),
-                        self.config.enable_hevc,
-                    )),
-                    None,
-                )
-                .with_suspended_frame_acknowledgments(),
-            )
+            .with_dynamic_channel(NativeGraphicsChannel::new(
+                Box::new(NativeGfxHandler::new(
+                    Arc::clone(&self.gfx),
+                    self.config.enable_hevc,
+                )),
+                Arc::clone(&self.gfx),
+            ))
             .with_listener(rdpsnd::RdpsndDvcFactory {
                 callbacks: self.callbacks,
                 prefer_pcm: self.config.prefer_pcm_audio,
@@ -229,7 +226,7 @@ impl NativeWorker {
         install_rustls_provider();
         let mut config = rustls::ClientConfig::builder()
             .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoCertificateVerification))
+            .with_custom_certificate_verifier(Arc::new(HandshakeSignatureVerifier))
             .with_no_client_auth();
         config.key_log = Arc::new(rustls::KeyLogFile::new());
         config.resumption = rustls::client::Resumption::disabled();
@@ -243,6 +240,7 @@ impl NativeWorker {
         let mut tls = rustls::StreamOwned::new(
             conn,
             PollingSocket {
+                counters: Default::default(),
                 socket: tcp,
                 stop: Arc::clone(&self.stop),
                 phase_deadline: self.phase_deadline,
@@ -265,7 +263,7 @@ impl NativeWorker {
         tracing::info!(target: LOG_TARGET_TRANSPORT,
             version = ?tls.conn.protocol_version(),
             cipher = ?tls.conn.negotiated_cipher_suite().map(|suite| suite.suite()),
-            "TLS handshake complete (self-signed certificates accepted; handshake signature verified)");
+            "TLS handshake signature verified; checking server identity");
         let cert = tls
             .conn
             .peer_certificates()
@@ -280,6 +278,37 @@ impl NativeWorker {
             .as_bytes()
             .ok_or_else(|| NativeError::network("TLS subject public key is not byte-aligned"))?
             .to_vec();
+        let chain = tls
+            .conn
+            .peer_certificates()
+            .expect("certificate checked above");
+        let fingerprint = super::certificate::fingerprint(chain[0].as_ref());
+        let roots = rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        let verifier = rustls::client::WebPkiServerVerifier::builder(Arc::new(roots))
+            .build()
+            .map_err(|_| NativeError::protocol("could not initialize certificate verification"))?;
+        if let Some(reason) = super::certificate::warning(
+            chain,
+            &self.config.host,
+            &self.config.trusted_certificate_sha256,
+            verifier.as_ref(),
+            rustls::pki_types::UnixTime::now(),
+        )? {
+            self.config
+                .certificate_gate
+                .wait(&fingerprint, &self.stop, || {
+                    self.callbacks.certificate(&fingerprint, &reason)
+                })?;
+            // Consent applies to this logical session, including internal handoff retries.
+            self.config.trusted_certificate_sha256 = fingerprint;
+            // The server may have timed out while the user read the dialog.
+            // Reconnect with the approved fingerprint, checking it again before auth.
+            let mut retry = NativeError::network("retrying with accepted server certificate");
+            retry.retry_certificate = true;
+            return Err(retry);
+        }
         Ok((tls, public_key))
     }
 

@@ -193,7 +193,7 @@ int native_preconnect_ui_selected_slot(const NativePreconnectUi *ui) {
 }
 
 bool native_preconnect_ui_session_keys_enabled(const NativePreconnectUi *ui) {
-    return ui && !ui->connecting && !ui->onboarding_visible && !ui->capture_settings_visible &&
+    return ui && !ui->certificate_visible && !ui->connecting && !ui->onboarding_visible && !ui->capture_settings_visible &&
            !ui_any_action_pending(ui);
 }
 
@@ -372,7 +372,7 @@ bool ui_hub_navigate(NativePreconnectUi *ui, lv_obj_t *target, uint32_t key) {
         }
     }
     bool hub_control = card_slot >= 0 || target == ui->hero_action_btn || target == ui->hero_edit_btn ||
-                       target == ui->capture_settings_btn || target == ui->help_btn;
+                       target == ui->capture_settings_btn || target == ui->statistics_btn || target == ui->help_btn;
     if (!hub_control) {
         return false;
     }
@@ -423,12 +423,17 @@ bool ui_hub_navigate(NativePreconnectUi *ui, lv_obj_t *target, uint32_t key) {
             return true;
         }
         if (key == LV_KEY_DOWN) {
-            lv_group_focus_obj(ui->help_btn);
+            lv_group_focus_obj(ui->statistics_btn);
+            return true;
+        }
+    } else if (target == ui->statistics_btn) {
+        if (key == LV_KEY_UP || key == LV_KEY_DOWN) {
+            lv_group_focus_obj(key == LV_KEY_UP ? ui->capture_settings_btn : ui->help_btn);
             return true;
         }
     } else if (target == ui->help_btn) {
         if (key == LV_KEY_UP) {
-            lv_group_focus_obj(ui->capture_settings_btn);
+            lv_group_focus_obj(ui->statistics_btn);
             return true;
         }
         if (key == LV_KEY_DOWN) {

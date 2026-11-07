@@ -9,6 +9,8 @@
 
 #include "native_settings.h"
 #include "ui_mixer.h"
+#include "native_diagnostics.h"
+#include "native_statistics.h"
 
 typedef struct NativePreconnectUi NativePreconnectUi;
 typedef bool (*NativePreconnectUiBackgroundDrawFn)(void *ctx, SDL_Renderer *renderer);
@@ -106,5 +108,21 @@ void native_preconnect_ui_finish_delete(NativePreconnectUi *ui, int slot, bool s
  * it; main.c drives the returned handle directly. NULL when its creation failed;
  * native_ui_mixer_* calls tolerate that and main.c leaves the overlay unavailable. */
 NativeUiMixer *native_preconnect_ui_mixer(NativePreconnectUi *ui);
+bool native_preconnect_ui_statistics_enabled(const NativePreconnectUi *ui);
+/* Main-thread tab selection; positive direction advances, negative goes back. */
+bool native_preconnect_ui_statistics_key(NativePreconnectUi *ui, NativeStatisticsKey key,
+                                         bool down, bool repeat, bool *open_hub);
+void native_preconnect_ui_statistics_reset_focus(NativePreconnectUi *ui);
+bool native_preconnect_ui_statistics_visible(NativePreconnectUi *ui, bool visible);
+/* Refreshes only the LVGL texture; the streaming compositor owns the present. */
+bool native_preconnect_ui_statistics_prepare(NativePreconnectUi *ui, const NativeDiagnosticsSnapshot *snapshot);
+void native_preconnect_ui_statistics_draw(NativePreconnectUi *ui);
+
+void native_preconnect_ui_show_certificate(NativePreconnectUi *ui, const NativeSessionConfig *session,
+                                            const char *sha256, const char *reason);
+void native_preconnect_ui_close_certificate(NativePreconnectUi *ui);
+bool native_preconnect_ui_take_certificate(NativePreconnectUi *ui, bool *accept, bool *remember);
+void native_preconnect_ui_certificate_error(NativePreconnectUi *ui, const char *message);
+void native_preconnect_ui_set_certificate_trust(NativePreconnectUi *ui, int slot, const NativeCertificateTrust *trust);
 
 #endif
