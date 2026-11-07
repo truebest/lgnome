@@ -172,13 +172,13 @@ void native_request_session_switch(App *app, int target) {
                             NATIVE_SNAPSHOT_QUIET_MS;
         }
         if (ready_now) {
-            app->pending_switch_target = -1;
             native_complete_session_switch(app, target);
             return;
         }
         clog(cLogLevelInfo, "deferring the switch to %s until its stream is ready",
              native_session_slot_name(target));
         app->pending_switch_target = target;
+        app->pending_switch_graphics = false;
         app->pending_switch_deadline_ticks = SDL_GetTicks() + NATIVE_PENDING_SWITCH_TIMEOUT_MS;
         slot->snapshot_retry_used = false;
         /* Acknowledge the press right away: the badge shows the DESTINATION while the

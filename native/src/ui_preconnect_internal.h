@@ -1,6 +1,8 @@
 #ifndef LGNOME_UI_PRECONNECT_INTERNAL_H
 #define LGNOME_UI_PRECONNECT_INTERNAL_H
 
+#include "ui_statistics_internal.h"
+
 #include "ui_preconnect.h"
 #include "ui_preconnect_screen.h"
 #include "ui_preconnect_display.h"
@@ -104,6 +106,18 @@ struct NativePreconnectUi {
     lv_obj_t *keyboard_warning_label;
     lv_obj_t *capture_settings_btn;
     lv_obj_t *help_btn;
+    lv_obj_t *statistics_btn;
+    lv_obj_t *statistics_panel;
+    lv_obj_t *statistics_tabs;
+    lv_obj_t *statistics_name, *statistics_format, *statistics_status, *statistics_activity;
+    lv_obj_t *statistics_hint, *statistics_help_panel, *statistics_help_text;
+    NativeStatisticsPage statistics_pages[NATIVE_STATS_TABS];
+    NativeStatisticsNavigation statistics_navigation;
+    bool statistics_enabled, statistics_visible, statistics_dirty, statistics_rendering;
+    uint32_t statistics_at_ms;
+    unsigned statistics_epoch, statistics_generation;
+    int statistics_slot;
+
     NativeUiCube brand_cube;
     lv_obj_t *setup_scrim;
     lv_obj_t *setup_panel;
@@ -139,6 +153,14 @@ struct NativePreconnectUi {
     lv_obj_t *delete_btn;
     lv_obj_t *delete_label;
     lv_obj_t *status_label;
+    lv_obj_t *certificate_scrim;
+    lv_obj_t *certificate_detail;
+    lv_obj_t *certificate_remember;
+    lv_obj_t *certificate_cancel;
+    lv_obj_t *certificate_continue;
+    bool certificate_visible;
+    bool certificate_answer_ready;
+    bool certificate_accept;
     lv_obj_t *onboarding_scrim;
     lv_obj_t *onboarding_btn;
     NativeUiCube onboarding_cube;
@@ -372,8 +394,14 @@ void ui_show_onboarding(NativePreconnectUi *ui, bool visible);
 void native_ui_preconnect_build(NativePreconnectUi *ui, const char *host, uint16_t port, const char *username,
                                 const char *password, const char *domain, uint16_t fps, uint16_t desktop_width,
                                 uint16_t desktop_height, uint16_t audio_codec);
+void native_ui_preconnect_certificate_focus(NativePreconnectUi *ui);
 void native_ui_preconnect_build_onboarding(NativePreconnectUi *ui);
 void native_ui_preconnect_screen_init(NativePreconnectUi *ui, NativeUiScreenId initial);
 void native_ui_preconnect_screen_refocus(NativePreconnectUi *ui);
+
+void ui_statistics_build(NativePreconnectUi *ui);
+void ui_statistics_clicked(lv_event_t *event);
+void ui_statistics_tabs_build(NativePreconnectUi *ui);
+void ui_statistics_update(NativePreconnectUi *ui, const NativeDiagnosticsSnapshot *snapshot);
 
 #endif

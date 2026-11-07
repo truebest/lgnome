@@ -75,6 +75,8 @@ typedef struct NativeAudioSource {
     atomic_uint underruns;
     atomic_uint hard_corrections;
     atomic_uint overflows;
+    atomic_uint received_frames;
+    atomic_uint output_frames;
     atomic_uint peak_left;
     atomic_uint peak_right;
     atomic_uint peak_when_ms;

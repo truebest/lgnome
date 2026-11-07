@@ -14,6 +14,7 @@
 #include "capture_redirect.h"
 #include "cursor_sdl.h"
 #include "native_json.h"
+#include "native_diagnostics.h"
 #include "native_time.h"
 #ifdef LGNOME_TARGET_WEBOS
 #include "input_evdev.h"
@@ -65,6 +66,10 @@ typedef struct NativeSessionSlot {
     int index; /* NATIVE_SESSION_SLOT_* */
     RdpSession *rdp;
     NativeSessionConfig config;
+    /* Worker publishes under video_lock; SDL consumes before showing the dialog. */
+    bool certificate_pending;
+    char certificate_sha256[65];
+    char certificate_reason[192];
     /* Capture mode passed to this connection; SDL thread only. */
     uint16_t camera_width;
     uint16_t camera_height;
@@ -84,6 +89,7 @@ typedef struct NativeSessionSlot {
     atomic_uint desktop_height;
     /* Per-slot progress; another slot must not satisfy this slot's switch watchdog. */
     atomic_uint video_ok_frames;
+    NativeVideoCounters diagnostics; /* video_lock */
     /* Server-driven cursor. Background sessions keep caching their latest shape here;
      * the SDL thread applies only the active slot's cursor each tick. */
     NativeCursor cursor;
@@ -109,6 +115,8 @@ typedef struct NativeSessionSlot {
     bool refresh_ineffective;
     /* Guarded by video_lock; background worker appends, SDL thread replays and resets. */
     NativeAuSnapshot snapshot;
+    uint32_t refresh_cookie;
+    bool refresh_waiting; /* guarded by video_lock */
     NativeVideoCodec video_codec;
     /* Worker -> SDL thread: the snapshot is seeded with a cached decoder restart AU. */
     atomic_bool snapshot_idr_ready;
@@ -130,6 +138,10 @@ typedef struct NativeSessionSlot {
 } NativeSessionSlot;
 
 typedef struct App {
+    bool certificate_prompt_active;
+    int certificate_prompt_slot;
+    unsigned certificate_prompt_epoch;
+    char certificate_prompt_sha256[65];
     NativeWebosPlatformInfo webos_platform;
     NativeSessionSlot sessions[NATIVE_SETTINGS_MAX_SESSIONS];
     /* Screen/input owner; SDL thread writes, worker callbacks read. */
@@ -141,11 +153,13 @@ typedef struct App {
     bool switch_reconnect_used;
     /* Worker requests an SDL-thread refresh after a shared-pipeline reload. */
     atomic_bool video_refresh_needed;
+    atomic_bool audio_open_requested;
     /* LGNOME_SNAPSHOT_FORCE=1: IDR-snapshot backgrounding for every slot, not only
      * the learned refresh-ineffective ones (device experiment knob; set once in main). */
     bool snapshot_force;
     /* SDL-thread deferred-switch target (-1 = none); current stream stays visible. */
     int pending_switch_target;
+    bool pending_switch_graphics;
     /* SDL thread only: when the deferred switch gives up and answers old-style. */
     uint32_t pending_switch_deadline_ticks;
     /* video_lock: dirty-rectangle canvas owned by one slot and connection epoch. */
@@ -204,6 +218,7 @@ typedef struct App {
      * grabbed /dev/input devices and wakes the SDL loop through eventfd. */
     NativeEvdevInput evdev_input;
 #endif
+    NativeDiagnostics diagnostics; /* SDL thread */
     int decoder_errors;
     /* Still-region refinement tiles dropped because the H.264 plane was live. */
     unsigned tiles_dropped_under_video;

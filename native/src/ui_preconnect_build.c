@@ -116,6 +116,8 @@ static void ui_build(NativePreconnectUi *ui, const char *host, uint16_t port, co
     lv_obj_set_style_bg_opa(webcam_dot, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(webcam_dot, LV_RADIUS_CIRCLE, 0);
 
+    ui->statistics_btn = native_ui_preconnect_make_button(ui, ui->root, 1340, 46, 180, 46,
+                                                         "", false, ui_statistics_clicked);
     ui->help_btn = native_ui_preconnect_make_button(ui, ui->root, 1778, 46, 46, 46, "?", false, ui_help_clicked);
     lv_obj_set_style_pad_all(ui->help_btn, 0, 0);
     lv_obj_set_style_radius(ui->help_btn, LV_RADIUS_CIRCLE, 0);

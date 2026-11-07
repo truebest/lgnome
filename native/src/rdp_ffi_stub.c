@@ -91,7 +91,8 @@ void rdp_set_suppress_output(RdpSession *session, bool allow_display) {
     (void)allow_display;
 }
 
-void rdp_request_refresh(RdpSession *session) {
+void rdp_request_refresh(RdpSession *session, uint32_t cookie) {
+    (void)cookie;
     (void)session;
 }
 
@@ -128,4 +129,21 @@ bool rdp_submit_audio_input_pcm(RdpSession *session, uint64_t generation, const 
     (void)data;
     (void)len;
     return false;
+}
+
+bool rdp_confirm_certificate(RdpSession *session, const char *sha256, bool accept) {
+    (void)session; (void)sha256; (void)accept;
+    return false;
+}
+
+int rdp_session_get_network_stats(RdpSession *session, RdpNetworkStats *out) {
+    (void)session;
+    if (out) *out = (RdpNetworkStats){0};
+    return 0;
+}
+
+bool rdp_graphics_barrier(RdpSession *session, uint32_t timeout_ms) {
+    (void)session;
+    (void)timeout_ms;
+    return true;
 }

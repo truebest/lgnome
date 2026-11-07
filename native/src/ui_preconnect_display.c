@@ -15,6 +15,10 @@ void native_ui_preconnect_display_flush(lv_disp_drv_t *drv, const lv_area_t *are
     if (lv_disp_flush_is_last(drv)) {
         lv_draw_sdl_drv_param_t *param = (lv_draw_sdl_drv_param_t *)drv->user_data;
         NativePreconnectUi *ui = (NativePreconnectUi *)param->user_data;
+        if (ui->statistics_rendering) {
+            lv_disp_flush_ready(drv);
+            return;
+        }
         SDL_SetRenderTarget(ui->renderer, NULL);
         SDL_SetRenderDrawBlendMode(ui->renderer, SDL_BLENDMODE_BLEND);
         bool software_background_drawn = ui->background_draw &&
@@ -282,7 +286,7 @@ static void drain_sdl_key_events(NativePreconnectUi *ui) {
         uint32_t key = 0;
         switch (event.type) {
         case SDL_TEXTINPUT:
-            if (!ui->connecting && !ui->hub_closing && !state->back_pressed) {
+            if ((!ui->connecting || ui->certificate_visible) && !ui->hub_closing && !state->back_pressed) {
                 enqueue_text(state, event.text.text);
             }
             break;
@@ -296,11 +300,11 @@ static void drain_sdl_key_events(NativePreconnectUi *ui) {
                         native_ui_preconnect_reset_input_state(ui);
                     }
                     state->back_pressed = down;
-                } else if (!ui->connecting && !ui->hub_closing && !state->back_pressed) {
+                } else if ((!ui->connecting || ui->certificate_visible) && !ui->hub_closing && !state->back_pressed) {
                     enqueue_key(state, key, event.type == SDL_KEYDOWN
                                                 ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED);
                 }
-            } else if (!ui->connecting && !ui->hub_closing && !state->back_pressed &&
+            } else if ((!ui->connecting || ui->certificate_visible) && !ui->hub_closing && !state->back_pressed &&
                        event.type == SDL_KEYDOWN && !text_input_pending &&
                        text_key_from_sdl(&event.key, &key)) {
                 enqueue_tap(state, key);
@@ -317,7 +321,7 @@ void native_ui_preconnect_key_read(lv_indev_drv_t *drv, lv_indev_data_t *data) {
     NativePreconnectKeyDriver *state = (NativePreconnectKeyDriver *)drv;
 
     drain_sdl_key_events(ui);
-    if (ui->connecting || ui->hub_closing) {
+    if ((ui->connecting && !ui->certificate_visible) || ui->hub_closing) {
         native_ui_key_queue_clear(&state->queue);
         state->state = LV_INDEV_STATE_RELEASED;
         data->key = state->key;

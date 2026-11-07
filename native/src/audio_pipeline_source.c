@@ -10,7 +10,6 @@ clog_define(g_native_log_audio_source, cLogLevelInfo, "audio.source");
 #define NATIVE_AUDIO_TARGET_INITIAL_MS NATIVE_AUDIO_JITTER_TARGET_INITIAL_MS
 #define NATIVE_AUDIO_TARGET_MIN_MS NATIVE_AUDIO_JITTER_TARGET_MIN_MS
 #define NATIVE_AUDIO_TARGET_MAX_MS NATIVE_AUDIO_JITTER_TARGET_MAX_MS
-#define NATIVE_AUDIO_TARGET_HEADROOM_MS NATIVE_AUDIO_JITTER_TARGET_HEADROOM_MS
 #define NATIVE_AUDIO_STALE_BURST_MS 100u
 #define NATIVE_AUDIO_HARD_TRIM_ERROR_MS 80u
 #define NATIVE_AUDIO_HARD_TRIM_KEEP_MS 20u
@@ -263,6 +262,7 @@ static size_t source_convert_frames(NativeAudioSource *source, float *out, size_
         if (input_count > 0) {
             atomic_store_explicit(&source->read_cursor, read + (unsigned)input_count, memory_order_release);
         }
+        atomic_fetch_add_explicit(&source->output_frames, (unsigned)output_count, memory_order_relaxed);
         produced += (size_t)output_count;
         if (result != MA_SUCCESS || (input_count == 0 && output_count == 0)) {
             break;
@@ -435,8 +435,6 @@ static bool source_render_live(NativeSourceReadBlock *block) {
 
 static void source_handle_underrun(NativeAudioSource *source) {
     atomic_fetch_add_explicit(&source->underruns, 1u, memory_order_relaxed);
-    unsigned target = atomic_load_explicit(&source->target_delay_ms, memory_order_relaxed);
-    source_raise_target(source, target + NATIVE_AUDIO_TARGET_HEADROOM_MS);
     source->live = false;
     source->rebuffering = true;
     source->trim_after_fade = false;
@@ -589,6 +587,8 @@ bool native_audio_sources_init(NativeAudioPipelineImpl *pipeline) {
         atomic_init(&source->underruns, 0u);
         atomic_init(&source->hard_corrections, 0u);
         atomic_init(&source->overflows, 0u);
+        atomic_init(&source->received_frames, 0u);
+        atomic_init(&source->output_frames, 0u);
         atomic_init(&source->peak_left, 0u);
         atomic_init(&source->peak_right, 0u);
         atomic_init(&source->peak_when_ms, 0u);
@@ -686,6 +686,7 @@ size_t native_audio_pipeline_push(NativeAudioPipeline *pipeline, int source_inde
         source->producer_channels == 0) {
         return 0;
     }
+    atomic_fetch_add_explicit(&source->received_frames, (unsigned)frames, memory_order_relaxed);
     uint32_t now_ms = native_audio_pipeline_now_ms(source->pipeline);
     unsigned write = atomic_load_explicit(&source->write_cursor, memory_order_relaxed);
     source_update_arrival_controller(source, frames, timestamp_ms, now_ms, write);
@@ -760,6 +761,10 @@ bool native_audio_pipeline_get_source_stats(NativeAudioPipeline *pipeline, int s
         return false;
     }
     NativeAudioSource *source = &((NativeAudioPipelineImpl *)pipeline->impl)->sources[source_index];
+    stats->received_frames = atomic_load_explicit(&source->received_frames, memory_order_relaxed);
+    stats->output_frames = atomic_load_explicit(&source->output_frames, memory_order_relaxed);
+    stats->generation = atomic_load_explicit(&source->format_generation, memory_order_acquire);
+    stats->input_sample_rate = atomic_load_explicit(&source->pending_sample_rate, memory_order_relaxed);
     stats->open = atomic_load_explicit(&source->open, memory_order_relaxed);
     stats->queue_ms = native_audio_source_queue_ms(source);
     stats->target_delay_ms = atomic_load_explicit(&source->target_delay_ms, memory_order_relaxed);

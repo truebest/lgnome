@@ -18,7 +18,11 @@ the client does now, not what changed in any one version.
 
 - **Video**: AVC420/H.264 over RDPEGFX, decoded by the TV hardware video plane through
   the in-house NDL DirectMedia backend (`backend_ndl`, dlopen of
-  `libNDL_directmedia.so.1`). Servers that cannot provide H.264 fall back to native
+  `libNDL_directmedia.so.1`). H.264 uses the firmware's GStreamer RTC path for low-delay
+  decoding. AVC444 main and auxiliary pictures share the hardware decoder; auxiliary
+  output is suppressed, leaving the primary 4:2:0 image without full-chroma reconstruction.
+  A separate graphics worker keeps video submission from blocking network/audio dispatch.
+  Servers that cannot provide H.264 fall back to native
   RemoteFX Progressive/bitmap decoding in Rust, presented as RGBA through SDL.
 - **Multi-session switching**: four RDP sessions map to the remote's red, green, yellow,
   and blue buttons. One session owns the video and KVM-style input at a time while the
@@ -62,6 +66,12 @@ the client does now, not what changed in any one version.
   state.
 - **Pre-connect UI**: an on-TV LVGL settings screen (host, credentials, fps, audio codec)
   with persisted settings.
+- **Playback statistics**: the HUB's Stats button opens Overview, Video, Audio, Network,
+  Performance, and Diagnostics tabs. The panel starts off and includes passive RDP/TCP
+  telemetry; unavailable measurements are identified explicitly.
+- **Server certificate verification**: TLS checks the certificate chain, dates, and
+  server name. Unverified certificates require confirmation; an optional saved fingerprint
+  trusts that certificate for the selected server, and a changed certificate asks again.
 - **Network autodetection**: the client answers connect-time and continuous RTT
   measurements over the MCS message channel — gnome-remote-desktop refuses audio
   redirection without it.
@@ -162,11 +172,10 @@ ends.
   so their (virtual) display should use a known-good standard resolution server-side —
   and note that a headless server's display can revert to its unusual default after a
   service restart.
-- **The standard native video path presents AVC420.** The client requests AVC420 through
-  EGFX V8.1 and also advertises V10 because the tested Windows host enables H.264 only
-  for a V10 client. That host sends a self-contained 4:2:0 stream when its AVC444
-  prioritization policy is disabled. A server that actually sends the AVC444 auxiliary
-  view is not supported correctly (see "Chroma subsampling" below). Servers without a
+- **The native video path presents a 4:2:0 image.** The client advertises V10 capabilities
+  for Windows H.264 compatibility and accepts AVC420 and AVC444 main/auxiliary streams.
+  AVC444 auxiliary pictures are decoded but not displayed; they are not recombined with
+  the main picture (see "Chroma subsampling" below). Servers without a
   usable H.264 encoder fall back to software RemoteFX rendering (slower, and rendered on
   the ~1080p UI plane rather than the native-resolution video plane).
 - **HEVC is experimental.** NDL builds also offer our private HEVC extension, which
@@ -178,27 +187,26 @@ ends.
   frames — but a server that relied on them for the software RemoteFX path would show
   stale regions.
 
-### Chroma subsampling: why AVC444 cannot use the native video path
+### Chroma subsampling: AVC444 input still produces a 4:2:0 image
 
-The hardware plane presents H.264 4:2:0. V10 remains a Windows compatibility
-fallback, but it does not make two-view AVC444 presentable; that is a platform
-ceiling rather than a missing pixel conversion:
+The hardware plane presents H.264 4:2:0. Accepting two-view AVC444 does not restore
+full chroma resolution:
 
 - RDP's AVC444 carries a luma view plus an auxiliary view with packed chroma.
   The views can share one H.264 reference-picture sequence, so discarding the
   auxiliary access units can also break prediction in later luma pictures. The
-  NDL media pipeline renders every access unit it accepts and never exposes
-  decoded frames to the application, so it can neither consume an auxiliary
-  picture without displaying it nor recombine the two views in the pixel domain.
+  GStreamer integration therefore feeds both views in wire order to one hardware
+  decoder, marks auxiliary pictures as decode-only, and suppresses their output.
+  The visible image is the primary view; the client does not recombine the two
+  views in the pixel domain.
 - On the validated webOS 23/24 targets, the available hardware profiles are H.264
   BP/MP/HP, HEVC Main/Main10, and AV1 Main — no Hi444PP, HEVC RExt, or AV1 High.
 - Decoding the AVC444 stream pair in software would forfeit the hardware
   video plane and cannot sustain 4K on TV SoCs.
 
-The same composition ceiling applies to any hardware-plane client that cannot access
-decoded frames. The client warns and drops an unexpected auxiliary view; the result is
-best-effort and may remain corrupted until a new independent decoder seed. Production
-Windows profiles must therefore select a self-contained 4:2:0 stream.
+This avoids displaying packed auxiliary chroma while preserving the reference chain.
+It does not provide the text/color fidelity of reconstructed 4:4:4. Selecting AVC420
+on the server avoids the extra auxiliary-stream bandwidth and decoding work.
 
 ## Layout
 
@@ -211,9 +219,10 @@ Windows profiles must therefore select a self-contained 4:2:0 stream.
 - `webrdp-min/` — Rust static library implementing the RDP client (direct TCP + TLS +
   CredSSP/NTLM, EGFX, rdpsnd-over-DVC), exposed through the C ABI in
   `native/include/rdp_ffi.h`.
-- `third_party/` — pinned native dependencies (git submodules): our IronRDP fork
-  ([truebest/IronRDP](https://github.com/truebest/IronRDP), branch `gnome-rdp-support`,
-  fork delta recorded in `third_party/IronRDP/PROVENANCE.md`), LVGL, miniaudio.
+- `third_party/` — pinned git submodules: backend_ndl and our IronRDP fork
+  ([truebest/IronRDP](https://github.com/truebest/IronRDP), branch `lgnome/upstream-reset`,
+  fork delta recorded in `third_party/IronRDP/PROVENANCE.md`). LVGL and miniaudio
+  are downloaded as verified archives into `build/deps/`.
 - `Dockerfile` + `bitbucket-pipelines.yml` — containerized build environment and CI that
   produces the webOS `.ipk`. CI runs inside a prebuilt public image
   (`cubicattache/gnomecast-webos-build`); rebuild and push it with

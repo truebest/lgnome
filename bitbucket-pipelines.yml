@@ -20,11 +20,16 @@ pipelines:
           - "linux"
         script:
           - git config --global --add safe.directory '*'
-          - git submodule update --init third_party/backend_ndl third_party/IronRDP third_party/lvgl third_party/miniaudio
+          - git submodule update --init third_party/backend_ndl third_party/IronRDP
           - cargo fmt --manifest-path webrdp-min/Cargo.toml --check
           # Quoted: a plain YAML scalar ending in ':' parses as a mapping key.
           - "cargo test --manifest-path webrdp-min/Cargo.toml --features native --locked"
           - cargo test --manifest-path third_party/IronRDP/Cargo.toml -p ironrdp-dvc -p ironrdp-svc -p ironrdp-egfx -p ironrdp-capture-replay --locked --lib
+          - apt-get update
+          - apt-get install -y --no-install-recommends libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base
+          - cmake -S third_party/backend_ndl -B /tmp/lgnome-backend-gstreamer -DBACKEND_NDL_WITH_GSTREAMER=ON -DPKG_CONFIG_EXECUTABLE=/usr/bin/pkg-config
+          - cmake --build /tmp/lgnome-backend-gstreamer -j4
+          - ctest --test-dir /tmp/lgnome-backend-gstreamer --output-on-failure
           - ./tools/syntax-check-native.sh
           - cmake -S native -B /tmp/lgnome-native-build
           - cmake --build /tmp/lgnome-native-build

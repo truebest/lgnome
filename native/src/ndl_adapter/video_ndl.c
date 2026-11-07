@@ -1,4 +1,5 @@
 #include "video_backend.h"
+#include "native_time.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +23,9 @@ bool native_video_supports_hevc(void) {
 }
 
 struct NativeVideo {
+    bool diagnostics_enabled;
+    bool diagnostics_sampled;
+    NativeVideoDiagnostics diagnostics;
     uint16_t width;
     uint16_t height;
     uint16_t fps;
@@ -51,6 +55,9 @@ static NativeVideoResult native_video_open_stream(NativeVideo *video) {
         .codec = video->codec == NATIVE_VIDEO_CODEC_H265 ? BACKEND_NDL_VIDEO_H265 : BACKEND_NDL_VIDEO_H264,
         .width = video->width,
         .height = video->height,
+#ifdef LGNOME_TARGET_WEBOS
+        .app_type = video->codec == NATIVE_VIDEO_CODEC_H264 ? BACKEND_NDL_APP_RTC : BACKEND_NDL_APP_DEFAULT,
+#endif
     };
     /* fps is bookkeeping only: the NDL load info carries no frame rate. */
 
@@ -161,9 +168,56 @@ void native_video_close(NativeVideo *video) {
     free(video);
 }
 
-static NativeVideoResult native_video_feed_backend(NativeVideo *video, size_t annexb_len, bool decoder_seed);
+void native_video_set_diagnostics(NativeVideo *video, bool enabled) {
+    if (!video) return;
+    if (video->diagnostics_enabled != enabled) {
+        video->diagnostics_sampled = false;
+        memset(&video->diagnostics, 0, sizeof(video->diagnostics));
+    }
+    video->diagnostics_enabled = enabled;
+}
 
-NativeVideoResult native_video_feed(NativeVideo *video, const uint8_t *data, size_t len, uint64_t pts90k) {
+NativeVideoDiagnostics native_video_get_diagnostics(const NativeVideo *video, uint32_t now_ms) {
+    NativeVideoDiagnostics out = {0};
+    if (!video || !video->diagnostics_enabled) return out;
+    out = video->diagnostics;
+    if (now_ms - out.sampled_ms > 2000u) out.queue_valid = false;
+    return out;
+}
+
+NativeDecoderStats native_video_get_decoder_stats(const NativeVideo *video) {
+#ifdef LGNOME_WITH_NDL
+    if (video && video->diagnostics_enabled && video->video_opened)
+        return native_media_ndl_decoder_stats(video->media);
+#else
+    (void)video;
+#endif
+    return (NativeDecoderStats){0};
+}
+
+#ifdef LGNOME_WITH_NDL
+static void native_video_sample_diagnostics(NativeVideo *video) {
+    if (!video->diagnostics_enabled) return;
+    uint32_t now = native_monotonic_ms();
+    if (video->diagnostics_sampled && now - video->diagnostics.sampled_ms < 500u) return;
+    NativeVideoDiagnostics out = {.sampled_ms = now};
+    BackendNdlRuntimeStats stats = {0};
+    if (backend_ndl_get_runtime_stats(video->backend, &stats) == BACKEND_NDL_OK && stats.video_play_samples) {
+        out.timing_valid = true;
+        out.play_us_ewma = stats.video_play_us_ewma;
+        out.play_us_max = stats.video_play_us_max;
+        out.errors = stats.video_play_errors;
+    }
+    out.queue_valid = backend_ndl_get_video_render_buffer_length(video->backend, &out.queue_frames) ==
+                          BACKEND_NDL_OK && out.queue_frames >= 0;
+    video->diagnostics = out;
+    video->diagnostics_sampled = true;
+}
+#endif
+
+static NativeVideoResult native_video_feed_backend(NativeVideo *video, size_t annexb_len, bool decoder_seed, bool has_picture, bool decode_only);
+
+NativeVideoResult native_video_feed(NativeVideo *video, const uint8_t *data, size_t len, uint64_t pts90k, bool decode_only) {
     (void)pts90k;
     if (!video || !data || len == 0) {
         return NATIVE_VIDEO_ERROR;
@@ -187,7 +241,7 @@ NativeVideoResult native_video_feed(NativeVideo *video, const uint8_t *data, siz
             return NATIVE_VIDEO_ERROR;
         }
         memcpy(video->annexb, data, len);
-        return native_video_feed_backend(video, len, info.can_seed_decoder);
+        return native_video_feed_backend(video, len, info.can_seed_decoder, true, decode_only);
     }
 
     NativeH264Info info;
@@ -220,14 +274,16 @@ NativeVideoResult native_video_feed(NativeVideo *video, const uint8_t *data, siz
         return NATIVE_VIDEO_ERROR;
     }
 
-    return native_video_feed_backend(video, annexb_len, info.can_seed_decoder);
+    return native_video_feed_backend(video, annexb_len, info.can_seed_decoder, info.has_vcl, decode_only);
 }
 
-static NativeVideoResult native_video_feed_backend(NativeVideo *video, size_t annexb_len, bool decoder_seed) {
+static NativeVideoResult native_video_feed_backend(NativeVideo *video, size_t annexb_len, bool decoder_seed, bool has_picture, bool decode_only) {
 #ifndef LGNOME_WITH_NDL
     (void)video;
     (void)annexb_len;
     (void)decoder_seed;
+    (void)has_picture;
+    (void)decode_only;
     return NATIVE_VIDEO_UNSUPPORTED;
 #else
     bool backend_keyframe = decoder_seed;
@@ -242,9 +298,12 @@ static NativeVideoResult native_video_feed_backend(NativeVideo *video, size_t an
         }
     }
 
-    BackendNdlResult feed_result = backend_ndl_feed_video(video->backend, video->annexb, annexb_len,
-                                                          BACKEND_NDL_PTS_AUTO, backend_keyframe);
+    uint32_t flags = has_picture ? (decode_only ? BACKEND_NDL_VIDEO_DECODE_ONLY : 0)
+                                 : BACKEND_NDL_VIDEO_CONFIG_ONLY;
+    BackendNdlResult feed_result = backend_ndl_feed_video_ex(video->backend, video->annexb, annexb_len,
+                                                             BACKEND_NDL_PTS_AUTO, backend_keyframe, flags);
 
+    native_video_sample_diagnostics(video);
     switch (feed_result) {
         case BACKEND_NDL_OK:
             if (backend_keyframe) {

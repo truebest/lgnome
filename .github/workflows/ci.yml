@@ -20,7 +20,8 @@ jobs:
       - name: Install host dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake build-essential libgtest-dev
+          sudo apt-get install -y --no-install-recommends cmake build-essential libgtest-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-base
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -39,6 +40,13 @@ jobs:
 
       - name: Native C syntax check
         run: ./tools/syntax-check-native.sh
+
+      - name: GStreamer backend tests
+        run: |
+          cmake -S third_party/backend_ndl -B "$RUNNER_TEMP/backend-gstreamer" \
+            -DBACKEND_NDL_WITH_GSTREAMER=ON -DPKG_CONFIG_EXECUTABLE=/usr/bin/pkg-config
+          cmake --build "$RUNNER_TEMP/backend-gstreamer" -j"$(nproc)"
+          ctest --test-dir "$RUNNER_TEMP/backend-gstreamer" --output-on-failure
 
       - name: Native CMake build and ctest
         run: |

@@ -51,15 +51,24 @@ void native_session_supervisor_tick(App *app, NativePreconnectUi *ui) {
                 if (j != i && native_slot_is_live_stream_target(&app->sessions[j]) &&
                     atomic_load(&app->sessions[j].current_state) == (int)RDP_STATE_ACTIVE) {
                     survivor = j;
+                    if (j == app->pending_switch_target) {
+                        break;
+                    }
                 }
             }
             bool switched = false;
             if (survivor >= 0 && app->streaming_visible) {
+                if (app->pending_switch_target == survivor && app->pending_switch_graphics) {
+                    continue;
+                }
                 /* The session the user was WATCHING died: fall back to the survivor. */
                 clog(presentation.error ? cLogLevelWarning : cLogLevelInfo,
                      "%s; auto-switching video to the %s session", status, native_session_slot_name(survivor));
                 switched = native_complete_session_switch(app, survivor);
                 if (!switched) {
+                    if (app->pending_switch_target == survivor && app->pending_switch_graphics) {
+                        continue;
+                    }
                     survivor = -1;
                 }
             }

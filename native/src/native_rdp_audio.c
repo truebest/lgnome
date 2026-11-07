@@ -72,38 +72,7 @@ static void on_audio_format(void *ctx, uint32_t codec, uint32_t sample_rate, uin
          native_session_slot_name(slot->index), codec == RDP_AUDIO_CODEC_OPUS ? "Opus->PCM" : "PCM",
          (unsigned)sample_rate, (unsigned)channels);
 
-    pthread_mutex_lock(&app->video_lock);
-    pthread_mutex_lock(&app->audio_lock);
-    if (!app->audio) {
-        /* First working audio format and the speculative open didn't happen (or failed):
-         * bring the shared track up now. */
-        NativeMedia *media = native_ensure_media_locked(app);
-        if (media) {
-            app->audio = native_audio_open(media, RDP_AUDIO_CODEC_PCM_S16LE,
-                                           NATIVE_AUDIO_PIPELINE_SAMPLE_RATE,
-                                           NATIVE_AUDIO_PIPELINE_CHANNELS);
-        }
-        if (app->audio) {
-            if (app->video) {
-                /* First-time open under a live video stream reloads the shared pipeline
-                 * (webOS); drop the dead video track so on_video_au reopens it on the next
-                 * SPS+PPS+IDR instead of feeding P-frames into a fresh decoder — and ask
-                 * the SDL thread to force that keyframe (gnome-remote-desktop never
-                 * resends an IDR spontaneously). */
-                clog(cLogLevelNotice,
-                     "audio open reloaded the media pipeline; reopening video on next keyframe");
-                native_video_close(app->video);
-                app->video = NULL;
-                app->decoder_keyframe_pending = false;
-                atomic_store(&app->video_refresh_needed, true);
-            }
-        } else {
-            clog(cLogLevelWarning,
-                 "audio sink unavailable (PCM 48000Hz 2ch); continuing with silent video");
-        }
-    }
-    pthread_mutex_unlock(&app->audio_lock);
-    pthread_mutex_unlock(&app->video_lock);
+    atomic_store(&app->audio_open_requested, true);
 }
 
 static void on_audio_data(void *ctx, const uint8_t *data, size_t len, uint32_t ts_ms) {

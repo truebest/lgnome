@@ -234,9 +234,11 @@ static bool evdev_dispatch(NativeEvdevInput *input, const NativeEvdevDevice *dev
             return device->is_mouse ? evdev_dispatch_mouse(input, raw) : false;
         }
         /* Remote navigation keys can arrive on mouse-only nodes. */
-        bool remote_confirm = device->is_remote &&
-                              (raw->code == KEY_ENTER || raw->code == KEY_KPENTER || raw->code == KEY_OK);
-        if ((raw->code >= KEY_RED && raw->code <= KEY_CHANNELDOWN) || remote_confirm) {
+        bool remote_navigation = device->is_remote &&
+                                 (raw->code == KEY_ENTER || raw->code == KEY_KPENTER || raw->code == KEY_OK ||
+                                  raw->code == KEY_LEFT || raw->code == KEY_RIGHT || raw->code == KEY_UP ||
+                                  raw->code == KEY_DOWN || raw->code == KEY_BACK || raw->code == KEY_ESC);
+        if ((raw->code >= KEY_RED && raw->code <= KEY_CHANNELDOWN) || remote_navigation) {
             return evdev_dispatch_keyboard(input, device, raw);
         }
         return device->is_keyboard ? evdev_dispatch_keyboard(input, device, raw) : false;

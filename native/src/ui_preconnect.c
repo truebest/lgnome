@@ -175,6 +175,7 @@ NativePreconnectUi *native_preconnect_ui_create(SDL_Window *window,
     if (ui->key_indev && ui->group) {
         lv_indev_set_group(ui->key_indev, ui->group);
     }
+    ui_statistics_build(ui);
     /* A failed mixer create degrades gracefully: the live overlay remains unavailable. */
     ui->mixer = native_ui_mixer_create(renderer);
     native_ui_mixer_set_texture(ui->mixer, ui->texture);
@@ -201,6 +202,7 @@ void native_preconnect_ui_destroy(NativePreconnectUi *ui) {
     if (ui->root) {
         lv_obj_del(ui->root);
     }
+    if (ui->statistics_panel) lv_obj_del(ui->statistics_panel);
     native_ui_mixer_destroy(ui->mixer);
     native_ui_preconnect_theme_reset(ui);
     if (ui->disp) {
@@ -230,6 +232,7 @@ void native_preconnect_ui_resize(NativePreconnectUi *ui, int width, int height) 
     SDL_SetRenderTarget(ui->renderer, ui->texture);
     lv_disp_drv_update(ui->disp, &ui->disp_drv);
     native_ui_mixer_set_texture(ui->mixer, ui->texture);
+    ui->statistics_dirty = true;
     lv_obj_invalidate(lv_scr_act());
 }
 
@@ -238,6 +241,7 @@ void native_preconnect_ui_tick(NativePreconnectUi *ui) {
         return;
     }
     if (!ui->visible) {
+        if (ui->statistics_visible) return;
         if (ui->hidden_cleared) {
             return;
         }
@@ -265,6 +269,7 @@ void native_preconnect_ui_set_visible(NativePreconnectUi *ui, bool visible) {
      * a hidden BACK-up is consumed by the streaming loop and the stale PRESSED state
      * repeats as soon as HUB is shown again. */
     native_ui_preconnect_reset_input_state(ui);
+    if (visible) native_preconnect_ui_statistics_visible(ui, false);
     ui->visible = visible;
     ui->hidden_cleared = false;
     if (!visible) {

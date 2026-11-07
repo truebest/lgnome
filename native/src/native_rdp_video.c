@@ -3,6 +3,7 @@
 #include "native_rdp_callback_parts.h"
 
 #include <stdatomic.h>
+#include <stdlib.h>
 
 #include "h264_annexb.h"
 #include "native_app.h"
@@ -44,10 +45,12 @@ static void native_note_video_frame(App *app, NativeSessionSlot *slot, size_t le
         return;
     }
     clog(cLogLevelInfo,
-         "video: %u accepted AUs in %ums (%llu kbit/s, %.1f AU/s); shared decoder input, last_slot=%s, not displayed FPS",
+         "video: %u accepted AUs in %ums (%llu kbit/s, %.1f AU/s); shared decoder input, last_slot=%s, "
+         "slot_received=%u slot_auxiliary=%u slot_accepted=%u; not displayed FPS",
          app->video_frames_window, (unsigned)elapsed,
          (unsigned long long)(app->video_bytes_window * 8ull / elapsed),
-         (double)app->video_frames_window * 1000.0 / (double)elapsed, native_session_slot_name(slot->index));
+         (double)app->video_frames_window * 1000.0 / (double)elapsed, native_session_slot_name(slot->index),
+         slot->diagnostics.received, slot->diagnostics.received_auxiliary, slot->diagnostics.accepted);
     app->video_frames_window = 0;
     app->video_bytes_window = 0;
     app->video_pacing_window_ms = now_ms;
@@ -137,13 +140,14 @@ static void on_bitmap_update(void *ctx, uint16_t surface_id, uint32_t left, uint
     }
     NativeRgbaResult result = app->rgba ? native_rgba_surface_apply(app->rgba, left, top, width, height, stride, rgba, len)
                                         : NATIVE_RGBA_NOMEM;
-    pthread_mutex_unlock(&app->video_lock);
-
     if (result == NATIVE_RGBA_OK) {
         /* Bitmap frames satisfy the post-switch watchdog too, or a switch to a
          * RemoteFX-only server would reconnect despite frames arriving. */
-        atomic_fetch_add(&slot->video_ok_frames, 1u);
+        if (!slot->refresh_waiting) {
+            atomic_fetch_add(&slot->video_ok_frames, 1u);
+        }
     }
+    pthread_mutex_unlock(&app->video_lock);
     if (result != NATIVE_RGBA_OK) {
         app->decoder_errors++;
         clog(cLogLevelError,
@@ -165,11 +169,12 @@ static void native_note_video_stream(NativeSessionSlot *slot, bool valid_au) {
 }
 
 /* Shared ingest for live callbacks and snapshot replay. */
-void native_video_ingest_au_locked(NativeSessionSlot *slot, const uint8_t *data, size_t len, uint64_t pts90k) {
+void native_video_ingest_au_locked(NativeSessionSlot *slot, const uint8_t *data, size_t len, uint64_t pts90k, bool replay, bool decode_only) {
     if (!slot) {
         return;
     }
     App *app = slot->app;
+    native_diagnostics_counter_epoch(&slot->diagnostics, atomic_load(&slot->connect_epoch));
     bool valid_au;
     bool decoder_seed;
     if (slot->video_codec == NATIVE_VIDEO_CODEC_H265) {
@@ -185,9 +190,12 @@ void native_video_ingest_au_locked(NativeSessionSlot *slot, const uint8_t *data,
      * routing so a backgrounded stream classifies its slot too. */
     atomic_store(&slot->video_via_bitmap, false);
     native_note_video_stream(slot, valid_au);
+    if (slot->refresh_waiting && slot->snapshot.armed) {
+        return;
+    }
     /* Armed caches remain the handoff barrier after active_index is published. */
     if (slot->snapshot.armed) {
-        if (!native_au_snapshot_append(&slot->snapshot, data, len, valid_au, decoder_seed, pts90k)) {
+        if (!native_au_snapshot_append(&slot->snapshot, data, len, valid_au, decoder_seed, pts90k, decode_only)) {
             clog(cLogLevelWarning,
                  "%s AU snapshot invalidated (overflow or malformed AU); switch-to will reconnect",
                  native_session_slot_name(slot->index));
@@ -291,7 +299,7 @@ void native_video_ingest_au_locked(NativeSessionSlot *slot, const uint8_t *data,
     uint32_t feed_started_ms = native_monotonic_ms();
     app->video_last_feed_ms = feed_started_ms;
     app->video_feed_started = true;
-    NativeVideoResult result = native_video_feed(app->video, data, len, pts90k);
+    NativeVideoResult result = native_video_feed(app->video, data, len, pts90k, decode_only);
     uint32_t feed_finished_ms = native_monotonic_ms();
     uint32_t feed_ms = feed_finished_ms - feed_started_ms;
     if (feed_ms >= NATIVE_VIDEO_SLOW_FEED_MS) {
@@ -311,7 +319,11 @@ void native_video_ingest_au_locked(NativeSessionSlot *slot, const uint8_t *data,
     if (result == NATIVE_VIDEO_OK) {
         app->decoder_keyframe_pending = false;
         /* Signals the SDL thread that the freshly switched-to stream is decoding. */
-        atomic_fetch_add(&slot->video_ok_frames, 1u);
+        if (!slot->refresh_waiting) {
+            atomic_fetch_add(&slot->video_ok_frames, 1u);
+        }
+        if (replay) slot->diagnostics.replayed++;
+        else slot->diagnostics.accepted++;
         native_note_video_frame(app, slot, len, feed_finished_ms);
         return;
     }
@@ -327,7 +339,7 @@ void native_video_ingest_au_locked(NativeSessionSlot *slot, const uint8_t *data,
 }
 
 void native_video_ingest_au(NativeSessionSlot *slot, NativeVideoCodec codec, const uint8_t *data, size_t len,
-                           uint64_t pts90k) {
+                           uint64_t pts90k, bool decode_only) {
     if (!slot) {
         return;
     }
@@ -341,25 +353,57 @@ void native_video_ingest_au(NativeSessionSlot *slot, NativeVideoCodec codec, con
         slot->video_codec = codec;
         slot->video_seen = false;
     }
-    native_video_ingest_au_locked(slot, data, len, pts90k);
+    native_video_ingest_au_locked(slot, data, len, pts90k, false, decode_only);
     pthread_mutex_unlock(&slot->app->video_lock);
 }
 
-static void on_video_au(void *ctx, uint32_t codec, const uint8_t *data, size_t len, uint64_t pts90k) {
+static void on_video_au(void *ctx, uint32_t codec, uint32_t flags,
+                        const uint8_t *data, size_t len, uint64_t pts90k) {
     NativeSessionSlot *slot = (NativeSessionSlot *)ctx;
     if (!slot) {
         return;
     }
-    if (codec != RDP_VIDEO_CODEC_H264 && codec != RDP_VIDEO_CODEC_H265) {
+    if ((codec != RDP_VIDEO_CODEC_H264 && codec != RDP_VIDEO_CODEC_H265) ||
+        (flags & ~RDP_VIDEO_FLAG_AVC444_AUX) != 0 ||
+        (flags != 0 && codec != RDP_VIDEO_CODEC_H264)) {
         native_slot_report_terminal(slot, RDP_STATE_PROTOCOL_ERROR,
                                     rdp_state_exit_code(RDP_STATE_PROTOCOL_ERROR));
         return;
     }
+    pthread_mutex_lock(&slot->app->video_lock);
+    native_diagnostics_counter_epoch(&slot->diagnostics, atomic_load(&slot->connect_epoch));
+    slot->diagnostics.received++;
+    if (slot->diagnostics.received == 1 && codec == RDP_VIDEO_CODEC_H264) {
+        clog(cLogLevelInfo, "AVC444: feed metadata suppresses auxiliary output after hardware decode");
+    }
+    if (flags & RDP_VIDEO_FLAG_AVC444_AUX) {
+        slot->diagnostics.received_auxiliary++;
+        slot->diagnostics.bytes_auxiliary += len;
+    }
+    slot->diagnostics.bytes += len;
+    slot->diagnostics.last_au_ms = native_monotonic_ms();
+    slot->diagnostics.has_au = true;
+    slot->diagnostics.auxiliary |= (flags & RDP_VIDEO_FLAG_AVC444_AUX) != 0;
+    pthread_mutex_unlock(&slot->app->video_lock);
+    /* Both views share references and reach one decoder in wire order. */
     native_video_ingest_au(slot, codec == RDP_VIDEO_CODEC_H265 ? NATIVE_VIDEO_CODEC_H265 : NATIVE_VIDEO_CODEC_H264,
-                           data, len, pts90k);
+                           data, len, pts90k, (flags & RDP_VIDEO_FLAG_AVC444_AUX) != 0);
+}
+
+static void on_refresh_started(void *ctx, uint32_t cookie) {
+    NativeSessionSlot *slot = (NativeSessionSlot *)ctx;
+    if (!slot) {
+        return;
+    }
+    pthread_mutex_lock(&slot->app->video_lock);
+    if (cookie != 0 && cookie == slot->refresh_cookie) {
+        slot->refresh_waiting = false;
+    }
+    pthread_mutex_unlock(&slot->app->video_lock);
 }
 
 void native_rdp_install_video_callbacks(RdpCallbacks *callbacks) {
+    callbacks->on_refresh_started = on_refresh_started;
     callbacks->on_bitmap_update = on_bitmap_update;
     callbacks->on_video_au = on_video_au;
 }

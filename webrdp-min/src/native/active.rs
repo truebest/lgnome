@@ -10,6 +10,7 @@ use ironrdp_session::image::DecodedImage;
 use ironrdp_session::{ActiveStageBuilder, ActiveStageOutput};
 
 use super::egfx::NativeBitmapUnit;
+use super::graphics::Event;
 use super::input::ControlCommand;
 use super::transport::{is_timeout, monotonic_now, TlsStream};
 use super::{
@@ -22,6 +23,7 @@ impl NativeWorker {
         mut tls: TlsStream,
         result: ConnectionResult,
     ) -> Result<(), NativeError> {
+        self.network.begin(&mut tls.sock);
         self.phase_deadline = None;
         tls.sock.phase_deadline = None;
         let desktop_w = result.desktop_size.width;
@@ -35,11 +37,11 @@ impl NativeWorker {
             compression = ?result.compression_type,
             server_pointer = result.enable_server_pointer,
             "RDP activation complete; actual EGFX size and codec follow server graphics PDUs");
-        self.callbacks.desktop_size(desktop_w, desktop_h);
-        self.callbacks.emit_state(
+        self.graphics().submit(Event::Desktop(desktop_w, desktop_h));
+        self.graphics().submit(Event::State(
             RdpState::Active,
             format!("active {}x{} native AVC420/RemoteFX", desktop_w, desktop_h),
-        );
+        ));
 
         self.activation_factory = Some(result.activation_factory);
         let mut active = ActiveStageBuilder {
@@ -71,6 +73,7 @@ impl NativeWorker {
         }
 
         loop {
+            self.network.sample(&tls.sock);
             if self.stop.load(Ordering::SeqCst) {
                 return Ok(());
             }
@@ -80,6 +83,7 @@ impl NativeWorker {
                 return Ok(());
             }
             self.drain_gfx()?;
+            self.drain_graphics_acks(&mut tls, &mut active)?;
 
             while let Some(info) = ironrdp_pdu::find_size(&self.inbuf)
                 .map_err(|e| NativeError::protocol(format!("active PDU size: {e}")))?
@@ -89,11 +93,24 @@ impl NativeWorker {
                 }
                 let frame: Vec<u8> = self.inbuf.drain(..info.length).collect();
                 let outputs = active
-                    .process(&mut image, info.action, &frame)
+                    .process(&mut image, info.action, &frame, self.last_read_at)
                     .map_err(|e| NativeError::protocol(format!("active stage process: {e}")))?;
+                if let Some((width, height)) = active
+                    .get_dvc_mut::<super::graphics_channel::NativeGraphicsChannel>()
+                    .and_then(|mut channel| channel.processor_mut().take_output_reset())
+                {
+                    // Pointers live on the native cursor plane, outside this RGBA canvas.
+                    image = super::active_io::new_image(width, height)?;
+                    self.graphics_output_needs_full_refresh = true;
+                }
                 let deactivate = self.handle_active_outputs(&mut tls, &image, outputs)?;
                 self.drain_gfx()?;
                 self.recover_bitmap(&mut tls, &mut active, &image)?;
+                self.drain_graphics_acks(&mut tls, &mut active)?;
+                self.drain_input(&mut tls, &mut active, &mut image)?;
+                if self.stop.load(Ordering::SeqCst) {
+                    return Ok(());
+                }
 
                 if deactivate {
                     self.drive_reactivation(&mut tls, &mut active, &mut image)?;
@@ -131,6 +148,7 @@ impl NativeWorker {
                     return Err(NativeError::disconnect(reason));
                 }
                 ActiveStageOutput::DeactivateAll => deactivate = true,
+                ActiveStageOutput::AutoDetect(report) => self.network.report(report),
                 ActiveStageOutput::GraphicsUpdate(rect) => {
                     self.forward_slowpath_bitmap(image, &rect);
                 }
@@ -143,7 +161,7 @@ impl NativeWorker {
                     }
                 }
                 ActiveStageOutput::PointerPosition { x, y } => {
-                    self.callbacks.pointer_position(x, y);
+                    self.graphics().submit(Event::PointerPosition(x, y));
                 }
                 ActiveStageOutput::PointerHidden => {
                     self.callbacks.pointer_state(RDP_POINTER_STATE_HIDDEN);
@@ -159,10 +177,22 @@ impl NativeWorker {
 
     /// data_for_rect retains the full image stride, not the rectangle width.
     fn forward_slowpath_bitmap(&mut self, image: &DecodedImage, rect: &InclusiveRectangle) {
+        let full_rect;
+        let rect = if std::mem::take(&mut self.graphics_output_needs_full_refresh) {
+            full_rect = InclusiveRectangle {
+                left: 0,
+                top: 0,
+                right: image.width() - 1,
+                bottom: image.height() - 1,
+            };
+            &full_rect
+        } else {
+            rect
+        };
         let width = u32::from(rect.width());
         let height = u32::from(rect.height());
         if width > 0 && height > 0 {
-            self.callbacks.bitmap_update(&NativeBitmapUnit {
+            self.graphics().submit(Event::Bitmap(NativeBitmapUnit {
                 surface_id: 0,
                 left: u32::from(rect.left),
                 top: u32::from(rect.top),
@@ -170,7 +200,45 @@ impl NativeWorker {
                 height,
                 stride: image.stride() as u32,
                 data: image.data_for_rect(rect).to_vec(),
-            });
+            }));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn first_bitmap_after_graphics_reset_covers_the_new_canvas() {
+        let (mut worker, _tx) = super::super::tests::test_worker();
+        let image = super::super::active_io::new_image(64, 32).unwrap();
+        worker.graphics_output_needs_full_refresh = true;
+        let rect = InclusiveRectangle {
+            left: 2,
+            top: 3,
+            right: 4,
+            bottom: 5,
+        };
+        worker.forward_slowpath_bitmap(&image, &rect);
+        worker.forward_slowpath_bitmap(&image, &rect);
+        let updates = worker.graphics().bitmaps();
+        assert_eq!(
+            (
+                updates[0].left,
+                updates[0].top,
+                updates[0].width,
+                updates[0].height
+            ),
+            (0, 0, 64, 32)
+        );
+        assert_eq!(
+            (
+                updates[1].left,
+                updates[1].top,
+                updates[1].width,
+                updates[1].height
+            ),
+            (2, 3, 3, 3)
+        );
     }
 }

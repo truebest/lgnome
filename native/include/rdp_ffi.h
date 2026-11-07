@@ -92,8 +92,12 @@ typedef struct RdpConfig {
     uint16_t camera_fps;
     /* 100, 150 or 200 percent; zero-initialized callers default to 100. */
     uint16_t desktop_scale_factor;
+    /* SHA-256 hex for this host/port, or NULL/empty for normal PKI verification. */
+    const char *trusted_certificate_sha256;
 } RdpConfig;
 
+/* Graphics callbacks are serial per session and may overlap network/audio callbacks.
+ * Callback payloads are borrowed until return; ctx must outlive rdp_session_stop(). */
 typedef struct RdpCallbacks {
     void *ctx;
     void (*on_state)(void *ctx, RdpState state, RdpDisconnectReason reason, const char *detail);
@@ -104,9 +108,9 @@ typedef struct RdpCallbacks {
     bool (*on_log_enabled)(void *ctx, RdpLogLevel level);
     void (*on_log)(void *ctx, RdpLogLevel level, const char *target, const char *message);
     void (*on_desktop_size)(void *ctx, uint16_t width, uint16_t height);
-    /* codec takes RdpVideoCodec values for this AU. H.264 accepts AVC/Annex-B;
+    /* codec takes RdpVideoCodec values; flags takes RDP_VIDEO_FLAG_* for this AU. H.264 accepts AVC/Annex-B;
      * HEVC uses Annex-B. Bytes are valid only during this synchronous callback. */
-    void (*on_video_au)(void *ctx, uint32_t codec, const uint8_t *data, size_t len, uint64_t pts90k);
+    void (*on_video_au)(void *ctx, uint32_t codec, uint32_t flags, const uint8_t *data, size_t len, uint64_t pts90k);
     void (*on_bitmap_update)(void *ctx, uint16_t surface_id, uint32_t left, uint32_t top, uint32_t width,
                              uint32_t height, uint32_t stride, const uint8_t *rgba, size_t len);
     /* codec takes RdpAudioCodec values. Fired before the first on_audio_data of a stream
@@ -132,7 +136,14 @@ typedef struct RdpCallbacks {
     void (*on_audio_input_start)(void *ctx, uint64_t generation, uint32_t sample_rate,
                                  uint16_t channels, uint32_t frames_per_packet);
     void (*on_audio_input_stop)(void *ctx, uint64_t generation);
+    /* Refresh cookie echoed at the worker request boundary, before subsequent AUs. */
+    void (*on_refresh_started)(void *ctx, uint32_t cookie);
+    /* Borrowed strings. Worker waits for rdp_confirm_certificate before CredSSP.
+     * No callback means reject. This callback must return without waiting for UI. */
+    void (*on_certificate)(void *ctx, const char *sha256, const char *reason);
 } RdpCallbacks;
+
+enum { RDP_VIDEO_FLAG_AVC444_AUX = 1u };
 
 /* Values shared with RDP_POINTER_STATE_* constants in webrdp-min/src/native/abi.rs. */
 enum {
@@ -142,8 +153,48 @@ enum {
 
 typedef struct RdpSession RdpSession;
 
+/* Timestamps share the Rust monotonic domain; observed_ms is set by the getter.
+ * tcp_valid bits 0..5: SRTT, RTTVAR, RTO, unacked, cwnd, total retransmits. */
+typedef struct RdpNetworkStats {
+    uint64_t generation;
+    uint64_t sampled_ms;
+    uint64_t observed_ms;
+    uint64_t started_ms;
+    uint64_t rx_bytes;
+    uint64_t tx_bytes;
+    uint64_t last_rx_ms;
+    uint64_t report_ms;
+    uint64_t base_rtt_ms_at;
+    uint64_t bandwidth_ms_at;
+    uint64_t reports;
+    uint32_t active;
+    uint32_t rate_valid;
+    uint32_t rx_kbps;
+    uint32_t tx_kbps;
+    uint32_t average_rtt_ms;
+    uint32_t base_rtt_ms;
+    uint32_t bandwidth_kbps;
+    uint32_t tcp_valid;
+    uint32_t tcp_srtt_us;
+    uint32_t tcp_rttvar_us;
+    uint32_t tcp_rto_us;
+    uint32_t tcp_unacked;
+    uint32_t tcp_cwnd;
+    uint32_t tcp_retransmits;
+} RdpNetworkStats;
+
+/* Nonblocking copy. Returns 0 if absent/busy; output is zeroed. Session lifetime
+ * must be held by caller, as for the other session entry points. */
+int rdp_session_get_network_stats(RdpSession *session, RdpNetworkStats *out);
+
 RdpSession *rdp_session_start(const RdpConfig *config, const RdpCallbacks *callbacks);
 void rdp_session_stop(RdpSession *session);
+/* Wait for previously accepted graphics callbacks, including a running callback.
+ * Call outside callbacks and media locks, with no concurrent session stop.
+ * False means timed out: do not replay or release callback resources. */
+bool rdp_graphics_barrier(RdpSession *session, uint32_t timeout_ms);
+/* Returns false for a stale/nonmatching request; stop always cancels the wait. */
+bool rdp_confirm_certificate(RdpSession *session, const char *sha256, bool accept);
 
 void rdp_send_pointer_move(RdpSession *session, uint16_t x, uint16_t y);
 void rdp_send_pointer_button(RdpSession *session, uint16_t x, uint16_t y, uint8_t button, bool down);
@@ -157,10 +208,10 @@ void rdp_send_sync(RdpSession *session, bool scroll_lock, bool num_lock, bool ca
  * true resumes it. gnome-remote-desktop resumes with a delta frame, not a keyframe —
  * pair with rdp_request_refresh when the local decoder lost its state. */
 void rdp_set_suppress_output(RdpSession *session, bool allow_display);
-/* Ask the server for a fresh full frame/keyframe: re-submits the monitor layout on the
- * Display Control DVC (forces gnome-remote-desktop to rebuild its encode session ->
- * RESET_GRAPHICS + IDR) and sends a classic full-screen Refresh Rect. */
-void rdp_request_refresh(RdpSession *session);
+/* Ask for a fresh full frame/keyframe by resetting the graphics channel when supported,
+ * otherwise send a full-screen Refresh Rect. Does not change the monitor layout.
+ * cookie is echoed by on_refresh_started; use zero when no frame gate is waiting. */
+void rdp_request_refresh(RdpSession *session, uint32_t cookie);
 /* Advertise/remove the configured physical camera on an already connected session. */
 void rdp_set_camera_available(RdpSession *session, bool available);
 /* Allows outgoing camera/microphone payload only for the foreground session. Closing
