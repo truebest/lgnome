@@ -21,7 +21,7 @@ clog_define(g_native_log_switch_recovery, cLogLevelInfo, "native");
 
 void native_background_slot(App *app, int index) {
     NativeSessionSlot *slot = &app->sessions[index];
-    if (!slot->rdp || slot->suppressed) {
+    if (!slot->rdp || slot->suppressed || slot->snapshot_pending) {
         return;
     }
     bool snapshot_wanted = (slot->refresh_ineffective || app->snapshot_force) &&
@@ -55,6 +55,27 @@ void native_background_slot(App *app, int index) {
         }
         return;
     }
+    if (atomic_load(&slot->current_state) == (int)RDP_STATE_ACTIVE &&
+        !atomic_load(&slot->video_via_bitmap) && !NATIVE_SWITCH_TEST_NO_RECONNECT) {
+        pthread_mutex_lock(&app->video_lock);
+        bool armed = native_au_snapshot_arm(&slot->snapshot);
+        slot->refresh_waiting = armed;
+        uint32_t cookie = ++slot->refresh_cookie;
+        if (cookie == 0) {
+            cookie = ++slot->refresh_cookie;
+        }
+        atomic_store(&slot->snapshot_idr_ready, false);
+        pthread_mutex_unlock(&app->video_lock);
+        if (armed) {
+            /* Cache the return IDR while the other desktop is visible. */
+            slot->snapshot_pending = true;
+            slot->snapshot_deadline_ticks = 0;
+            /* The HUB connect path may have suppressed the server before demotion. */
+            rdp_set_suppress_output(slot->rdp, true);
+            rdp_request_refresh(slot->rdp, cookie);
+            return;
+        }
+    }
     /* Works for a still-CONNECTING slot too: the Rust worker buffers control commands
      * and replays them once the session goes active, so a slot left mid-handshake still
      * comes up backgrounded (suppressed) instead of streaming video nobody displays. */
@@ -65,6 +86,10 @@ void native_background_slot(App *app, int index) {
 /* SDL thread: replay only while target is active, suppressed and quiet.
  * Returns true if the decoder accepted the replay; resume output afterwards. */
 bool native_snapshot_replay(App *app, int target) {
+    if (!rdp_graphics_barrier(app->sessions[target].rdp, 500)) {
+        clog(cLogLevelError, "graphics callback barrier timed out before snapshot replay");
+        return false;
+    }
     NativeSessionSlot *slot = &app->sessions[target];
     NativeAuSnapshot snap;
     pthread_mutex_lock(&app->video_lock);
@@ -89,7 +114,7 @@ bool native_snapshot_replay(App *app, int target) {
     unsigned baseline = atomic_load(&slot->video_ok_frames);
     for (unsigned i = 0; i < snap.count; i++) {
         const NativeAuSnapshotEntry *entry = &snap.entries[i];
-        native_video_ingest_au_locked(slot, snap.buf + entry->offset, entry->len, entry->pts90k);
+        native_video_ingest_au_locked(slot, snap.buf + entry->offset, entry->len, entry->pts90k, true, entry->decode_only);
         if (!atomic_load(&app->running) || atomic_load(&slot->session_failed)) {
             break; /* a terminal feed error stopped the slot (or app); the drain owns it */
         }
@@ -112,6 +137,7 @@ void native_prepare_pending_switch(App *app, int target) {
     }
     bool reconnect = (slot->refresh_ineffective || app->snapshot_force) && !NATIVE_SWITCH_TEST_NO_RECONNECT;
     bool armed;
+    uint32_t cookie = 0;
     if (reconnect) {
         clog(cLogLevelNotice,
              "reconnecting the %s session in the background for the deferred switch",
@@ -133,9 +159,14 @@ void native_prepare_pending_switch(App *app, int target) {
     } else {
         /* No reconnect: the suppressed connection emits nothing until the resume below,
          * which is sent only after the cache is armed. */
-        atomic_store(&slot->snapshot_idr_ready, false);
         pthread_mutex_lock(&app->video_lock);
         armed = native_au_snapshot_arm(&slot->snapshot);
+        atomic_store(&slot->snapshot_idr_ready, false);
+        slot->refresh_waiting = armed;
+        cookie = ++slot->refresh_cookie;
+        if (cookie == 0) {
+            cookie = ++slot->refresh_cookie;
+        }
         pthread_mutex_unlock(&app->video_lock);
     }
     if (!armed) {
@@ -143,7 +174,6 @@ void native_prepare_pending_switch(App *app, int target) {
          * splash covers the reload) rather than leaving the press unanswered. */
         clog(cLogLevelWarning, "%s AU snapshot allocation failed; switching immediately",
              native_session_slot_name(target));
-        app->pending_switch_target = -1;
         native_complete_session_switch(app, target);
         return;
     }
@@ -152,7 +182,7 @@ void native_prepare_pending_switch(App *app, int target) {
     slot->suppressed = false;
     if (!reconnect) {
         rdp_set_suppress_output(slot->rdp, true);
-        rdp_request_refresh(slot->rdp);
+        rdp_request_refresh(slot->rdp, cookie);
     }
 }
 

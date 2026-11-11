@@ -11,14 +11,15 @@ typedef struct App App;
 typedef struct NativeSessionSlot NativeSessionSlot;
 
 void native_background_slot(App *app, int index);
+/* Busy graphics keeps the target pending; true means the target owns video. */
 bool native_complete_session_switch(App *app, int target);
 void native_show_hub(App *app);
 void native_show_slot_configurator(App *app, int target);
 void native_request_session_switch(App *app, int target);
 void native_ring_switch(App *app, int direction);
 void native_switch_tick(App *app);
-/* Keyframe watchdog, in two halves around the resume/refresh requests:
- * baseline BEFORE them, start the window AFTER they are on the wire. */
+/* Arm the refresh cookie/frame gate and watchdog baseline before resume/refresh;
+ * start the timeout after submitting the request with active->refresh_cookie. */
 void native_switch_watchdog_baseline(App *app, NativeSessionSlot *active);
 void native_switch_watchdog_start(App *app, uint32_t timeout_ms);
 

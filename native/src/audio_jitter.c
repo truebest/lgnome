@@ -41,6 +41,7 @@ void native_audio_jitter_reset(NativeAudioJitterController *controller, uint32_t
 void native_audio_jitter_mark_discontinuity(NativeAudioJitterController *controller) {
     if (controller) {
         controller->have_arrival = false;
+        controller->pending_variation_ms = 0;
     }
 }
 
@@ -82,7 +83,6 @@ static uint32_t jitter_p95(const NativeAudioJitterController *controller) {
 }
 
 static uint32_t jitter_add(NativeAudioJitterController *controller, uint32_t now_ms, uint32_t variation_ms) {
-    jitter_expire(controller, now_ms);
     if (controller->count == NATIVE_AUDIO_JITTER_SAMPLES) {
         jitter_remove_oldest(controller);
     }
@@ -107,6 +107,7 @@ NativeAudioJitterUpdate native_audio_jitter_update(NativeAudioJitterController *
     if (!controller) {
         return update;
     }
+    jitter_expire(controller, now_ms);
     update.jitter_p95_ms = jitter_p95(controller);
 
     uint32_t duration_ms = sample_rate ? (uint32_t)(((uint64_t)frames * 1000u + sample_rate / 2u) / sample_rate) : 0;
@@ -116,8 +117,18 @@ NativeAudioJitterUpdate native_audio_jitter_update(NativeAudioJitterController *
     uint32_t cadence_target = clamp_u32(duration_ms + NATIVE_AUDIO_JITTER_TARGET_HEADROOM_MS,
                                         NATIVE_AUDIO_JITTER_TARGET_MIN_MS, NATIVE_AUDIO_JITTER_TARGET_MAX_MS);
 
-    if (!controller->have_arrival) {
+    uint32_t arrival_delta = now_ms - controller->last_arrival_ms;
+    uint32_t timestamp_delta = timestamp_ms - controller->last_timestamp_ms;
+    bool timed = timestamp_ms != 0 && controller->last_timestamp_ms != 0 &&
+                 timestamp_delta != 0 && timestamp_delta <= NATIVE_AUDIO_JITTER_LONG_GAP_MS;
+    /* Without a media clock, a drained queue can also mean server-suppressed silence. */
+    bool untimed_restart = controller->have_arrival && underruns != controller->seen_underruns && !timed &&
+                           arrival_delta <= NATIVE_AUDIO_JITTER_LONG_GAP_MS;
+    if (!controller->have_arrival || untimed_restart) {
+        controller->pending_variation_ms = untimed_restart && arrival_delta > duration_ms
+            ? arrival_delta - duration_ms : 0;
         controller->have_arrival = true;
+        controller->seen_underruns = underruns;
         controller->last_arrival_ms = now_ms;
         controller->last_timestamp_ms = timestamp_ms;
         controller->last_target_change_ms = now_ms;
@@ -128,28 +139,27 @@ NativeAudioJitterUpdate native_audio_jitter_update(NativeAudioJitterController *
         return update;
     }
 
-    uint32_t arrival_delta = now_ms - controller->last_arrival_ms;
     if (arrival_delta > NATIVE_AUDIO_JITTER_LONG_GAP_MS) {
+        controller->pending_variation_ms = 0;
         jitter_samples_clear(controller);
         update.jitter_p95_ms = 0;
         update.target_delay_ms = cadence_target > NATIVE_AUDIO_JITTER_TARGET_INITIAL_MS
                                      ? cadence_target : NATIVE_AUDIO_JITTER_TARGET_INITIAL_MS;
         update.target_action = NATIVE_AUDIO_JITTER_TARGET_SET;
         update.talkspurt = true;
+        controller->seen_underruns = underruns;
         controller->last_target_change_ms = now_ms;
         controller->last_arrival_ms = now_ms;
         controller->last_timestamp_ms = timestamp_ms;
         return update;
     }
 
-    uint32_t expected_ms = duration_ms;
-    if (timestamp_ms != 0 && controller->last_timestamp_ms != 0) {
-        uint32_t timestamp_delta = timestamp_ms - controller->last_timestamp_ms;
-        if (timestamp_delta != 0 && timestamp_delta <= NATIVE_AUDIO_JITTER_LONG_GAP_MS) {
-            expected_ms = timestamp_delta;
-        }
-    }
+    uint32_t expected_ms = timed ? timestamp_delta : duration_ms;
     uint32_t variation_ms = arrival_delta > expected_ms ? arrival_delta - expected_ms : expected_ms - arrival_delta;
+    /* Only rapid catch-up makes the preceding untimed gap a jitter sample. */
+    if (arrival_delta < duration_ms / 2 && controller->pending_variation_ms > variation_ms)
+        variation_ms = controller->pending_variation_ms;
+    controller->pending_variation_ms = 0;
     update.jitter_p95_ms = jitter_add(controller, now_ms, variation_ms);
 
     if (underruns != controller->seen_underruns) {
@@ -157,10 +167,6 @@ NativeAudioJitterUpdate native_audio_jitter_update(NativeAudioJitterController *
         controller->last_target_change_ms = now_ms;
     }
 
-    if (expected_ms > duration_ms) {
-        cadence_target = clamp_u32(expected_ms + NATIVE_AUDIO_JITTER_TARGET_HEADROOM_MS,
-                                   NATIVE_AUDIO_JITTER_TARGET_MIN_MS, NATIVE_AUDIO_JITTER_TARGET_MAX_MS);
-    }
     uint32_t peak_target = clamp_u32(variation_ms + NATIVE_AUDIO_JITTER_TARGET_HEADROOM_MS,
                                      NATIVE_AUDIO_JITTER_TARGET_MIN_MS, NATIVE_AUDIO_JITTER_TARGET_MAX_MS);
     if (cadence_target > peak_target) {

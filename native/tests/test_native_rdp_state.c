@@ -24,6 +24,7 @@ static App *app_create(bool interactive_ui) {
     atomic_store(&app->exit_code, 0);
     atomic_store(&app->active_index, 0);
     assert(pthread_mutex_init(&app->redaction_lock, NULL) == 0);
+    assert(pthread_mutex_init(&app->video_lock, NULL) == 0);
     for (int i = 0; i < NATIVE_SETTINGS_MAX_SESSIONS; i++) {
         app->sessions[i].app = app;
         app->sessions[i].index = i;
@@ -33,6 +34,7 @@ static App *app_create(bool interactive_ui) {
 
 static void app_destroy(App *app) {
     (void)pthread_mutex_destroy(&app->redaction_lock);
+    (void)pthread_mutex_destroy(&app->video_lock);
     free(app);
 }
 

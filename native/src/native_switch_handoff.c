@@ -37,10 +37,21 @@ bool native_complete_session_switch(App *app, int target) {
         native_show_session_indicator(app, target);
         return true;
     }
+    if (!rdp_graphics_barrier(app->sessions[old_index].rdp, 500) ||
+        !rdp_graphics_barrier(target_slot->rdp, 500)) {
+        if (app->pending_switch_target != target || !app->pending_switch_graphics) {
+            clog(cLogLevelDebug, "deferring the switch to %s until graphics callbacks complete",
+                 native_session_slot_name(target));
+        }
+        app->pending_switch_target = target;
+        app->pending_switch_graphics = true;
+        return false;
+    }
     clog(cLogLevelNotice, "switching video %s -> %s", native_session_slot_name(old_index),
          native_session_slot_name(target));
     /* Any switch that actually happens supersedes a deferred one still in flight. */
     app->pending_switch_target = -1;
+    app->pending_switch_graphics = false;
     /* Reachable with the overlay up via the auto-switch on a died session. */
     native_mixer_overlay_hide(app);
 
@@ -120,8 +131,10 @@ bool native_complete_session_switch(App *app, int target) {
                                             rdp_state_exit_code(RDP_STATE_NETWORK_ERROR));
             }
         } else {
+            native_switch_watchdog_baseline(app, target_slot);
+            switch_baseline = app->switch_baseline_frames;
             rdp_set_suppress_output(target_slot->rdp, true);
-            rdp_request_refresh(target_slot->rdp);
+            rdp_request_refresh(target_slot->rdp, target_slot->refresh_cookie);
         }
     }
 

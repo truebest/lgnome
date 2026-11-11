@@ -21,6 +21,12 @@ void native_slot_record_state(NativeSessionSlot *slot, RdpState state, RdpDiscon
     atomic_store(&slot->current_state, (int)state);
     if (state == RDP_STATE_RECONNECTING) {
         atomic_store(&slot->reconnecting, true);
+        pthread_mutex_lock(&slot->app->video_lock);
+        unsigned generation = slot->diagnostics.generation + 1u;
+        memset(&slot->diagnostics, 0, sizeof(slot->diagnostics));
+        slot->diagnostics.epoch = atomic_load(&slot->connect_epoch);
+        slot->diagnostics.generation = generation;
+        pthread_mutex_unlock(&slot->app->video_lock);
     } else if (state == RDP_STATE_ACTIVE) {
         atomic_store(&slot->reconnecting, false);
         atomic_store(&slot->was_active, true);

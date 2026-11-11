@@ -220,10 +220,8 @@ if [[ "$skip_build" != "1" ]]; then
   sdk="$(cd "$(dirname "$toolchain")/../.." && pwd)"
 
   if [[ ! -f "$repo_root/third_party/backend_ndl/CMakeLists.txt" ||
-        ! -f "$repo_root/third_party/IronRDP/Cargo.toml" ||
-        ! -f "$repo_root/third_party/lvgl/CMakeLists.txt" ||
-        ! -f "$repo_root/third_party/miniaudio/miniaudio.c" || ! -f "$repo_root/third_party/miniaudio/miniaudio.h" ]]; then
-    fail "native submodules are not initialized; run: git submodule update --init third_party/backend_ndl third_party/IronRDP third_party/lvgl third_party/miniaudio"
+        ! -f "$repo_root/third_party/IronRDP/Cargo.toml" ]]; then
+    fail "native submodules are not initialized; run: git submodule update --init third_party/backend_ndl third_party/IronRDP"
   fi
 
   native_cargo_graph="$(cargo tree --manifest-path "$repo_root/webrdp-min/Cargo.toml" --features native --locked)" ||

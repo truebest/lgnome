@@ -15,6 +15,7 @@ impl NativeError {
             other => Self {
                 state: RdpState::Disconnected,
                 reason: RdpDisconnectReason::PeerDisconnected,
+                retry_certificate: false,
                 retry_handoff: matches!(
                     other,
                     GracefulDisconnectReason::UserInitiated
@@ -66,6 +67,7 @@ impl NativeError {
                 RdpState::ProtocolError
             },
             reason,
+            retry_certificate: false,
             retry_handoff: matches!(
                 info,
                 ErrorInfo::ProtocolIndependentCode(Code::RpcInitiatedDisconnect)
